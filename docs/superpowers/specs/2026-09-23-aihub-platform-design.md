@@ -135,17 +135,17 @@ aihub-platform/
 
 | 层 | 选型 | 说明 |
 |---|---|---|
-| 语言/运行时 | JDK 21 (LTS) | Spring Boot 3 最低要求 JDK 17 |
-| 框架 | Spring Boot 3.2+，Maven 多模块 | admin 用 Spring MVC，gateway 用 WebFlux |
-| 持久层 | MyBatis-Plus + MySQL 8 | 沿用已有 MyBatis 技能 |
-| 数据库迁移 | Flyway | 建表脚本纳入版本控制 |
+| 语言/运行时 | 编译目标 Java 21（`maven.compiler.release=21`），运行于本机已装的 JDK 25.0.2 | Spring Boot 3.5.16 官方支持 Java 17–25；编译目标锁 21 以与多数公司环境一致 |
+| 框架 | Spring Boot **3.5.16**，Maven 3.9.12 多模块 | admin 用 Spring MVC，gateway 用 WebFlux |
+| 持久层 | MyBatis-Plus **3.5.17**（`mybatis-plus-spring-boot3-starter`）+ MySQL 8 | 沿用已有 MyBatis 技能 |
+| 数据库迁移 | Flyway（版本由 Spring Boot BOM 管理，需额外引入 `flyway-mysql`） | 建表脚本纳入版本控制 |
 | 缓存 | Redis 7（Lettuce）+ Caffeine | 两级缓存 |
 | 消息 | RabbitMQ 3.13 | 削峰、死信、幂等消费 |
 | 鉴权 | JWT（管理台）+ API Key（数据面） | 两套体系互不混用 |
 | 加密 | AES-GCM（渠道密钥）+ bcrypt（用户口令）+ SHA-256（API Key 哈希） | 见 6.1 |
 | 上游客户端 | WebClient（Reactor Netty） | 支持流式 |
 | 前端 | 极简管理台 | 渠道、配额、文档三个页面 |
-| 测试 | JUnit 5 + Mockito + Testcontainers + WireMock | 见第 9 节 |
+| 测试 | JUnit 5 + Mockito + Testcontainers（版本由 Spring Boot BOM 管理） | 用真实 MySQL/Redis/RabbitMQ 容器跑集成测试；WireMock 在 M3 引入时再锁定版本 |
 | 压测 | k6 或 JMeter | 产出量化数据 |
 | 可观测 | Micrometer + Prometheus + Grafana（可选加分项） | 指标：QPS、P99、TTFT、限流拒绝数 |
 | 部署 | Docker Compose | 一条命令起全栈 |
