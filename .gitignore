@@ -1,0 +1,19 @@
+# Build outputs
+target/
+*.jar
+*.war
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.iws
+
+# Env & secrets
+.env
+.env.local
+*.pem
+
+# Runtime data
+logs/
+data/
