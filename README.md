@@ -17,7 +17,7 @@
 - [ ] **M5 异步流水线**：文档上传 → 解析 → 嵌入 → 向量库
 - [ ] **M6 压测与打磨**：压测报告、故障注入报告、上线
 
-**验收状态**：代码、单元/集成测试（16 项通过）与两个服务的 `/healthz` 均已验证。Docker Compose 的基础设施服务（MySQL / Redis / RabbitMQ）已在本机验证以 `healthy` 状态启动，发布端口与约定一致，容器内探测全部通过（`redis-cli ping` → `PONG`，`rabbitmq-diagnostics -q ping` → succeeded，`mysqladmin ping` → `mysqld is alive`）。admin / gateway 的容器镜像构建尚未在作者机器上端到端验证（该机器无法访问容器镜像仓库），需在可访问镜像仓库的机器上执行 `docker compose up -d --build` 复核。
+**验收状态**：代码与单元/集成测试（16 项通过）已验证，admin / gateway 两个服务的 `/healthz` 亦均已验证。Docker Compose 全栈已实际构建并启动：`docker compose up -d --build` 成功，两个服务镜像构建完成，五个服务全部启动，其中 MySQL / Redis / RabbitMQ 为 `healthy`，发布端口与约定一致；admin 与 gateway 的 `/healthz` 实测返回 `status: UP`（含 `redis`、`rabbit` 组件 `UP`）。`docker compose down` 正常退出，无残留容器。计划中的 M0 验收标准「`docker compose up` 起全栈，`/healthz` 通」已满足。
 
 ## 技术栈
 
