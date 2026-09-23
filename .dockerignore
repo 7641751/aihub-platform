@@ -1,0 +1,9 @@
+**/target
+**/.git
+**/.idea
+**/*.iml
+.env
+logs
+docs
+.m2repo/
+.superpowers/
