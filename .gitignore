@@ -17,3 +17,9 @@ target/
 # Runtime data
 logs/
 data/
+
+# Maven local repository (kept in-tree by .mvn/maven.config so the build is hermetic)
+.m2repo/
+
+# Agent workspace
+.superpowers/
