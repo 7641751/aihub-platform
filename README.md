@@ -42,9 +42,13 @@ docker compose up -d --build
 
 ### 方式二：本机运行
 
-需要 JDK 21+（编译目标为 21）、Maven 3.9+（本仓库不使用 Maven wrapper），以及本机可访问的 MySQL / Redis / RabbitMQ —— 可以直接用 `docker compose up -d mysql redis rabbitmq` 只起基础设施。
+需要 JDK 21+（编译目标为 21）、Maven 3.9+（本仓库不使用 Maven wrapper），以及本机可访问的 MySQL / Redis / RabbitMQ。
+
+用 Docker 只起基础设施前，**必须先有 `.env`**：`docker-compose.yml` 里的 `MYSQL_ROOT_PASSWORD` / `MYSQL_PASSWORD` / `RABBITMQ_PASSWORD` 都是 `${VAR:?...}` 必填插值，缺少 `.env` 时任何 `docker compose` 命令都会立即报错退出。此外 `.env.example` 给的 `MYSQL_PASSWORD=change-me`、`RABBITMQ_PASSWORD=change-me` 与 admin 端默认口令不一致（`aihub-admin/aihub-web/src/main/resources/application.yml` 的 `spring.datasource.password`、`spring.rabbitmq.password` 默认均为 `aihub`），照抄会让下面的 `java -jar` 在数据源 / Flyway 启动阶段因 access denied 失败；因此复制后要把 `.env` 里这两项改成 `aihub`（若想保留 `change-me`，则启动时用 `SPRING_DATASOURCE_PASSWORD` / `SPRING_RABBITMQ_PASSWORD` 指回 `.env` 的值）。
 
 ```powershell
+Copy-Item .env.example .env   # 再把 MYSQL_PASSWORD / RABBITMQ_PASSWORD 改为 aihub
+docker compose up -d mysql redis rabbitmq   # 只起基础设施
 mvn -B clean package   # 只想产出 jar 时加 -DskipTests
 java -jar aihub-admin/aihub-web/target/aihub-web-0.0.1-SNAPSHOT.jar
 java -jar aihub-gateway/target/aihub-gateway-0.0.1-SNAPSHOT.jar
