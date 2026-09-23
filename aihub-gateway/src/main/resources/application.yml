@@ -16,3 +16,7 @@ management:
   endpoint:
     health:
       show-details: always
+
+aihub:
+  upstream:
+    base-url: ${AIHUB_UPSTREAM_BASE_URL:http://127.0.0.1:11434}
