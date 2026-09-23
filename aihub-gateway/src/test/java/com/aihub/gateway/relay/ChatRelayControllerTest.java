@@ -81,4 +81,22 @@ class ChatRelayControllerTest {
                 .hasValueSatisfying(value -> assertThat(value).contains("text/event-stream"));
         assertThat(response.body()).contains("你").contains("好").contains("[DONE]");
     }
+
+    @Test
+    void stillRelaysSseWhenClientAsksForJson() throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(
+                        URI.create("http://127.0.0.1:" + gatewayPort + "/v1/chat/completions"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"stream\":true,\"messages\":[]}"))
+                .build();
+
+        HttpResponse<String> response = HttpClient.newHttpClient()
+                .send(request, HttpResponse.BodyHandlers.ofString());
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.headers().firstValue("Content-Type"))
+                .hasValueSatisfying(value -> assertThat(value).contains("text/event-stream"));
+        assertThat(response.body()).contains("你").contains("好").contains("[DONE]");
+    }
 }
