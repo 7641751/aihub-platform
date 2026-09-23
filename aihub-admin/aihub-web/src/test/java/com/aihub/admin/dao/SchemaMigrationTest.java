@@ -47,6 +47,33 @@ class SchemaMigrationTest extends AbstractIntegrationTest {
                 Integer.class);
 
         assertThat(partitions).isGreaterThan(1);
+
+        // 分区方案本身也要被钉住：只数分区数量的话，PARTITION BY HASH(id) 同样能通过。
+        List<String> methods = jdbcTemplate.queryForList(
+                "select distinct partition_method from information_schema.partitions "
+                        + "where table_schema = database() and table_name = 'request_log' "
+                        + "and partition_name is not null",
+                String.class);
+
+        assertThat(methods).containsExactly("RANGE COLUMNS");
+
+        List<String> expressions = jdbcTemplate.queryForList(
+                "select distinct partition_expression from information_schema.partitions "
+                        + "where table_schema = database() and table_name = 'request_log' "
+                        + "and partition_name is not null",
+                String.class);
+
+        assertThat(expressions).hasSize(1);
+        assertThat(expressions.get(0)).containsIgnoringCase("created_at");
+
+        List<String> names = jdbcTemplate.queryForList(
+                "select partition_name from information_schema.partitions "
+                        + "where table_schema = database() and table_name = 'request_log' "
+                        + "and partition_name is not null "
+                        + "order by partition_ordinal_position",
+                String.class);
+
+        assertThat(names).containsExactly("p202609", "p202610", "p202611", "pmax");
     }
 
     @Test

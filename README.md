@@ -17,7 +17,16 @@
 - [ ] **M5 异步流水线**：文档上传 → 解析 → 嵌入 → 向量库
 - [ ] **M6 压测与打磨**：压测报告、故障注入报告、上线
 
-**验收状态**：代码与单元/集成测试（16 项通过）已验证，admin / gateway 两个服务的 `/healthz` 亦均已验证。Docker Compose 全栈已实际构建并启动：`docker compose up -d --build` 成功，两个服务镜像构建完成，五个服务全部启动，其中 MySQL / Redis / RabbitMQ 为 `healthy`，发布端口与约定一致；admin 与 gateway 的 `/healthz` 实测返回 `status: UP`（含 `redis`、`rabbit` 组件 `UP`）。`docker compose down` 正常退出，无残留容器。计划中的 M0 验收标准「`docker compose up` 起全栈，`/healthz` 通」已满足。
+**验收状态**：代码与单元/集成测试（18 项通过）已验证，admin / gateway 两个服务的 `/healthz` 亦均已验证。Docker Compose 全栈已实际构建并启动：`docker compose up -d --build` 成功，两个服务镜像构建完成，五个服务全部启动，其中 MySQL / Redis / RabbitMQ 为 `healthy`，发布端口与约定一致；admin 与 gateway 的 `/healthz` 实测返回 `status: UP`（含 `redis`、`rabbit` 组件 `UP`）。`docker compose down` 正常退出，无残留容器。计划中的 M0 验收标准「`docker compose up` 起全栈，`/healthz` 通」已满足。
+
+## M0 已知边界
+
+M0 只交付地基，下面是有意划出的范围边界，不是缺陷清单：
+
+- 转发端点只有 `POST /v1/chat/completions`，且**只支持 SSE**：非流式请求当前会返回 `200` 加空 body，而不是报错（非流式链路在 M1 补齐）。
+- 该端点在 M0 **按设计不做鉴权**：API Key 鉴权、限流、配额、多渠道路由与计量属于 M1–M3。
+- **上游错误状态码尚未透传**：上游的 `401` / `429` / `502` 目前对客户端表现为笼统的 `500`（M1 补齐），因此 `docs/CONVENTIONS.md` 中 `/v1/**` 的标准状态码描述的是目标契约，而不是当前的保证。
+- `/healthz` 会返回组件明细且不鉴权，等鉴权落地后会一并收紧。
 
 ## 技术栈
 
@@ -28,7 +37,7 @@ Java 21（编译目标）· Spring Boot 3.5.16 · MyBatis-Plus 3.5.17 · MySQL 8
 ### 方式一：Docker Compose（推荐）
 
 ```powershell
-Copy-Item .env.example .env   # 修改里面的口令
+Copy-Item .env.example .env   # 开发默认口令可直接用，真实部署前务必改掉
 docker compose up -d --build
 ```
 
@@ -44,10 +53,10 @@ docker compose up -d --build
 
 需要 JDK 21+（编译目标为 21）、Maven 3.9+（本仓库不使用 Maven wrapper），以及本机可访问的 MySQL / Redis / RabbitMQ。
 
-用 Docker 只起基础设施前，**必须先有 `.env`**：`docker-compose.yml` 里的 `MYSQL_ROOT_PASSWORD` / `MYSQL_PASSWORD` / `RABBITMQ_PASSWORD` 都是 `${VAR:?...}` 必填插值，缺少 `.env` 时任何 `docker compose` 命令都会立即报错退出。此外 `.env.example` 给的 `MYSQL_PASSWORD=change-me`、`RABBITMQ_PASSWORD=change-me` 与 admin 端默认口令不一致（`aihub-admin/aihub-web/src/main/resources/application.yml` 的 `spring.datasource.password`、`spring.rabbitmq.password` 默认均为 `aihub`），照抄会让下面的 `java -jar` 在数据源 / Flyway 启动阶段因 access denied 失败；因此复制后要把 `.env` 里这两项改成 `aihub`（若想保留 `change-me`，则启动时用 `SPRING_DATASOURCE_PASSWORD` / `SPRING_RABBITMQ_PASSWORD` 指回 `.env` 的值）。
+用 Docker 只起基础设施前，**必须先有 `.env`**：`docker-compose.yml` 里的 `MYSQL_ROOT_PASSWORD` / `MYSQL_PASSWORD` / `RABBITMQ_PASSWORD` 都是 `${VAR:?...}` 必填插值，缺少 `.env` 时任何 `docker compose` 命令都会立即报错退出。`.env.example` 的两项业务口令与 admin 端默认值一致（`application.yml` 的 `spring.datasource.password`、`spring.rabbitmq.password` 默认均为 `aihub`），直接复制即可同时满足 compose 与本机运行；若要改用其他口令，启动时用 `SPRING_DATASOURCE_PASSWORD` / `SPRING_RABBITMQ_PASSWORD` 覆盖即可。
 
 ```powershell
-Copy-Item .env.example .env   # 再把 MYSQL_PASSWORD / RABBITMQ_PASSWORD 改为 aihub
+Copy-Item .env.example .env
 docker compose up -d mysql redis rabbitmq   # 只起基础设施
 mvn -B clean package   # 只想产出 jar 时加 -DskipTests
 java -jar aihub-admin/aihub-web/target/aihub-web-0.0.1-SNAPSHOT.jar

@@ -99,4 +99,43 @@ class ChatRelayControllerTest {
                 .hasValueSatisfying(value -> assertThat(value).contains("text/event-stream"));
         assertThat(response.body()).contains("你").contains("好").contains("[DONE]");
     }
+
+    /**
+     * {@code Accept: text/event-stream;q=0, application/json} 是显式拒绝 SSE，
+     * 请求必须被拒绝，而不是被归一化后照常拿到 SSE 流。
+     */
+    @Test
+    void doesNotRelaySseWhenClientExplicitlyRefusesIt() throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(
+                        URI.create("http://127.0.0.1:" + gatewayPort + "/v1/chat/completions"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream;q=0, application/json")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"stream\":true,\"messages\":[]}"))
+                .build();
+
+        HttpResponse<String> response = HttpClient.newHttpClient()
+                .send(request, HttpResponse.BodyHandlers.ofString());
+
+        assertThat(response.statusCode()).isEqualTo(406);
+        assertThat(response.body()).doesNotContain("你").doesNotContain("好").doesNotContain("[DONE]");
+    }
+
+    /**
+     * 畸形 Accept 不能变成 500：过滤器不解析，交给 Spring 的协商归一为 406。
+     */
+    @Test
+    void malformedAcceptDoesNotProduceServerError() throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(
+                        URI.create("http://127.0.0.1:" + gatewayPort + "/v1/chat/completions"))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json;q=not-a-number")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"stream\":true,\"messages\":[]}"))
+                .build();
+
+        HttpResponse<String> response = HttpClient.newHttpClient()
+                .send(request, HttpResponse.BodyHandlers.ofString());
+
+        assertThat(response.statusCode()).isNotEqualTo(500);
+        assertThat(response.body()).doesNotContain("你").doesNotContain("好").doesNotContain("[DONE]");
+    }
 }

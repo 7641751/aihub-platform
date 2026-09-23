@@ -18,7 +18,8 @@ target/
 logs/
 data/
 
-# Maven local repository (kept in-tree by .mvn/maven.config so the build is hermetic)
+# Sandbox-only Maven local repository, produced by the untracked .mvn/maven.config override below.
+# Not a property of the build itself: a fresh clone resolves dependencies from ~/.m2.
 .m2repo/
 
 # Sandbox-environment Maven adapter (in-tree local repo + test-JVM attach flags).

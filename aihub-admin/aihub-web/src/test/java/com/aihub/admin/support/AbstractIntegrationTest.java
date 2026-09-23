@@ -31,9 +31,27 @@ public abstract class AbstractIntegrationTest {
             new RabbitMQContainer(DockerImageName.parse("rabbitmq:3.13-management-alpine"));
 
     static {
-        MYSQL.start();
-        REDIS.start();
-        RABBITMQ.start();
+        startContainer(MYSQL, "mysql:8.4（MySQL）");
+        startContainer(REDIS, "redis:7-alpine（Redis）");
+        startContainer(RABBITMQ, "rabbitmq:3.13-management-alpine（RabbitMQ）");
+    }
+
+    /**
+     * 容器在静态初始化块里单例启动（三个测试类共享）。逐个包装启动失败，
+     * 让原本不透明的 {@code ExceptionInInitializerError} / {@code NoClassDefFoundError}
+     * 直接指出是哪个容器起不来、原因是什么。
+     */
+    private static void startContainer(GenericContainer<?> container, String description) {
+        try {
+            container.start();
+        }
+        catch (RuntimeException | Error ex) {
+            throw new IllegalStateException(
+                    "Testcontainers 无法启动 " + description + " 容器："
+                            + ex.getClass().getName() + ": " + ex.getMessage()
+                            + "（集成测试需要可用的 Docker，请确认 Docker 正在运行且 Testcontainers 能连上它）",
+                    ex);
+        }
     }
 
     @DynamicPropertySource
