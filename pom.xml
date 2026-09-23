@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.16</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.aihub</groupId>
+    <artifactId>aihub-platform</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>aihub-platform</name>
+
+    <modules>
+        <module>aihub-admin</module>
+        <module>aihub-gateway</module>
+    </modules>
+
+    <properties>
+        <maven.compiler.release>21</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <mybatis-plus.version>3.5.17</mybatis-plus.version>
+        <!--
+            Mockito 的 inline mock maker 在 JDK 21+ 上需要动态挂载 Java agent。
+            默认情况下 ByteBuddy 会另起一个外部进程来做 attach，这在受限/沙箱环境下会被拒绝
+            （java.io.IOException: Access denied，来自 sun.tools.attach.VirtualMachineImpl.openProcess）。
+            打开 JVM 内置的 self-attach 后，attach 改为进程内完成，无需外部进程；
+            -XX:+EnableDynamicAgentLoading 则按 Mockito 官方建议消除 agent 动态加载的 JVM 告警。
+        -->
+        <argLine>-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading</argLine>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>com.aihub</groupId>
+                <artifactId>aihub-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.aihub</groupId>
+                <artifactId>aihub-dao</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.aihub</groupId>
+                <artifactId>aihub-service</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.aihub</groupId>
+                <artifactId>aihub-mq</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.baomidou</groupId>
+                <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+                <version>${mybatis-plus.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+</project>
