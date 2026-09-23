@@ -6,14 +6,14 @@ import com.aihub.common.exception.BizException;
 import jakarta.validation.ConstraintViolationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.FieldError;
 import org.springframework.web.ErrorResponse;
-import org.springframework.web.ErrorResponseException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
-import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.stream.Collectors;
 
@@ -50,27 +50,64 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * Spring 自己抛出的异常（404、405、415 等）已经带了正确状态码，必须保留，
-     * 否则会被下面的兜底分支统一变成 500。
-     * 注意：注解值必须是 Throwable 的子类，所以这里用 ErrorResponseException
-     * （ResponseStatusException 是它的子类）；但 NoResourceFoundException 只实现了
-     * ErrorResponse、直接继承 ServletException，并不在 ErrorResponseException 之下，
-     * 必须显式列出，否则未知路径会被兜底分支变成 500。
+     * 兜底分支：本类的最后一个 @ExceptionHandler，优先级高于 Spring 的
+     * DefaultHandlerExceptionResolver，因此所有没被上面更具体分支接住的异常都在这里定型。
+     * <p>
+     * Spring 自己抛出的异常（404、405、415 等）自带正确状态码，必须原样保留，
+     * 否则会被统一改写成 500。但它们并不都继承 ErrorResponseException：
+     * NoResourceFoundException 直接继承 ServletException，HttpRequestMethodNotSupportedException、
+     * HttpMediaTypeNotSupportedException 也是 ServletException 的子类，它们只是
+     * <em>实现</em>了 ErrorResponse。所以这里不做异常类型的枚举，而是用 instanceof 做类型匹配：
+     * 任何实现了 ErrorResponse 的异常都能保留自己的状态码，同时也不需要 (ErrorResponse) 强转。
+     * <p>
+     * 不携带状态码的异常才是真正的未知故障：记录服务端日志，只返回固定文案，避免泄漏内部信息。
      */
-    @ExceptionHandler({ErrorResponseException.class, NoResourceFoundException.class})
-    public ResponseEntity<ApiResponse<Void>> handleErrorResponse(Exception ex) {
-        ErrorResponse error = (ErrorResponse) ex;
-        ErrorCode errorCode = error.getStatusCode().value() == 404 ? ErrorCode.NOT_FOUND : ErrorCode.INVALID_PARAM;
-        String detail = error.getBody().getDetail();
-        String message = detail == null ? "request rejected" : detail;
-        return ResponseEntity.status(error.getStatusCode()).body(ApiResponse.fail(errorCode, message));
-    }
-
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiResponse<Void>> handleUnexpected(Exception ex) {
+        if (ex instanceof ErrorResponse errorResponse) {
+            HttpStatusCode status = errorResponse.getStatusCode();
+            // 5xx 才是真实的服务端故障，必须留下服务端日志；4xx 是调用方的问题，不产生 ERROR 噪音。
+            if (status.is5xxServerError()) {
+                log.error("unhandled server error", ex);
+            }
+            return ResponseEntity.status(status)
+                    .body(ApiResponse.fail(errorCodeFor(status), messageFor(errorResponse)));
+        }
         log.error("unhandled exception", ex);
         return ResponseEntity.status(ErrorCode.INTERNAL_ERROR.httpStatus())
                 .body(ApiResponse.fail(ErrorCode.INTERNAL_ERROR, "internal error"));
+    }
+
+    /**
+     * ErrorCode 只有 8 个常量，没有 METHOD_NOT_ALLOWED / UNSUPPORTED_MEDIA_TYPE，
+     * 405、415 只能归到 INVALID_PARAM；其余状态码取语义最接近的专用常量，
+     * 无法对应的（如 503）一律 INTERNAL_ERROR。
+     */
+    private ErrorCode errorCodeFor(HttpStatusCode status) {
+        return switch (status.value()) {
+            case 400, 405, 415 -> ErrorCode.INVALID_PARAM;
+            case 401 -> ErrorCode.UNAUTHORIZED;
+            case 403 -> ErrorCode.FORBIDDEN;
+            case 404 -> ErrorCode.NOT_FOUND;
+            case 429 -> ErrorCode.RATE_LIMITED;
+            default -> ErrorCode.INTERNAL_ERROR;
+        };
+    }
+
+    /** message 必须非空：优先 detail，其次 title，最后回退到状态码文本。 */
+    private String messageFor(ErrorResponse errorResponse) {
+        ProblemDetail body = errorResponse.getBody();
+        if (body != null) {
+            String detail = body.getDetail();
+            if (detail != null && !detail.isBlank()) {
+                return detail;
+            }
+            String title = body.getTitle();
+            if (title != null && !title.isBlank()) {
+                return title;
+            }
+        }
+        return errorResponse.getStatusCode().toString();
     }
 
     private String defaultMessage(FieldError fieldError) {
