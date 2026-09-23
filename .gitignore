@@ -21,5 +21,9 @@ data/
 # Maven local repository (kept in-tree by .mvn/maven.config so the build is hermetic)
 .m2repo/
 
+# Sandbox-environment Maven adapter (in-tree local repo + test-JVM attach flags).
+# Not part of the deliverable: a fresh clone should use ~/.m2 and stock JVM settings.
+.mvn/maven.config
+
 # Agent workspace
 .superpowers/
