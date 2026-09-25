@@ -142,6 +142,7 @@ public class MeteringDispatcher {
                 // 之后所有事件都只会堆在队列里直到「队列满」的 ERROR（那条日志会把排查方向
                 // 误导到容量上，而真实原因是消费者已经没了）。与 MeteringSpoolReplayer
                 // 对定时任务的处置一致：吞掉 RuntimeException（不吞 Error），下一轮继续。
+                dropped.increment();   // 该事件已被 poll 出队列、投递又失败：这是真正的丢失，必须计数
                 log.error("计量投递线程处理单条事件时抛异常（已忽略，循环继续）: {}", e.toString(), e);
             }
         }

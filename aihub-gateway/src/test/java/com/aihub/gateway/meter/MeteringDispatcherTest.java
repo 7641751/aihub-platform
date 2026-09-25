@@ -175,6 +175,11 @@ class MeteringDispatcherTest {
 
             // 第一投抛异常之后，队列里的第二条仍必须被投出去。
             assertThat(delivered.poll(5, TimeUnit.SECONDS)).isEqualTo("payload-2");
+            // payload-1 已经被 poll 出队列、投递又抛了异常：它就是一次真正的丢失，必须计数。
+            // 这条断言成立，README/CONVENTIONS 里「任何丢弃都会让 dropped +1」才是字面为真的。
+            // （先上面的 poll 再读计数：poll 拿到了守护线程在 increment 之后才放入的事件，
+            //   happens-before 由队列保证，所以这里读到的是确定值。）
+            assertThat(counter("aihub.metering.dropped")).isEqualTo(1);
         } finally {
             dispatcher.stop();
         }
