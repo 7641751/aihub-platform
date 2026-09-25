@@ -45,13 +45,18 @@ public class RequestLogPartitionMaintainer implements ApplicationRunner {
         ensureCoverage(LocalDate.now(ZoneOffset.UTC));
     }
 
-    @Scheduled(cron = "${aihub.metering.partition-cron:0 10 3 * * *}")
+    /**
+     * cron 显式钉在 {@code UTC}：日期算术用 {@link ZoneOffset#UTC}，触发时刻也必须同口径，
+     * 否则「03:10」取决于 JVM 默认时区（月粒度下无害，但口径必须显式——本里程碑的硬规则）。
+     */
+    @Scheduled(cron = "${aihub.metering.partition-cron:0 10 3 * * *}", zone = "UTC")
     public void scheduledEnsureCoverage() {
         try {
             ensureCoverage(LocalDate.now(ZoneOffset.UTC));
         } catch (RuntimeException e) {
             // 定时任务抛出会终止后续调度，必须吞掉并等下一轮。
-            log.error("定时分区维护失败（下一轮重试）: {}", e.toString());
+            // 记日志必须带上 throwable，否则 SQL state / error code / 原始 SQL 全丢（e.toString() 只剩一行）。
+            log.error("定时分区维护失败（下一轮重试）", e);
         }
     }
 
@@ -69,6 +74,7 @@ public class RequestLogPartitionMaintainer implements ApplicationRunner {
             log.error("request_log 分区存在中间空洞 {}：这些月份的行会落进下一个分区（按日期查询仍正确，"
                     + "但无法按月归档）；补齐空洞需要 REORGANIZE 已有数据的分区，留待运维决策", plan.gaps());
         }
+        DataAccessException ddlFailure = null;
         if (!plan.toCreate().isEmpty()) {
             List<String> names = plan.toCreate().stream().map(Partition::name).toList();
             long pmaxRowsBefore = repository.pmaxRowCount();
@@ -77,15 +83,18 @@ public class RequestLogPartitionMaintainer implements ApplicationRunner {
                 repository.reorganizePmax(plan.toCreate());
             } catch (DataAccessException e) {
                 // 多实例同时启动会撞 DDL；这里不立刻失败，交给下面那次重读校验判定。
-                log.warn("补建分区失败（可能是另一实例并发补建）: {}", e.toString());
+                // 带上 throwable：SQL state / error code / 原始语句只在栈里，e.toString() 会把它们丢掉。
+                ddlFailure = e;
+                log.warn("补建分区失败（可能是另一实例并发补建）", e);
             }
             log.info("分区补建后 pmax 行数 {} -> {}", pmaxRowsBefore, repository.pmaxRowCount());
         }
         List<Partition> current = repository.partitions();
         Plan after = RequestLogPartitionPlanner.plan(current, today, monthsAhead);
         if (!after.toCreate().isEmpty()) {
+            // DDL 失败要接进 cause 链：否则运维只看到「补建后仍不覆盖」，看不到 1493 / SQL state 这些定位信息。
             throw new IllegalStateException("request_log 分区补建后仍不覆盖 " + today + " + " + monthsAhead
-                    + " 个月，缺失: " + after.toCreate().stream().map(Partition::name).toList());
+                    + " 个月，缺失: " + after.toCreate().stream().map(Partition::name).toList(), ddlFailure);
         }
         log.info("request_log 分区已覆盖今天往后 {} 个月（UTC 基准日 {}），最后上界 {}",
                 monthsAhead, today, current.stream()
