@@ -116,16 +116,22 @@ class ApiKeyAuthFilterTest {
     }
 
     /**
-     * 回归：守备判定用的路径必须与 handler mapping 一致（解码后、剥掉 path parameter）。
-     * {@code /%761/chat/completions} 解码后就是 {@code /v1/chat/completions}，用原始的
-     * {@code getPath().value()} 做字符串前缀判断会漏掉它 → 过滤器放行 → 无密钥直达上游。
+     * 回归（**区分性**用例）：守备判定用的路径必须与 handler mapping 一致（解码后、剥掉 path parameter）。
+     * {@code /%761/chat/completions} 的**原始**路径是 {@code /%761/...}（不以 {@code /v1/} 开头 →
+     * 旧的字符串前缀守卫会放行），但 handler mapping 按解码后路径匹配到 controller
+     * → 无密钥直达上游。这条是 Finding 1 的**唯一**回归防护：恢复旧守卫时它必然变红。
      */
     @Test
     void percentEncodedGuardedPathCannotBypassTheGuard() throws Exception {
         assertRejectedWithoutTouchingUpstream("/%761/chat/completions");
     }
 
-    /** 回归：{@code /v1;x=/chat/completions} 同样命中 controller，但原始路径不以 {@code /v1/} 开头。 */
+    /**
+     * **形状覆盖**（不是区分性用例）：{@code /v1;x=/chat/completions} 同样命中 controller，
+     * 但它的原始路径以 {@code "/v1;"} 开头、不以 {@code "/v1/"} 开头，**旧守卫也会拒绝**它 ——
+     * 实测把守卫改回 {@code value().startsWith("/v1/")} 本用例仍绿。所以它只能证明「这类变体
+     * 保持被拒绝」，不能用来论证「旧守卫的绕过已关闭」；那个论证只有上面那条百分号编码用例成立。
+     */
     @Test
     void pathParameterVariantCannotBypassTheGuard() throws Exception {
         assertRejectedWithoutTouchingUpstream("/v1;x=/chat/completions");

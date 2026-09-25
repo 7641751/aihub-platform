@@ -203,4 +203,17 @@ class ApiKeyToolingTest {
         assertThat(new ApiKeyView("ak_1", 1L, "t", ApiKeyView.STATUS_ACTIVE, past).usable()).isFalse();
         assertThat(new ApiKeyView("ak_1", 1L, "t", "REVOKED", future).usable()).isFalse();
     }
+
+    /**
+     * 「不可用」只有一份表达：gateway 的解析器（未命中）与过滤器（空 Mono 兜底）必须共用
+     * {@link ApiKeyView#UNUSABLE}。改前两侧各自 {@code new} 了一个同形实例，今天靠
+     * {@code status="MISSING"} 恰好等价；一旦 {@code usable()} 的判据换成别的（例如认实例身份），
+     * 两份哨兵就会分裂成两种行为。
+     */
+    @Test
+    void unusableSentinelIsASingleSharedInstance() {
+        assertThat(ApiKeyView.UNUSABLE.usable()).isFalse();
+        assertThat(ApiKeyView.UNUSABLE.status()).isNotEqualTo(ApiKeyView.STATUS_ACTIVE);
+        assertThat(ApiKeyView.UNUSABLE.expireAt()).isNull();
+    }
 }

@@ -52,8 +52,10 @@ public class ApiKeyAuthFilter implements WebFilter {
     /**
      * {@link ApiKeyResolver} 的契约是「永不返回空 Mono」。万一契约被打破（返回了空 Mono），用这个
      * 不可用哨兵兜底，走与「key 无效」**完全相同**的 401 —— 客户端绝不会碰到「没有状态码就挂住」。
+     * <p>它就是解析器 {@code MISS} 用的**同一个实例**（{@link ApiKeyView#UNUSABLE}）：两侧不再各自
+     * {@code new} 一份同形哨兵，将来 {@code usable()} 的判据怎么改，两条 401 路径都还绑在一起。
      */
-    private static final ApiKeyView UNRESOLVED = new ApiKeyView("", 0L, "", "MISSING", null);
+    private static final ApiKeyView UNRESOLVED = ApiKeyView.UNUSABLE;
 
     private final AuthProperties properties;
     private final ApiKeyResolver resolver;
