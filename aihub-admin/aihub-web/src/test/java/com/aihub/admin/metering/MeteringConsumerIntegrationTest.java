@@ -1,5 +1,6 @@
 package com.aihub.admin.metering;
 
+import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -24,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -117,18 +119,38 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
 
         send(payload);
         awaitRows(requestId, 1, Duration.ofSeconds(10));
-        send(payload);   // 重复投递
 
-        // 时序栅栏：重复投递之后再投一条**不同**的事件，并等它真的落库。
-        // 只断言 count==1 是不够的 ——「第二条根本没投出去 / 消费链路已经停了」同样给出 count==1 的绿色，
-        // 那样的绿色什么也没证明。栅栏消息能落库，证明重复投递之后链路仍在投递且仍在消费。
-        // 队列是单消费者 FIFO，栅栏行出现时排在它前面的重复消息必然已处理完，故不再按固定时长 sleep。
+        // 挂 appender 到消费者**自己的** logger 上（机制与摘除理由见
+        // undecodablePayloadEndsUpInTheDeadLetterQueue / attachConsumerAppender）。窗口只包住
+        // 「重复投递 + 栅栏」这两条消息。
+        ListAppender<ILoggingEvent> appender = attachConsumerAppender();
         String fenceRequestId = "req-mq-idempotent-fence";
-        send(MeteringEventCodec.encode(event(fenceRequestId, 1_800_000_001_777L)));
-        awaitRows(fenceRequestId, 1, Duration.ofSeconds(10));
+        try {
+            send(payload);   // 重复投递
+
+            // 时序栅栏：重复投递之后再投一条**不同**的事件，并等它真的落库。
+            // 只断言 count==1 是不够的 ——「第二条根本没投出去 / 消费链路已经停了」同样给出 count==1 的绿色，
+            // 那样的绿色什么也没证明。栅栏消息能落库，证明重复投递之后链路仍在投递且仍在消费。
+            // 队列是单消费者 FIFO：栅栏行出现时，排在它前面的重复消息必然已经整条处理完（含它那条 INFO 日志），
+            // 所以下面读 appender 既不必按固定时长 sleep，也不会与消费者线程抢时间。
+            send(MeteringEventCodec.encode(event(fenceRequestId, 1_800_000_001_777L)));
+            awaitRows(fenceRequestId, 1, Duration.ofSeconds(10));
+        }
+        finally {
+            detachConsumerAppender(appender);
+        }
+
         assertThat(rows(fenceRequestId))
                 .as("时序栅栏：栅栏事件必须真的落库，否则说明这次绿色是「消息根本没被消费」")
                 .isEqualTo(1);
+
+        // 栅栏仍然证明不了**重复的那条消息本身到达过消费者**：「重复被消费并幂等丢弃」与
+        // 「重复压根没投出去（路由错 / 断链）」在 count==1 上是同一个观测值。
+        // 消费者对**首次**投递走 inserted=true 的 DEBUG 分支，只有 sink 报告「已落库」时才打这条 INFO，
+        // 因此该 INFO 记录的存在本身就是「重复消息到达了消费者、并在消费端被幂等丢弃」的直接证据。
+        assertThat(infoRecordsMentioning(appender, requestId))
+                .as("重复投递的消息必须真的到达消费者并在消费端被幂等丢弃（这条 INFO 只可能来自重复消费）")
+                .isNotEmpty();
 
         assertThat(rows(requestId)).as("同一载荷投两次，只能有一行").isEqualTo(1);
     }
@@ -145,12 +167,7 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
         // 挂一个 appender 到消费者**自己的** logger 上：重试循环每跑一次 onMessage 就打一条 ERROR，
         // 于是「恰好 3 次尝试」成了可断言的事实。日志里那句 WARN「Retries exhausted」来自
         // RejectAndDontRequeueRecoverer，是**另一个** logger，不会混进来。
-        Logger consumerLogger = (Logger) LoggerFactory.getLogger(MeteringConsumer.class);
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
-        // list 默认是普通 ArrayList（写发生在消费者线程、读发生在测试线程），换成同步包装以便读侧加锁。
-        appender.list = Collections.synchronizedList(new ArrayList<>());
-        appender.start();
-        consumerLogger.addAppender(appender);
+        ListAppender<ILoggingEvent> appender = attachConsumerAppender();
 
         Message dead = null;
         try {
@@ -159,8 +176,7 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
         }
         finally {
             // 必须摘掉：appender 挂在全局 logger 上，留下会污染其它用例并一直攒事件。
-            consumerLogger.detachAppender(appender);
-            appender.stop();
+            detachConsumerAppender(appender);
         }
 
         assertThat(dead).as("解不开的载荷必须进死信队列，而不是被静默 ACK").isNotNull();
@@ -188,13 +204,69 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 读 appender 里的记录。加锁的理由：logback 的 {@code ListAppender.list} 本身不是线程安全的，
+     * 把 appender 挂到消费者**自己的** logger 上并返回它；用完必须 {@link #detachConsumerAppender}。
+     *
+     * <p>{@code appender.list} 默认是普通 {@code ArrayList}（写发生在消费者线程、读发生在测试线程），
+     * 换成同步包装以便读侧在同一个对象上加锁（见 {@link #records}）。
+     */
+    private static ListAppender<ILoggingEvent> attachConsumerAppender() {
+        Logger consumerLogger = (Logger) LoggerFactory.getLogger(MeteringConsumer.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.list = Collections.synchronizedList(new ArrayList<>());
+        appender.start();
+        consumerLogger.addAppender(appender);
+        return appender;
+    }
+
+    /** 摘掉 appender：它挂在全局 logger 上，留下会污染其它用例并一直攒事件。 */
+    private static void detachConsumerAppender(ListAppender<ILoggingEvent> appender) {
+        ((Logger) LoggerFactory.getLogger(MeteringConsumer.class)).detachAppender(appender);
+        appender.stop();
+    }
+
+    /**
+     * 读 appender 里**指定级别**的记录。名字叫 {@code errorRecords} 就必须真的只数 ERROR：
+     * 早先的实现不过滤级别，{@code hasSize(3)} 数的是窗口内该 logger 上的**全部**事件 ——
+     * 今天恰好安全只是因为那里没人打别的级别，而本类的幂等用例恰恰要断言一条 **INFO** 幂等记录；
+     * 一旦将来（并发、重投递、测试顺序变化）它落进重试用例的窗口，重试次数断言就会因**无关原因**变红。
+     *
+     * <p>加锁的理由：logback 的 {@code ListAppender.list} 本身不是线程安全的，
      * 而 {@code appender.list} 已换成 {@code synchronizedList} 包装，读写锁在同一个对象上。
      */
-    private static List<ILoggingEvent> errorRecords(ListAppender<ILoggingEvent> appender) {
+    private static List<ILoggingEvent> records(ListAppender<ILoggingEvent> appender, Level level) {
         synchronized (appender.list) {
-            return new ArrayList<>(appender.list);
+            List<ILoggingEvent> matching = new ArrayList<>();
+            for (ILoggingEvent event : appender.list) {
+                if (event.getLevel() == level) {
+                    matching.add(event);
+                }
+            }
+            return matching;
         }
+    }
+
+    /** 消费者重试循环每跑一次 {@code onMessage} 打一条 ERROR，因此 ERROR 条数 = 尝试次数。 */
+    private static List<ILoggingEvent> errorRecords(ListAppender<ILoggingEvent> appender) {
+        return records(appender, Level.ERROR);
+    }
+
+    /**
+     * 形如 {@code request_id=<id>} 的日志片段必须按**整词**匹配，不能用 {@code contains}：
+     * 本用例的栅栏事件 id（{@code req-mq-idempotent-fence}）是重复事件 id 的超串，
+     * {@code contains} 会把栅栏的日志也算成重复消息的日志。
+     */
+    private static boolean mentionsRequestId(ILoggingEvent record, String requestId) {
+        return Pattern.compile("request_id=" + Pattern.quote(requestId) + "\\b")
+                .matcher(record.getFormattedMessage())
+                .find();
+    }
+
+    /** 消费者自己打的 INFO 记录只有「重复消费、已幂等丢弃」这一条，故按 request_id 过滤即可定位它。 */
+    private static List<ILoggingEvent> infoRecordsMentioning(ListAppender<ILoggingEvent> appender,
+                                                             String requestId) {
+        return records(appender, Level.INFO).stream()
+                .filter(record -> mentionsRequestId(record, requestId))
+                .toList();
     }
 
     private void drainDeadLetterQueue() {
