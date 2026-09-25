@@ -45,6 +45,8 @@ class ApiKeyAuthFilterTest {
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         registry.add("aihub.upstream.base-url", () -> upstream.baseUrl());
+        // 显式指定默认模型：下面的鉴权成功用例按**配置值**断言，而不是断言 application.yml 的出厂值。
+        registry.add("aihub.upstream.default-model", () -> "m1-auth-models-test");
         registry.add("aihub.auth.enabled", () -> "true");
         registry.add("aihub.internal.secret", () -> "test-internal-secret");
         // 指向不存在的 Redis 端口：缓存必然 miss，强制走 AdminClient（本测试用假实现）
@@ -101,6 +103,21 @@ class ApiKeyAuthFilterTest {
         assertThat(response.statusCode()).isEqualTo(401);
         assertThat(response.body()).contains("\"code\":\"invalid_api_key\"");
         assertThat(response.body()).contains("\"type\":\"invalid_request_error\"");
+    }
+
+    /**
+     * Finding I6：{@code GET /v1/models} 的**鉴权成功**分支此前只在手工验证里跑过 ——
+     * {@code ModelsControllerTest} 跑在 {@code aihub.auth.enabled=false} 上，本类（鉴权开着）
+     * 只断言了 401。少了这条，「带着合法 key 打 /v1/models 仍然 401」在测试里毫无痕迹。
+     * 断言 200 **加上**配置驱动的模型 id：只断言 200 的话，一个恰好返回空 200 的实现也能绿。
+     */
+    @Test
+    void authenticatedModelsRequestIsAllowed() throws Exception {
+        HttpResponse<String> response = get("/v1/models", "Bearer ak_valid." + TestKeys.VALID_SECRET);
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).contains("\"object\":\"list\"");
+        assertThat(response.body()).contains("\"id\":\"m1-auth-models-test\"");
     }
 
     @Test
@@ -184,9 +201,17 @@ class ApiKeyAuthFilterTest {
 
     /** 不带 Authorization 的 GET：用于「某些端点必须被守卫拦下」的断言。 */
     private HttpResponse<String> get(String path) throws Exception {
-        HttpRequest request = HttpRequest.newBuilder(
-                URI.create("http://127.0.0.1:" + gatewayPort + path)).GET().build();
-        return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+        return get(path, null);
+    }
+
+    /** 带 Authorization 的 GET：用于「鉴权成功必须放行」的断言。 */
+    private HttpResponse<String> get(String path, String authorization) throws Exception {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(
+                URI.create("http://127.0.0.1:" + gatewayPort + path)).GET();
+        if (authorization != null) {
+            builder.header("Authorization", authorization);
+        }
+        return HttpClient.newHttpClient().send(builder.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private HttpResponse<String> postPath(String path, String authorization) throws Exception {

@@ -72,7 +72,11 @@ public interface AdminClient {
                         .exchangeToMono(response -> response.bodyToMono(String.class).defaultIfEmpty("")
                                 .map(body -> parse(response.statusCode().value(), body)));
             }).onErrorResume(ex -> {
-                log.warn("admin 内部接口调用失败: {}", ex.toString());
+                // 传输层失败（连不上 / 超时 / 签名抛错）**不是**「key 不存在」，是 admin 侧故障。
+                // fail-closed 的对客表现与坏 key 完全一致（401 invalid_api_key），所以这行 ERROR
+                // 是运维侧唯一的区分信号：admin 全挂时它会持续出现，而单个坏 key 不会。
+                log.error("admin 回源失败（传输层异常，非「key 不存在」），按「key 不存在」处理（fail-closed）: {}",
+                        ex.toString());
                 return Mono.just(Optional.empty());
             });
         }
@@ -80,11 +84,23 @@ public interface AdminClient {
         /** 非 2xx、缺 {@code data}、字段畸形都折算成「不存在」，绝不向上抛。 */
         static Optional<ApiKeyView> parse(int status, String body) {
             if (status < 200 || status >= 300) {
+                if (status == 404 && hasAdminCode(body, "NOT_FOUND")) {
+                    // admin 的 404 + NOT_FOUND 信封 = 「这个 key 不存在」：正常业务结果，不打 ERROR。
+                    log.debug("admin 回源：key 不存在（HTTP 404）");
+                } else {
+                    // 5xx / 401 / 403，以及「路径写错」这类没有 NOT_FOUND 信封的 404：都是**平台故障**。
+                    // 客户端仍然只看到 401 invalid_api_key（与坏 key 不可区分，见 CONVENTIONS 第 4/5 节），
+                    // 因此这条 ERROR 是「平台级故障」与「单个坏 key」在日志里唯一的分界。
+                    log.error("admin 回源失败（HTTP {}，服务不可用或配置错误，非「key 不存在」），"
+                            + "按「key 不存在」处理（fail-closed）。响应体: {}", status, body);
+                }
                 return Optional.empty();
             }
             try {
                 JsonNode data = MAPPER.readTree(body).path("data");
                 if (data.isMissingNode() || data.isNull()) {
+                    // 2xx 但没有 data（例如 admin 的 200 空信封）：同样按「不存在」处理，不是故障。
+                    log.debug("admin 回源：HTTP {} 响应无 data，按「key 不存在」处理", status);
                     return Optional.empty();
                 }
                 JsonNode expireAt = data.path("expireAt");
@@ -95,8 +111,18 @@ public interface AdminClient {
                         data.path("status").asText(),
                         expireAt.isNull() || expireAt.isMissingNode() ? null : Instant.parse(expireAt.asText())));
             } catch (Exception e) {
-                log.warn("解析 admin 响应失败: {}", e.toString());
+                log.error("admin 回源响应畸形（非「key 不存在」），按「key 不存在」处理（fail-closed）: {}",
+                        e.toString());
                 return Optional.empty();
+            }
+        }
+
+        /** 响应体是不是 admin 的 {@code {code,message,data}} 信封，且 {@code code} 等于给定值。 */
+        private static boolean hasAdminCode(String body, String code) {
+            try {
+                return code.equals(MAPPER.readTree(body).path("code").asText());
+            } catch (Exception e) {
+                return false;
             }
         }
     }

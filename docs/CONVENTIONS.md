@@ -6,7 +6,7 @@
 
 | 模块 | 包名前缀 | 职责 |
 |---|---|---|
-| `aihub-common` | `com.aihub.common` | 零依赖共享类型：响应体、错误码、业务异常 |
+| `aihub-common` | `com.aihub.common` | 零依赖共享类型：响应体、错误码、业务异常，以及跨服务共用的密钥工具（`ApiKeyHasher` / `ApiKeyView` / `ApiKeyCacheCodec` / `InternalHmac`） |
 | `aihub-dao` | `com.aihub.dao` | Entity、Mapper、Flyway 迁移脚本 |
 | `aihub-service` | `com.aihub.service` | 业务服务 |
 | `aihub-mq` | `com.aihub.mq` | 消息生产与消费 |
@@ -47,7 +47,7 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 
 | `code` | HTTP | `type` | 触发场景 | 由谁产出 |
 |---|---|---|---|---|
-| `invalid_api_key` | `401` | `invalid_request_error` | 缺 `Authorization`、格式不是 `Bearer <key_id>.<secret>`、key 不存在 / 已停用 / 已过期 | `ApiKeyAuthFilter` |
+| `invalid_api_key` | `401` | `invalid_request_error` | 缺 `Authorization`、格式不是 `Bearer <key_id>.<secret>`、key 不存在 / 已停用 / 已过期，以及**所有密钥来源都失败**（Redis 未命中且 admin 不可达 / 5xx，见第 5 节） | `ApiKeyAuthFilter` |
 | `upstream_unreachable` | `502` | `api_error` | 连不上上游（`WebClientRequestException`）；上游的**业务**错误状态码不走这里 | `ChatRelayController` |
 | `internal_error` | `500` | `api_error` | 兜底：连错误体本身都序列化失败时（`GatewayErrors.serialize` 的 catch 分支） | `GatewayErrors` |
 
@@ -68,6 +68,7 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - 时间窗 ±300 秒，**防重放由调用方（`InternalAuthFilter`）负责**：`InternalHmac` 只比较签名，既不解析也不校验时间戳。
 - 共享密钥来自 `aihub.internal.secret`（环境变量 `AIHUB_INTERNAL_SECRET`），两端必须配同一个值；密钥为空时 `verify` 一律返回 `false`（fail-closed），admin 侧会在启动日志里大声告警但仍允许启动。
 - **改一处必须同时改另一处**：admin 的 `InternalAuthFilter` 与 gateway 的 `AdminClient.Http` 是这份契约的两端，任何一端改了路径、header 名、方法名或时间窗，另一端都要跟着改，并同步更新本节。
+- **「所有来源都失败」与「key 不存在」在客户端不可区分（有意为之）**：Redis 未命中且 admin 不可达 / 超时 / 5xx / 配置错时，gateway 一律按「key 不存在」处理并回 `401 invalid_api_key` —— 这是 fail-closed 的代价，平台级故障对每个客户端都表现为「你的 key 错了」。二者的区分只落在 gateway 日志上：admin 回源失败打 **ERROR**（并区分「key 不存在」与传输 / 5xx），真正的「key 不存在」只打 DEBUG。
 
 ## 6. API Key 约定
 
@@ -76,6 +77,8 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - **明文只在铸造时打印一次**，之后无法取回；丢了只能重新铸一把。
 - 铸造走 `ApiKeyMintRunner`（本地 CLI 路径，默认关闭）：`--aihub.mint-key.enabled=true`（容器里是 `AIHUB_MINT_KEY_ENABLED=true`）配合 `--aihub.mint-key.tenant-name` / `--aihub.mint-key.name` / `--aihub.mint-key.valid-days`。**它不是 HTTP 接口** —— 公网上不存在造密钥的入口。
 - gateway 侧的解析顺序是 Caffeine（本地，30s）→ Redis（5m，key 用 `ApiKeyCacheCodec.CACHE_KEY_PREFIX`）→ admin 内部接口；任何一级故障都降级到下一级，**绝不能因为缓存故障而拒绝请求**。「是否可用」的判据只有一处：`ApiKeyView.usable()`。
+- **Redis 是鉴权的信任源，不只是缓存**：gateway 把 Redis 的命中当作**权威结果**，命中即放行、不再回查 MySQL；因此任何能写 `aihub:apikey:<sha256(secret)>` 的对端都能伪造出一把可用的 API Key。Redis 必须与控制面同等级隔离保护（网络、凭据、访问审计）。同样的原因，密钥的**吊销 / 停用不会立刻生效**，要等缓存过期：本机 Caffeine ≤30s、集群 Redis ≤5m。
+- `docker-compose.yml` 里的 Redis 是**本地开发**配置：无密码，宿主映射为 `127.0.0.1:6380:6379`（只有本机能连；容器之间仍走 `redis:6379`）。生产加固 —— `requirepass` 并把它接进两个服务的配置、以及网络隔离 —— 列为 **M3** 项，M1 只做最小收敛。
 - 不要新增第二套 key 格式或第二个哈希实现；控制台的签发 / 列表 / 吊销接口属于 M4。
 
 ## 7. 数据库约定

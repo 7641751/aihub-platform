@@ -17,6 +17,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -95,6 +96,55 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
 
         ApiKeyView view = apiKeyService.resolve(ApiKeyHasher.hash(secretOf(issued))).orElseThrow();
 
+        assertThat(view.usable()).isFalse();
+    }
+
+    /**
+     * Finding I1：**非 NULL** 的 {@code expire_at} 走「回源 MySQL」这条路径必须被真正执行一次。
+     *
+     * <p>本类原有的两个用例都绕过了它：上面那条铸的是永不过期（{@code expireAt = null}），
+     * {@code expiredKeyResolvesButIsNotUsable} 解析命中的是 {@code mint} 顺手写进 Redis 的那份载荷。
+     * 于是 MyBatis 的 {@code Instant} ↔ MySQL {@code datetime(3)} 映射从没跑过，而
+     * {@link ApiKeyView#usable()} 把 {@code expireAt == null} 当作**永久有效** —— 任何一次读回失败
+     * （字段映射错、时区错、列名错、值被截断）都会把一年期的 key 静默降级成永不过期的 key，
+     * 而这正好落在鉴权路径上。这里删掉缓存逼出 DB 路径，把这条静默降级钉死。
+     */
+    @Test
+    void futureExpiryRoundTripsThroughTheDatabasePath() {
+        Instant expireAt = Instant.now().plus(Duration.ofDays(365));
+        ApiKeyService.IssuedKey issued = apiKeyService.mint("t-future", "key-future", expireAt);
+        String keyHash = ApiKeyHasher.hash(secretOf(issued));
+
+        // 必须先清掉 mint 写的缓存，否则断言还是由 Redis 载荷兜住，DB 映射依然没被执行。
+        redisTemplate.delete(ApiKeyCacheCodec.CACHE_KEY_PREFIX + keyHash);
+        assertThat(redisTemplate.opsForValue().get(ApiKeyCacheCodec.CACHE_KEY_PREFIX + keyHash))
+                .as("缓存必须已清空，否则本用例证明不了 DB 回源路径")
+                .isNull();
+
+        ApiKeyView view = apiKeyService.resolve(keyHash).orElseThrow();
+
+        // 先钉住「非 null」：null 的含义就是永不过期，正是要防的那种降级。
+        assertThat(view.expireAt())
+                .as("回源读回 null 等于把有期限的 key 变成永不过期的 key")
+                .isNotNull();
+        assertThat(Duration.between(expireAt, view.expireAt()).abs())
+                .as("datetime(3) 只有毫秒精度，允许 1 秒的截断误差")
+                .isLessThanOrEqualTo(Duration.ofSeconds(1));
+        assertThat(view.usable()).isTrue();
+    }
+
+    /** Finding I1 的另一半：过期时间在过去时，**DB 回源**同样必须判为不可用（不靠 Redis 里那份载荷）。 */
+    @Test
+    void pastExpiryResolvedThroughTheDatabasePathIsNotUsable() {
+        ApiKeyService.IssuedKey issued = apiKeyService.mint("t-past-db", "key-past-db",
+                Instant.now().minus(Duration.ofDays(1)));
+        String keyHash = ApiKeyHasher.hash(secretOf(issued));
+
+        redisTemplate.delete(ApiKeyCacheCodec.CACHE_KEY_PREFIX + keyHash);
+
+        ApiKeyView view = apiKeyService.resolve(keyHash).orElseThrow();
+
+        assertThat(view.expireAt()).as("回源读回 null 会变成永不过期").isNotNull();
         assertThat(view.usable()).isFalse();
     }
 

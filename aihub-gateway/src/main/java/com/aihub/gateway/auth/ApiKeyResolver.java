@@ -102,7 +102,11 @@ public class ApiKeyResolver {
     private Mono<ApiKeyView> resolveFromAdmin(String keyHash) {
         return Mono.defer(() -> adminClient.resolve(keyHash))
                 .onErrorResume(ex -> {
-                    log.warn("admin 回源异常，按「key 不存在」处理: {}", ex.toString());
+                    // 这一条兜的是「AdminClient 实现把异常抛出来了」（真实实现的传输/5xx 已在
+                    // AdminClient.Http 里分别打了 ERROR）。它同样**不是**「key 不存在」，
+                    // 所以按 ERROR 记录，与「key 不存在」的 debug 日志区分开。
+                    log.error("admin 回源抛出异常（非「key 不存在」），按「key 不存在」处理（fail-closed）: {}",
+                            ex.toString());
                     return Mono.just(Optional.empty());
                 })
                 .map(maybeView -> {

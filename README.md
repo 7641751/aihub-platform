@@ -19,7 +19,9 @@
 
 **M1 到底做了什么**：`/v1/**` 现在必须带 API Key，缺省或非法一律 `401` 加 OpenAI 形状错误体（`{"error":{"code":"invalid_api_key",...}}`）；密钥解析走三级回源（本机 Caffeine → 共享 Redis → admin 的 HMAC 内部接口），任一级故障都降级到下一级而不是拒绝请求；转发端点是**字节级直通代理**，上游的状态码、响应体字节与 `Content-Type` 原样回写，因此流式（SSE）与非流式（JSON）由请求体里的 `stream` 字段决定，网关不分流、也不再把上游错误折叠成 `500`；新增 `GET /v1/models`，单渠道场景下回报配置的默认模型。
 
-**验收状态**：全量测试实测 **68 项通过 / 0 失败 / 0 错误**（aihub-common 13、aihub-web 19、aihub-gateway 36；`mvn -B clean test` → `BUILD SUCCESS`）。Docker Compose 全栈从当前代码 `--build` 重建后，admin / gateway 的 `/healthz` 实测 `status: UP`；经发布端口用真实 HTTP 走通「无 key 401 / 带 key 200 的 `/v1/models`」与「带 key 的 `POST /v1/chat/completions` 经代理落到 OpenAI 兼容上游并原样回写状态码与响应体」。该端到端测试使用的上游是自建 stub（本环境无法启动本地模型服务），**「真实模型回答了问题」这一条尚未验证**。
+**验收状态**：全量测试实测 **71 项通过 / 0 失败 / 0 错误**（aihub-common 13、aihub-web 21、aihub-gateway 37；`mvn -B clean test` → `BUILD SUCCESS`）。Docker Compose 全栈从当前代码 `--build` 重建后，admin / gateway 的 `/healthz` 实测 `status: UP`；经发布端口用真实 HTTP 走通「无 key 401 / 带 key 200 的 `/v1/models`」与「带 key 的 `POST /v1/chat/completions` 经代理落到 OpenAI 兼容上游并原样回写状态码与响应体」。该端到端测试使用的上游是自建 stub（本环境无法启动本地模型服务），**「真实模型回答了问题」这一条尚未验证**。
+
+**复现口径（诚实说明）**：上面的数字与「`mvn -B test` 在本机全绿」都产自这台开发机：除了 Docker 守护进程，它还依赖两项**不在仓库里**的环境配置 —— 用户级 `~/.testcontainers.properties`（把 Testcontainers 指向 TCP 上的 Docker）以及本机 `.mvn/maven.config` 里的 JVM 参数。因此在一台干净机器上，需自行保证：Docker 可达，且 JDK 21+ 上允许 Mockito 的动态 agent 挂载（例如 `mvn -B test -DargLine="-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading"`）；这些**环境作用域**的 JVM 开关有意不进 `pom.xml`。
 
 ## M0/M1 已知边界
 
@@ -32,6 +34,9 @@
 - 网关**不做**租户 / 渠道 / 配额管理、审计、账单与管理台；API Key 的控制台签发 / 列表 / 吊销接口属于 M4（M1 只有本地 CLI 铸造路径）。
 - `request_log` 落库尚未实现（M2）；M1 的转发不写请求日志。
 - `POST /v1/embeddings` 与文档上传 / 向量化流水线属于 M5，M1 只做 chat 直通。
+- **Redis 是鉴权的信任源之一**：网关把 Redis 里的密钥缓存命中当作**权威结果**，命中即放行、不再回查 MySQL；能往 Redis 写 `aihub:apikey:<sha256>` 的对端等于能伪造任意 API Key，所以 Redis 必须与控制面同等级隔离保护。由此，密钥的吊销 / 停用也不会立刻生效 —— 要等缓存过期（本机 Caffeine ≤30s，Redis ≤5m）。
+- `docker-compose.yml` 仅供**本地开发**：Redis 没有密码，宿主映射已收紧为 `127.0.0.1:6380:6379`（本机 IDE 仍可连 6380，容器之间仍走 `redis:6379`）。生产环境的 Redis 认证（`requirepass`）与网络隔离属于 M3 加固项。
+- **后端全挂时客户端看到的是 401 `invalid_api_key`**：当 Redis 未命中且 admin 不可达 / 5xx / 配置错时，网关按 fail-closed 一律按「key 不存在」处理，与「你的 key 是错的」在客户端**完全不可区分**（有意为之）。两者的区别只体现在网关日志：admin 回源失败会打 ERROR，并区分「key 不存在」与传输 / 5xx。
 - 压测与故障注入报告属于 M6。
 
 ## 技术栈
@@ -70,7 +75,7 @@ docker compose up -d --build
 
 需要 JDK 21+（编译目标为 21）、Maven 3.9+（本仓库不使用 Maven wrapper），以及本机可访问的 MySQL / Redis / RabbitMQ。
 
-用 Docker 只起基础设施前，**必须先有 `.env`**：`docker-compose.yml` 里的 `MYSQL_ROOT_PASSWORD` / `MYSQL_PASSWORD` / `RABBITMQ_PASSWORD` / `AIHUB_INTERNAL_SECRET` 都是 `${VAR:?...}` 必填插值，缺少 `.env` 时任何 `docker compose` 命令都会立即报错退出。`.env.example` 的两项业务口令与 admin 端默认值一致（`application.yml` 的 `spring.datasource.password`、`spring.rabbitmq.password` 默认均为 `aihub`），直接复制即可同时满足 compose 与本机运行；若要改用其他口令，启动时用 `SPRING_DATASOURCE_PASSWORD` / `SPRING_RABBITMQ_PASSWORD` 覆盖即可。`AIHUB_INTERNAL_SECRET` 请换成一串 24 字符以上的随机串，admin 与 gateway 必须配**同一个值**。
+用 Docker 只起基础设施前，**必须先有 `.env`**：`docker-compose.yml` 里的 `MYSQL_ROOT_PASSWORD` / `MYSQL_PASSWORD` / `RABBITMQ_PASSWORD` / `AIHUB_INTERNAL_SECRET` 都是 `${VAR:?...}` 必填插值，缺少 `.env` 时任何 `docker compose` 命令都会立即报错退出。`.env.example` 的两项业务口令与 admin 端默认值一致（`application.yml` 的 `spring.datasource.password`、`spring.rabbitmq.password` 默认均为 `aihub`），直接复制即可同时满足 compose 与本机运行；若要改用其他口令，启动时用 `SPRING_DATASOURCE_PASSWORD` / `SPRING_RABBITMQ_PASSWORD` 覆盖即可。`AIHUB_INTERNAL_SECRET` 请换成一串 32 字符以上的随机串，admin 与 gateway 必须配**同一个值**。
 
 ```powershell
 Copy-Item .env.example .env
@@ -170,13 +175,13 @@ tenant   : demo
 
 ## 测试
 
-需要 Docker Desktop 处于运行状态（集成测试使用 Testcontainers 起真实容器）。
+需要 Docker Desktop 处于运行状态（集成测试使用 Testcontainers 起真实容器）。JDK 21+ 上还需要允许 Mockito 挂载动态 agent，例如 `mvn -B test -DargLine="-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading"` —— 这类环境作用域的 JVM 开关不在 `pom.xml` 里（详见上文「复现口径」）。
 
 ```powershell
 mvn -B test
 ```
 
-当前实测：`mvn -B clean test` → `BUILD SUCCESS`，**Tests run: 68, Failures: 0, Errors: 0, Skipped: 0**（aihub-common 13、aihub-web 19、aihub-gateway 36）。
+当前实测：`mvn -B clean test` → `BUILD SUCCESS`，**Tests run: 71, Failures: 0, Errors: 0, Skipped: 0**（aihub-common 13、aihub-web 21、aihub-gateway 37）。
 
 ## 目录结构
 

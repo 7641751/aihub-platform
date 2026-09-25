@@ -1,3 +1,5 @@
+# 本地开发编排（development-only）：默认口令、无 TLS、Redis 无密码，
+# 仅供本机跑通链路；生产部署的加固项见 README「已知边界」。
 services:
   mysql:
     image: mysql:8.4
@@ -17,10 +19,15 @@ services:
       retries: 30
       start_period: 30s
 
+  # 仅供**本地开发**：这里的 Redis 没有密码（requirepass 需要同时改两个服务的配置，
+  # 列为 M3 加固项），而且它是**鉴权的信任源** —— 网关把缓存命中当作权威结果，
+  # 能写入 aihub:apikey:<sha256> 的人就能伪造任意 API Key（见 README「已知边界」）。
+  # 因此宿主映射收紧到 127.0.0.1：只有本机能连（IDE 等本机客户端仍走 6380）。
+  # 容器之间不受影响，仍用服务名 redis:6379。
   redis:
     image: redis:7-alpine
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
