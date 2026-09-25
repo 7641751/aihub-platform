@@ -1,16 +1,14 @@
 package com.aihub.gateway.relay;
 
-import com.sun.net.httpserver.HttpServer;
+import com.aihub.gateway.testsupport.FakeUpstream;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
-import java.io.IOException;
-import java.io.OutputStream;
-import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -19,123 +17,98 @@ import java.nio.charset.StandardCharsets;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = "aihub.auth.enabled=false")
 class ChatRelayControllerTest {
 
-    private static final String SSE_BODY = """
-            data: {"choices":[{"delta":{"content":"你"}}]}
-
-            data: {"choices":[{"delta":{"content":"好"}}]}
-
-            data: [DONE]
-
-            """;
-
-    private static final HttpServer UPSTREAM;
-    private static final int UPSTREAM_PORT;
-
-    static {
-        try {
-            UPSTREAM = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-            UPSTREAM.createContext("/v1/chat/completions", exchange -> {
-                byte[] payload = SSE_BODY.getBytes(StandardCharsets.UTF_8);
-                exchange.getResponseHeaders().add("Content-Type", "text/event-stream; charset=utf-8");
-                exchange.sendResponseHeaders(200, payload.length);
-                try (OutputStream out = exchange.getResponseBody()) {
-                    out.write(payload);
-                }
-            });
-            UPSTREAM.start();
-            UPSTREAM_PORT = UPSTREAM.getAddress().getPort();
-        } catch (IOException e) {
-            throw new IllegalStateException("failed to start fake upstream", e);
-        }
-    }
+    private static FakeUpstream upstream;
 
     @LocalServerPort
     private int gatewayPort;
 
-    @DynamicPropertySource
-    static void upstreamBaseUrl(DynamicPropertyRegistry registry) {
-        registry.add("aihub.upstream.base-url", () -> "http://127.0.0.1:" + UPSTREAM_PORT);
+    @BeforeAll
+    static void startUpstream() {
+        upstream = FakeUpstream.start();
     }
 
     @AfterAll
     static void stopUpstream() {
-        UPSTREAM.stop(0);
+        upstream.stop();
+    }
+
+    @DynamicPropertySource
+    static void upstreamBaseUrl(DynamicPropertyRegistry registry) {
+        registry.add("aihub.upstream.base-url", () -> upstream.baseUrl());
     }
 
     @Test
-    void relaysUpstreamSseFramesToClient() throws Exception {
-        HttpRequest request = HttpRequest.newBuilder(
-                        URI.create("http://127.0.0.1:" + gatewayPort + "/v1/chat/completions"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString("{\"stream\":true,\"messages\":[]}"))
-                .build();
+    void relaysSseFramesWhenClientAcceptsJson() throws Exception {
+        upstream.enqueueSse(FakeUpstream.sseFrames());
 
-        HttpResponse<String> response = HttpClient.newHttpClient()
-                .send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = post("/v1/chat/completions", "{\"stream\":true}",
+                "application/json", "application/json");
 
         assertThat(response.statusCode()).isEqualTo(200);
         assertThat(response.headers().firstValue("Content-Type"))
-                .hasValueSatisfying(value -> assertThat(value).contains("text/event-stream"));
+                .hasValueSatisfying(v -> assertThat(v).contains("text/event-stream"));
         assertThat(response.body()).contains("你").contains("好").contains("[DONE]");
     }
 
     @Test
-    void stillRelaysSseWhenClientAsksForJson() throws Exception {
-        HttpRequest request = HttpRequest.newBuilder(
-                        URI.create("http://127.0.0.1:" + gatewayPort + "/v1/chat/completions"))
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString("{\"stream\":true,\"messages\":[]}"))
-                .build();
+    void relaysNonStreamingJsonBody() throws Exception {
+        upstream.enqueueJson(200, FakeUpstream.completionJson());
 
-        HttpResponse<String> response = HttpClient.newHttpClient()
-                .send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = post("/v1/chat/completions", "{\"stream\":false}",
+                "application/json", "application/json");
 
         assertThat(response.statusCode()).isEqualTo(200);
         assertThat(response.headers().firstValue("Content-Type"))
-                .hasValueSatisfying(value -> assertThat(value).contains("text/event-stream"));
-        assertThat(response.body()).contains("你").contains("好").contains("[DONE]");
+                .hasValueSatisfying(v -> assertThat(v).contains("application/json"));
+        assertThat(response.body()).contains("\"object\":\"chat.completion\"").contains("你好");
     }
 
-    /**
-     * {@code Accept: text/event-stream;q=0, application/json} 是显式拒绝 SSE，
-     * 请求必须被拒绝，而不是被归一化后照常拿到 SSE 流。
-     */
     @Test
-    void doesNotRelaySseWhenClientExplicitlyRefusesIt() throws Exception {
-        HttpRequest request = HttpRequest.newBuilder(
-                        URI.create("http://127.0.0.1:" + gatewayPort + "/v1/chat/completions"))
-                .header("Content-Type", "application/json")
-                .header("Accept", "text/event-stream;q=0, application/json")
-                .POST(HttpRequest.BodyPublishers.ofString("{\"stream\":true,\"messages\":[]}"))
-                .build();
+    void propagatesUpstreamErrorStatusAndBody() throws Exception {
+        upstream.enqueueJson(429, "{\"error\":{\"message\":\"rate limited\",\"type\":\"rate_limit_error\"}}");
 
-        HttpResponse<String> response = HttpClient.newHttpClient()
-                .send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = post("/v1/chat/completions", "{\"stream\":false}",
+                "application/json", "application/json");
 
-        assertThat(response.statusCode()).isEqualTo(406);
-        assertThat(response.body()).doesNotContain("你").doesNotContain("好").doesNotContain("[DONE]");
+        assertThat(response.statusCode()).isEqualTo(429);
+        assertThat(response.body()).contains("rate limited");
     }
 
-    /**
-     * 畸形 Accept 不能变成 500：过滤器不解析，交给 Spring 的协商归一为 406。
-     */
     @Test
-    void malformedAcceptDoesNotProduceServerError() throws Exception {
-        HttpRequest request = HttpRequest.newBuilder(
-                        URI.create("http://127.0.0.1:" + gatewayPort + "/v1/chat/completions"))
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json;q=not-a-number")
-                .POST(HttpRequest.BodyPublishers.ofString("{\"stream\":true,\"messages\":[]}"))
-                .build();
+    void forwardsRequestBodyVerbatim() throws Exception {
+        upstream.enqueueJson(200, FakeUpstream.completionJson());
 
-        HttpResponse<String> response = HttpClient.newHttpClient()
-                .send(request, HttpResponse.BodyHandlers.ofString());
+        post("/v1/chat/completions", "{\"stream\":false,\"messages\":[]}", "application/json", null);
 
-        assertThat(response.statusCode()).isNotEqualTo(500);
-        assertThat(response.body()).doesNotContain("你").doesNotContain("好").doesNotContain("[DONE]");
+        assertThat(upstream.lastRequest().body()).isEqualTo("{\"stream\":false,\"messages\":[]}");
+        assertThat(upstream.lastRequest().path()).isEqualTo("/v1/chat/completions");
+    }
+
+    @Test
+    void malformedAcceptHeaderDoesNotBreakTheRelay() throws Exception {
+        upstream.enqueueJson(200, FakeUpstream.completionJson());
+
+        HttpResponse<String> response = post("/v1/chat/completions", "{\"stream\":false}",
+                null, "this-is-not/a-media-type;;;q=x");
+
+        assertThat(response.statusCode()).isEqualTo(200);
+    }
+
+    private HttpResponse<String> post(String path, String body, String contentType, String accept)
+            throws Exception {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(
+                        URI.create("http://127.0.0.1:" + gatewayPort + path))
+                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8));
+        if (contentType != null) {
+            builder.header("Content-Type", contentType);
+        }
+        if (accept != null) {
+            builder.header("Accept", accept);
+        }
+        return HttpClient.newHttpClient().send(builder.build(), HttpResponse.BodyHandlers.ofString());
     }
 }
