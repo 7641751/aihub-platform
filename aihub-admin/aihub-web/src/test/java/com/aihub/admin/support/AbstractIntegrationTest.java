@@ -67,5 +67,7 @@ public abstract class AbstractIntegrationTest {
         registry.add("spring.rabbitmq.port", RABBITMQ::getAmqpPort);
         registry.add("spring.rabbitmq.username", RABBITMQ::getAdminUsername);
         registry.add("spring.rabbitmq.password", RABBITMQ::getAdminPassword);
+
+        registry.add("aihub.internal.secret", () -> "test-internal-secret-test-internal-secret");
     }
 }

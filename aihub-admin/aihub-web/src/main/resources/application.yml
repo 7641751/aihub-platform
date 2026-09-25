@@ -38,3 +38,11 @@ management:
   endpoint:
     health:
       show-details: always
+
+aihub:
+  internal:
+    secret: ${AIHUB_INTERNAL_SECRET:}
+  apikey:
+    cache-ttl: 5m
+  mint-key:
+    enabled: ${AIHUB_MINT_KEY_ENABLED:false}
