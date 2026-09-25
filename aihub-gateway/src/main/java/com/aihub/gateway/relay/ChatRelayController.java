@@ -67,9 +67,19 @@ public class ChatRelayController {
                 });
     }
 
+    /**
+     * 把上游响应原样回写给客户端：状态码 → 白名单头 → 响应体字节，三者都不做语义加工。
+     * <p>刻意不用 {@code bodyToMono(String)} 之类会「攒完整体」的读法，而是以 {@link DataBuffer}
+     * 逐块透传，才能同时覆盖 SSE 流式与 JSON 非流式两种上游返回。
+     *
+     * @param upstream 上游的原始响应（状态码、头、体都从这里取）
+     * @param response 要回写给客户端的响应，就地写入
+     */
     private Mono<Void> relay(ClientResponse upstream, ServerHttpResponse response) {
+        // 上游状态码原样透传：401/429/502… 保持原样，不被折叠成通用 500。
         response.setStatusCode(upstream.statusCode());
 
+        // 只回传白名单里的头，且原样拷贝不解析（理由见 RELAYED_HEADERS 注释）。
         HttpHeaders upstreamHeaders = upstream.headers().asHttpHeaders();
         upstreamHeaders.forEach((name, values) -> {
             if (RELAYED_HEADERS.contains(name.toLowerCase(Locale.ROOT))) {
