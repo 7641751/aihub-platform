@@ -26,6 +26,17 @@ spring:
     username: ${SPRING_RABBITMQ_USERNAME:aihub}
     password: ${SPRING_RABBITMQ_PASSWORD:aihub}
     connection-timeout: 5s
+    listener:
+      simple:
+        # 重试 3 次（指数退避）后 reject；配合业务队列的 x-dead-letter-* 进入 DLQ。
+        retry:
+          enabled: true
+          max-attempts: 3
+          initial-interval: 200ms
+          multiplier: 2
+          max-interval: 2s
+        # 绝不 requeue：无限 requeue 会把 broker 和日志同时打爆，且掩盖真正的坏消息。
+        default-requeue-rejected: false
 
 management:
   endpoints:
