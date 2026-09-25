@@ -5,6 +5,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -29,7 +30,9 @@ class MeteringSpoolTest {
 
         List<Path> files = spool.list();
         assertThat(files).hasSize(3);
-        assertThat(files.get(0).getFileName().toString()).isLessThan(files.get(1).getFileName().toString());
+        // 按 list() 返回的顺序（也就是重投顺序）把内容读回来，断言的才是「时间序」本身。
+        // 旧写法比较两个文件名的字典序 —— 而 list() 本来就排序，那个断言恒真、抓不到顺序回归。
+        assertThat(readAll(spool, files)).containsExactly("first", "second", "third");
         assertThat(spool.count()).isEqualTo(3);
     }
 
@@ -72,5 +75,47 @@ class MeteringSpoolTest {
 
         assertThat(spool.list()).isEmpty();
         assertThat(spool.count()).isZero();
+    }
+
+    /**
+     * 上界判定用的是内存计数，它的初值必须来自**启动时对目录的扫描**：否则网关重启后
+     * 能往同一个 spool 目录里再塞一整个 {@code maxFiles}（上界形同虚设）。
+     */
+    @Test
+    void countsFilesThatWereAlreadyOnDiskAtStartup() throws IOException {
+        Path spoolDir = dir.resolve("spool");
+        new MeteringSpool(spoolDir, 1).append("existing");
+
+        MeteringSpool afterRestart = new MeteringSpool(spoolDir, 1);
+
+        assertThat(afterRestart.count()).isEqualTo(1);
+        assertThatThrownBy(() -> afterRestart.append("new"))
+                .isInstanceOf(MeteringSpool.SpoolFullException.class);
+    }
+
+    /**
+     * 内存计数不能在 append / delete 路径上漂移：用一个**新实例**（重新扫目录）作为磁盘真值，
+     * 与老实例的内存计数对账。计数一旦偏小，上界就会失效。
+     */
+    @Test
+    void deletesKeepTheTrackedCountInSyncWithTheDirectory() throws IOException {
+        Path spoolDir = dir.resolve("spool");
+        MeteringSpool spool = new MeteringSpool(spoolDir, 10);
+        spool.append("first");
+        spool.append("second");
+        spool.append("third");
+
+        spool.delete(spool.list().get(0));
+
+        assertThat(spool.count()).isEqualTo(2);
+        assertThat(new MeteringSpool(spoolDir, 10).count()).isEqualTo(2);
+    }
+
+    private static List<String> readAll(MeteringSpool spool, List<Path> files) throws IOException {
+        List<String> payloads = new ArrayList<>(files.size());
+        for (Path file : files) {
+            payloads.add(spool.read(file));
+        }
+        return payloads;
     }
 }

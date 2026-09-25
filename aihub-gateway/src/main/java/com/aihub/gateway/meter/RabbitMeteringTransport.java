@@ -4,6 +4,7 @@ import com.aihub.common.meter.MeteringTopology;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.core.MessageDeliveryMode;
+import org.springframework.amqp.core.ReturnedMessage;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 
@@ -19,7 +20,11 @@ import java.util.concurrent.TimeoutException;
  *       只有 broker 确认了才算投递成功，否则落 spool 重投；</li>
  *   <li><b>persistent</b>：broker 重启不丢；</li>
  *   <li><b>mandatory</b>：交换器存在但没绑队列时能被 {@code ReturnsCallback} 发现 ——
- *       否则 broker 会**静默丢弃**这条消息，客户端毫无察觉。</li>
+ *       否则 broker 会**静默丢弃**这条消息，客户端毫无察觉。
+ *       <br>注意：被退回的消息 broker **照样 ack**（只是另发一条 {@code basic.return} 并把消息挂到
+ *       {@code CorrelationData} 上），所以「confirm 是 ack」并不等于「投递成功」，
+ *       {@link #send} 必须同时检查 {@link CorrelationData#getReturned()}，否则不可路由会被误报成功、
+ *       事件永远不会落 spool。</li>
  * </ol>
  *
  * <p>本方法**阻塞**（等 confirm），因此只能在 {@code MeteringDispatcher} 的守护线程或调度线程上调用，
@@ -57,8 +62,22 @@ public final class RabbitMeteringTransport implements MeteringTransport {
                     correlation);
             CorrelationData.Confirm confirm =
                     correlation.getFuture().get(confirmTimeoutMs, TimeUnit.MILLISECONDS);
-            if (confirm == null || !confirm.isAck()) {
-                log.error("broker 未确认计量事件: {}", confirm == null ? "没有确认结果" : confirm.getReason());
+            // 被退回的消息同样算投递失败：mandatory + publisher-returns 下 broker 对**不可路由**
+            // （交换器在、没人绑队列）的消息照样 ack，只是另发一条 basic.return 并把消息挂到
+            // CorrelationData 上。只看 confirm 会把这种消息报成成功 → 事件永不落 spool，
+            // 恰好是 mandatory 想暴露的那个失败模式。
+            ReturnedMessage returned = correlation.getReturned();
+            if (confirm == null || !confirm.isAck() || returned != null) {
+                if (returned != null) {
+                    // 与「broker 拒绝（nack）」区分开：这一条说明交换器在、只是没人绑队列。
+                    log.error("计量事件不可路由，已被 broker 退回（confirm 虽为 ack 但没人收）: "
+                                    + "exchange={} routingKey={} replyCode={} replyText={}",
+                            returned.getExchange(), returned.getRoutingKey(),
+                            returned.getReplyCode(), returned.getReplyText());
+                } else {
+                    log.error("broker 未确认计量事件: {}",
+                            confirm == null ? "没有确认结果" : confirm.getReason());
+                }
                 return false;
             }
             return true;

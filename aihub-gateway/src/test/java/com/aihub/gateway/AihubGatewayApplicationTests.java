@@ -28,11 +28,13 @@ class AihubGatewayApplicationTests {
                 .expectStatus().isOk()
                 .expectBody(String.class)
                 // 同时钉住 /healthz 的路径映射（来自主配置的 management.endpoints.web.path-mapping.health）
-                // 与测试用的 Redis 健康开关真的生效了：本机没有 Redis，
-                // 若该指示器还在，这里会是 DOWN 且响应体里出现 "redis"。
+                // 与测试用的 Redis / RabbitMQ 健康开关真的生效了：本机没有 Redis，
+                // 若该指示器还在，这里会是 DOWN 且响应体里出现 "redis"；RabbitMQ 即使本机恰好有一个
+                // 在跑也必须不出现 —— 否则测试套件会静默依赖一个活 broker。
                 .value(body -> assertThat(body)
                         .contains("\"status\":\"UP\"")
-                        .doesNotContain("\"redis\""));
+                        .doesNotContain("\"redis\"")
+                        .doesNotContain("\"rabbit\""));
     }
 
     /**
@@ -51,6 +53,10 @@ class AihubGatewayApplicationTests {
         assertThat(environment.getProperty("management.endpoint.health.show-details")).isEqualTo("always");
         // 同时确认测试自己的那一行也合并在内（两份配置真的叠加，而不是二选一）。
         assertThat(environment.getProperty("management.health.redis.enabled")).isEqualTo("false");
+        // rabbit 健康指示器的开关同样只写在主配置里，且是「网关测试不需要活 broker」的前提：
+        // 没有它，healthzReturnsUp 会静默依赖一个正在跑的 RabbitMQ（本机恰好有一个时全绿，
+        // CI / 别的机器上随机红）。
+        assertThat(environment.getProperty("management.health.rabbit.enabled")).isEqualTo("false");
     }
 
     /**

@@ -9,6 +9,10 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -143,5 +147,36 @@ class MeteringDispatcherTest {
         assertThat(dispatcher.replayOnce()).isZero();
 
         assertThat(spool.list()).hasSize(1);
+    }
+
+    /**
+     * 守护线程是唯一的消费者：某一条事件触发未预期异常时，循环必须继续，否则线程静默死掉、
+     * 后面所有事件只会在队列里堆到「队列满」的 ERROR（那条日志把原因指向容量，误导排查）。
+     * 这是唯一一条覆盖 {@code loop()} 自身的用例（其余用 {@code drainOnce()} 的确定性入口）。
+     */
+    @Test
+    void aThrowingDispatchDoesNotKillTheConsumerLoop() throws InterruptedException {
+        MeteringSpool spool = new MeteringSpool(dir, 10);
+        BlockingQueue<String> delivered = new LinkedBlockingQueue<>();
+        AtomicInteger calls = new AtomicInteger();
+        MeteringTransport explodingFirstSend = payload -> {
+            if (calls.incrementAndGet() == 1) {
+                throw new IllegalStateException("boom from the transport");
+            }
+            delivered.add(payload);
+            return true;
+        };
+        MeteringDispatcher dispatcher = dispatcher(explodingFirstSend, spool, 10);
+
+        try {
+            dispatcher.enqueue("payload-1");
+            dispatcher.enqueue("payload-2");
+            dispatcher.start();
+
+            // 第一投抛异常之后，队列里的第二条仍必须被投出去。
+            assertThat(delivered.poll(5, TimeUnit.SECONDS)).isEqualTo("payload-2");
+        } finally {
+            dispatcher.stop();
+        }
     }
 }
