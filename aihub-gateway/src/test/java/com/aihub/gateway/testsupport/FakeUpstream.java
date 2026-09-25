@@ -13,22 +13,32 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 基于 JDK 内置 HttpServer 的假上游：无需 Docker、无需额外依赖。
  * 每个 start() 绑定随机端口；按入队顺序（FIFO）返回预置响应，队列空时返回 200 + 空 JSON。
+ *
+ * <p>M2 起队列里放的是 {@link Responder}（怎么写由预置项决定），因此可以构造
+ * 「分块 + 中途卡住等测试放行」的响应 —— 这是验证「网关逐帧 flush」唯一可证伪的手段。
  */
 public final class FakeUpstream {
 
     public record CapturedRequest(String method, String path, Map<String, String> headers, String body) {
     }
 
-    private record Response(int status, String contentType, String body) {
+    /** 一个预置响应。 */
+    @FunctionalInterface
+    private interface Responder {
+        void write(HttpExchange exchange) throws IOException;
     }
 
     private final HttpServer server;
-    private final Deque<Response> queued = new ArrayDeque<>();
+    private final Deque<Responder> queued = new ArrayDeque<>();
     private volatile CapturedRequest lastRequest;
+    private volatile CountDownLatch secondFrameRelease = new CountDownLatch(0);
+    private volatile boolean secondFrameWritten;
 
     private FakeUpstream(HttpServer server) {
         this.server = server;
@@ -50,12 +60,13 @@ public final class FakeUpstream {
         return "http://127.0.0.1:" + server.getAddress().getPort();
     }
 
+    /** 一次性返回整段 SSE（不模拟增量）。 */
     public synchronized void enqueueSse(String frames) {
-        queued.add(new Response(200, "text/event-stream; charset=utf-8", frames));
+        queued.add(exchange -> writeBody(exchange, 200, "text/event-stream; charset=utf-8", frames, Map.of()));
     }
 
     public synchronized void enqueueJson(int status, String body) {
-        queued.add(new Response(status, "application/json; charset=utf-8", body));
+        queued.add(exchange -> writeBody(exchange, status, "application/json; charset=utf-8", body, Map.of()));
     }
 
     /**
@@ -63,7 +74,48 @@ public final class FakeUpstream {
      * {@code contentType == null} 表示**完全不发**该头，其它值按字节原样写出（可以是畸形值）。
      */
     public synchronized void enqueueRaw(int status, String contentType, String body) {
-        queued.add(new Response(status, contentType, body));
+        queued.add(exchange -> writeBody(exchange, status, contentType, body, Map.of()));
+    }
+
+    /** 额外响应头（例如上游 429 的 {@code Retry-After} / {@code x-ratelimit-*}）。 */
+    public synchronized void enqueueWithHeaders(int status, String contentType, String body,
+                                               Map<String, String> extraHeaders) {
+        queued.add(exchange -> writeBody(exchange, status, contentType, body, extraHeaders));
+    }
+
+    /**
+     * 分块发送的 SSE：第一帧写完**立刻 flush**，然后阻塞等测试放行（最多 5 秒），再写第二帧。
+     * <p>这是「网关必须逐帧 flush」的唯一可证伪构造：一个「攒完再发」的实现在客户端侧**读不到第一帧**
+     * （而客户端要读到第一帧才会放行上游）→ 死锁 → 用例在 5 秒读超时处失败。
+     */
+    public synchronized void enqueueHandshakeSse(String firstFrame, String secondFrame) {
+        this.secondFrameRelease = new CountDownLatch(1);
+        this.secondFrameWritten = false;
+        queued.add(exchange -> {
+            exchange.getResponseHeaders().add("Content-Type", "text/event-stream; charset=utf-8");
+            exchange.sendResponseHeaders(200, 0);   // 0 => chunked（长度未知，才能逐帧发）
+            OutputStream out = exchange.getResponseBody();
+            out.write(firstFrame.getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            try {
+                secondFrameRelease.await(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            secondFrameWritten = true;
+            out.write(secondFrame.getBytes(StandardCharsets.UTF_8));
+            out.flush();
+            out.close();
+        });
+    }
+
+    /** 第二帧是否已经写出（用于断言「第一帧到达时上游还没写第二帧」）。 */
+    public boolean secondFrameWritten() {
+        return secondFrameWritten;
+    }
+
+    public void releaseSecondFrame() {
+        secondFrameRelease.countDown();
     }
 
     public CapturedRequest lastRequest() {
@@ -93,18 +145,29 @@ public final class FakeUpstream {
         lastRequest = new CapturedRequest(exchange.getRequestMethod(),
                 exchange.getRequestURI().getPath(), headers, body);
 
-        Response response;
+        Responder responder;
         synchronized (this) {
-            response = queued.poll();
+            responder = queued.poll();
         }
-        if (response == null) {
-            response = new Response(200, "application/json; charset=utf-8", "{}");
+        if (responder == null) {
+            writeBody(exchange, 200, "application/json; charset=utf-8", "{}", Map.of());
+            return;
         }
-        byte[] payload = response.body().getBytes(StandardCharsets.UTF_8);
-        if (response.contentType() != null) {
-            exchange.getResponseHeaders().add("Content-Type", response.contentType());
+        try {
+            responder.write(exchange);
+        } catch (IOException e) {
+            // 网关/客户端断开时写响应会失败：这是断连用例的正常分支，不要把它扬出去。
         }
-        exchange.sendResponseHeaders(response.status(), payload.length);
+    }
+
+    private static void writeBody(HttpExchange exchange, int status, String contentType, String body,
+                                  Map<String, String> extraHeaders) throws IOException {
+        byte[] payload = body.getBytes(StandardCharsets.UTF_8);
+        if (contentType != null) {
+            exchange.getResponseHeaders().add("Content-Type", contentType);
+        }
+        extraHeaders.forEach((name, value) -> exchange.getResponseHeaders().add(name, value));
+        exchange.sendResponseHeaders(status, payload.length);
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(payload);
         }
