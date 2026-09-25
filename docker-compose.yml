@@ -79,6 +79,8 @@ services:
     depends_on:
       admin:
         condition: service_started
+      rabbitmq:
+        condition: service_healthy
     environment:
       AIHUB_UPSTREAM_BASE_URL: ${AIHUB_UPSTREAM_BASE_URL:-http://host.docker.internal:11434}
       SPRING_DATA_REDIS_HOST: redis
@@ -86,8 +88,15 @@ services:
       AIHUB_INTERNAL_SECRET: ${AIHUB_INTERNAL_SECRET:?set AIHUB_INTERNAL_SECRET in .env}
       AIHUB_UPSTREAM_API_KEY: ${AIHUB_UPSTREAM_API_KEY:-}
       AIHUB_UPSTREAM_DEFAULT_MODEL: ${AIHUB_UPSTREAM_DEFAULT_MODEL:-default}
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER:-aihub}
+      SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
+      AIHUB_METERING_SPOOL_DIR: /app/data/metering-spool
+    volumes:
+      - gateway-spool:/app/data
     ports:
       - "8080:8080"
 
 volumes:
   mysql-data:
+  gateway-spool:
