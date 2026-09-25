@@ -1,10 +1,15 @@
 package com.aihub.admin.metering;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.aihub.admin.support.AbstractIntegrationTest;
 import com.aihub.common.meter.MeteringEvent;
 import com.aihub.common.meter.MeteringEventCodec;
 import com.aihub.common.meter.MeteringTopology;
+import com.aihub.mq.meter.MeteringConsumer;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,6 +20,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -37,8 +44,18 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
                 12, 34, 46, 1200, 250, MeteringEvent.STATUS_SUCCESS, null, createdAtMillis);
     }
 
+    /**
+     * 按**发布端真实的内容类型**投递：{@code RabbitTemplate} 的默认转换器打的是
+     * {@code contentType=text/plain} 加一个**单独**的 {@code contentEncoding=UTF-8}，
+     * 而网关发的是 {@link MeteringTopology#MESSAGE_CONTENT_TYPE}（{@code text/plain;charset=UTF-8}，
+     * 见 {@code RabbitMeteringTransport.java:58}）。不在这里盖一刀，本用例验的就不是真实线格式。
+     */
     private void send(String payload) {
-        rabbitTemplate.convertAndSend(MeteringTopology.EXCHANGE, MeteringTopology.ROUTING_KEY, payload);
+        rabbitTemplate.convertAndSend(MeteringTopology.EXCHANGE, MeteringTopology.ROUTING_KEY, payload,
+                message -> {
+                    message.getMessageProperties().setContentType(MeteringTopology.MESSAGE_CONTENT_TYPE);
+                    return message;
+                });
     }
 
     private Integer rows(String requestId) {
@@ -100,10 +117,20 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
 
         send(payload);
         awaitRows(requestId, 1, Duration.ofSeconds(10));
-        send(payload);
-        Thread.sleep(2_000);
+        send(payload);   // 重复投递
 
-        assertThat(rows(requestId)).isEqualTo(1);
+        // 时序栅栏：重复投递之后再投一条**不同**的事件，并等它真的落库。
+        // 只断言 count==1 是不够的 ——「第二条根本没投出去 / 消费链路已经停了」同样给出 count==1 的绿色，
+        // 那样的绿色什么也没证明。栅栏消息能落库，证明重复投递之后链路仍在投递且仍在消费。
+        // 队列是单消费者 FIFO，栅栏行出现时排在它前面的重复消息必然已处理完，故不再按固定时长 sleep。
+        String fenceRequestId = "req-mq-idempotent-fence";
+        send(MeteringEventCodec.encode(event(fenceRequestId, 1_800_000_001_777L)));
+        awaitRows(fenceRequestId, 1, Duration.ofSeconds(10));
+        assertThat(rows(fenceRequestId))
+                .as("时序栅栏：栅栏事件必须真的落库，否则说明这次绿色是「消息根本没被消费」")
+                .isEqualTo(1);
+
+        assertThat(rows(requestId)).as("同一载荷投两次，只能有一行").isEqualTo(1);
     }
 
     /**
@@ -115,22 +142,59 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
         drainDeadLetterQueue();
         String garbage = "this-is-not-a-metering-event";
 
-        send(garbage);
+        // 挂一个 appender 到消费者**自己的** logger 上：重试循环每跑一次 onMessage 就打一条 ERROR，
+        // 于是「恰好 3 次尝试」成了可断言的事实。日志里那句 WARN「Retries exhausted」来自
+        // RejectAndDontRequeueRecoverer，是**另一个** logger，不会混进来。
+        Logger consumerLogger = (Logger) LoggerFactory.getLogger(MeteringConsumer.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        // list 默认是普通 ArrayList（写发生在消费者线程、读发生在测试线程），换成同步包装以便读侧加锁。
+        appender.list = Collections.synchronizedList(new ArrayList<>());
+        appender.start();
+        consumerLogger.addAppender(appender);
 
-        Message dead = receiveFromDeadLetterQueue(Duration.ofSeconds(15));
+        Message dead = null;
+        try {
+            send(garbage);
+            dead = receiveFromDeadLetterQueue(garbage, Duration.ofSeconds(15));
+        }
+        finally {
+            // 必须摘掉：appender 挂在全局 logger 上，留下会污染其它用例并一直攒事件。
+            consumerLogger.detachAppender(appender);
+            appender.stop();
+        }
+
         assertThat(dead).as("解不开的载荷必须进死信队列，而不是被静默 ACK").isNotNull();
         assertThat(new String(dead.getBody(), StandardCharsets.UTF_8)).isEqualTo(garbage);
 
         // 仅「DLQ 里有一条消息」还不够：要证明它是被 **broker 死信**过来的。x-death 由 DLX 转发时写入——
-        // reason=rejected 钉住「拒绝且不 requeue」（default-requeue-rejected=false），
-        // queue 钉住它先经过了业务队列（而不是被谁直接投进 DLQ）。
-        // 反证：把 default-requeue-rejected 改成 true、或摘掉业务队列的 x-dead-letter-*，本用例立刻红。
+        // reason=rejected 钉住「拒绝且不 requeue」，queue 钉住它先经过了业务队列（而不是被谁直接投进 DLQ）。
+        // reject 的来源是**重试耗尽**：RejectAndDontRequeueRecoverer 抛 AmqpRejectAndDontRequeueException，
+        // 与 default-requeue-rejected 无关（见 MeteringTopologyConfig.java:19-25；实测把那个属性翻成
+        // true，本用例依然全绿，见 task-9-report.md §4.2）。
+        // 反证：摘掉业务队列的 x-dead-letter-*，消息 reject 后直接被丢掉，本用例立刻红。
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> xDeath =
                 (List<Map<String, Object>>) dead.getMessageProperties().getHeaders().get("x-death");
         assertThat(xDeath).as("死信消息必须带 broker 写入的 x-death 头").isNotNull().isNotEmpty();
         assertThat(xDeath.get(0)).containsEntry("reason", "rejected");
         assertThat(xDeath.get(0)).containsEntry("queue", MeteringTopology.QUEUE);
+
+        // 重试次数必须被钉住：3 次尝试 = 消费者打 3 条 ERROR。max-attempts 改成 1 或 5 都会让这里红
+        // （1 条 / 5 条）—— 而原先「15 秒内拿到死信消息」的写法对 1 和 5 都照样绿。
+        List<ILoggingEvent> attempts = errorRecords(appender);
+        assertThat(attempts).as("重试循环每条 ERROR 对应一次尝试，必须恰好 3 条").hasSize(3);
+        assertThat(attempts.stream().map(ILoggingEvent::getFormattedMessage).toList())
+                .allSatisfy(message -> assertThat(message).contains(garbage));
+    }
+
+    /**
+     * 读 appender 里的记录。加锁的理由：logback 的 {@code ListAppender.list} 本身不是线程安全的，
+     * 而 {@code appender.list} 已换成 {@code synchronizedList} 包装，读写锁在同一个对象上。
+     */
+    private static List<ILoggingEvent> errorRecords(ListAppender<ILoggingEvent> appender) {
+        synchronized (appender.list) {
+            return new ArrayList<>(appender.list);
+        }
     }
 
     private void drainDeadLetterQueue() {
@@ -139,11 +203,17 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
         }
     }
 
-    private Message receiveFromDeadLetterQueue(Duration timeout) throws InterruptedException {
+    /**
+     * 轮询 DLQ，直到**载荷等于期望值**的消息出现再返回它（不是取收到的第一条）。
+     * DLQ 在基类的单例容器里，被整个 JVM 的测试类共享：别的测试类若在中间死信一条消息，
+     * 「取第一条」就会变成一次假红。不是我们的消息一律丢弃（与 {@link #drainDeadLetterQueue()} 一致）。
+     */
+    private Message receiveFromDeadLetterQueue(String expectedBody, Duration timeout) throws InterruptedException {
         long deadline = System.nanoTime() + timeout.toNanos();
         while (System.nanoTime() < deadline) {
             Message message = rabbitTemplate.receive(MeteringTopology.DEAD_LETTER_QUEUE, 500);
-            if (message != null) {
+            if (message != null
+                    && expectedBody.equals(new String(message.getBody(), StandardCharsets.UTF_8))) {
                 return message;
             }
         }
