@@ -41,6 +41,9 @@ import static org.mockito.Mockito.when;
  * <p>这里钉住四件事，改前都只是「今天恰好对」：空 Mono 兜底 401（Finding B）、成功时的
  * {@link ApiKeyAuthFilter#ATTRIBUTE_KEY_VIEW}（Finding E）、过滤器顺序（Finding D）、
  * 以及 Redis 阻塞 I/O 落在线程池而非 event loop 上（Finding A）。
+ *
+ * <p>Finding A 的观测对象有一次是**发后不管**的异步调用，所以那两条断言必须先等观测点发生
+ * （{@link #awaitObserved}），否则断言本身就是在赌调度顺序。
  */
 class ApiKeyFilterContractTest {
 
@@ -120,9 +123,16 @@ class ApiKeyFilterContractTest {
      *
      * <p>把 {@code readRedis} 的 {@code subscribeOn(REDIS_SCHEDULER)} 拿掉，(a) 立刻变红：阻塞调用
      * 就又回到 event loop 上了。
+     *
+     * <p><b>两个观测点都必须先等它真的发生</b>（见 {@link #awaitObserved}）：Redis 回填是
+     * <b>发后不管</b>的（{@code writeRedis} 里 {@code subscribeOn(...).subscribe()}），
+     * 它跑完的时刻与 {@code block()} 返回的时刻没有先后关系。早先这里直接读
+     * {@code writeThread.get()}，等于让断言和一次异步调度赛跑 —— 实测在热态重复调用下
+     * 约 2/3 的轮次会读到 {@code null}（详情见 {@code .superpowers/sdd/task-11-report.md}）。
+     * 等待是有界的（5 秒），「回填从未发生」仍然会红，只是不再靠运气。
      */
     @Test
-    void redisOutageStillResolvesThroughAdminWithBothRedisCallsOffTheCallersThread() {
+    void redisOutageStillResolvesThroughAdminWithBothRedisCallsOffTheCallersThread() throws InterruptedException {
         AtomicReference<String> readThread = new AtomicReference<>();
         AtomicReference<String> writeThread = new AtomicReference<>();
         ApiKeyResolver resolver = resolverWith(Optional.of(VALID_VIEW), readThread, writeThread);
@@ -135,15 +145,28 @@ class ApiKeyFilterContractTest {
 
         assertThat(reachedDownstream.get()).as("Redis 故障必须降级到 admin 并放行").isNotNull();
         assertThat((ApiKeyView) exchange.getAttribute(ApiKeyAuthFilter.ATTRIBUTE_KEY_VIEW)).isEqualTo(VALID_VIEW);
-        assertThat(readThread.get())
+        assertThat(awaitObserved(readThread, "阻塞 Redis 读"))
                 .as("阻塞 Redis 读必须在弹性线程池上，不能是 event loop（%s）", callerThread)
                 .startsWith("boundedElastic-").isNotEqualTo(callerThread);
-        assertThat(writeThread.get())
+        assertThat(awaitObserved(writeThread, "命中 admin 后的 Redis 回填"))
                 .as("阻塞 Redis 写也同样不能在 event loop 上")
                 .startsWith("boundedElastic-").isNotEqualTo(callerThread);
     }
 
     // --- 测试脚手架 -------------------------------------------------------
+
+    /**
+     * 等一个「已经发生的观测点」：被观测的调用是异步的，只能等到它把线程名写进来为止。
+     * 有界 5 秒，等不到就带着明确的说明变红（而不是抛一个与真实原因无关的超时）。
+     */
+    private static String awaitObserved(AtomicReference<String> observed, String what) throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (observed.get() == null && System.nanoTime() < deadline) {
+            Thread.sleep(1);
+        }
+        assertThat(observed.get()).as("%s 在 5 秒内没有发生", what).isNotNull();
+        return observed.get();
+    }
 
     /**
      * 真实 {@link ApiKeyResolver} + 必然失败的 Redis 桩 + 固定 admin 应答。
