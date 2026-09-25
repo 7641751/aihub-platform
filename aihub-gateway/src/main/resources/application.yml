@@ -4,6 +4,11 @@ server:
 spring:
   application:
     name: aihub-gateway
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:127.0.0.1}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      timeout: 2s
 
 management:
   endpoints:
@@ -20,3 +25,12 @@ management:
 aihub:
   upstream:
     base-url: ${AIHUB_UPSTREAM_BASE_URL:http://127.0.0.1:11434}
+    api-key: ${AIHUB_UPSTREAM_API_KEY:}
+    default-model: ${AIHUB_UPSTREAM_DEFAULT_MODEL:default}
+  auth:
+    enabled: ${AIHUB_AUTH_ENABLED:true}
+    local-cache-ttl: 30s
+    key-cache-ttl: 5m
+    admin-base-url: ${AIHUB_ADMIN_BASE_URL:http://127.0.0.1:8081}
+  internal:
+    secret: ${AIHUB_INTERNAL_SECRET:}

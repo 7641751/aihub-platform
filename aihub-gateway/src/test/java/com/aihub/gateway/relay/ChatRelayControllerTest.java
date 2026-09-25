@@ -86,6 +86,9 @@ class ChatRelayControllerTest {
 
         assertThat(upstream.lastRequest().body()).isEqualTo("{\"stream\":false,\"messages\":[]}");
         assertThat(upstream.lastRequest().path()).isEqualTo("/v1/chat/completions");
+        // 未配置 aihub.upstream.api-key 时不发 Authorization —— 空 Bearer 会被部分上游直接 401。
+        // 「配了 apiKey 就发 Bearer」由 UpstreamAuthorizationTest 覆盖。
+        assertThat(upstream.lastRequest().headers()).doesNotContainKey("authorization");
     }
 
     @Test

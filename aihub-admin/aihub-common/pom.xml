@@ -12,4 +12,16 @@
 
     <artifactId>aihub-common</artifactId>
     <name>aihub-common</name>
+
+    <!--
+      仅测试作用域：main 作用域必须保持零依赖（com.aihub.common.* 只用 JDK）。
+      这里只为 SHA-256/Base64 编解码等纯逻辑的单元测试引入 JUnit 5 + AssertJ。
+    -->
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
 </project>

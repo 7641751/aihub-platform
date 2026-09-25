@@ -73,6 +73,10 @@ services:
         condition: service_started
     environment:
       AIHUB_UPSTREAM_BASE_URL: ${AIHUB_UPSTREAM_BASE_URL:-http://host.docker.internal:11434}
+      SPRING_DATA_REDIS_HOST: redis
+      AIHUB_ADMIN_BASE_URL: http://admin:8081
+      AIHUB_INTERNAL_SECRET: ${AIHUB_INTERNAL_SECRET:?set AIHUB_INTERNAL_SECRET in .env}
+      AIHUB_UPSTREAM_API_KEY: ${AIHUB_UPSTREAM_API_KEY:-}
     ports:
       - "8080:8080"
 
