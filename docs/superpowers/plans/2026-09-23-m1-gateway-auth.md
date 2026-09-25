@@ -700,6 +700,8 @@ AIHUB_INTERNAL_SECRET=change-me-internal-secret-change-me
 AIHUB_UPSTREAM_API_KEY=
 ```
 
+> ⚠️ **不要改 redis 服务的宿主端口映射。** 它当前是 `6380:6379`，是为了避开本机原生 Windows Redis 占用的 6379 而故意改的（提交 `chore: publish redis on host 6380 ...`）。容器内端口仍是 6379，网关在 compose 网络里走 `SPRING_DATA_REDIS_HOST: redis`，**不受宿主映射影响**。宿主侧客户端（例如 IDEA 的 Redis 数据源）要用 6380。
+
 - [ ] **Step 5: 验证上下文仍能启动**
 
 ```powershell
@@ -2255,6 +2257,7 @@ git commit -m "feat: expose the configured model list on the gateway"
 - 新增「调用方式」小节：给出 `curl` 与 OpenAI SDK（Python/Node 任一）改 `base_url=http://localhost:8080/v1` + `api_key=<minted token>` 的示例。
 - 新增「签发 API Key」小节：给出 `--aihub.mint-key.enabled=true --aihub.mint-key.tenant-name=demo --aihub.mint-key.name=my-key` 的完整命令与"明文只显示一次"的说明。
 - 更新「M0 已知边界」：**删掉已被 M1 解决的三条**（relay 只有 SSE、无鉴权、上游错误未透传），保留仍然成立的（`/healthz` 明细暴露、`request_log` 分区维护），并补 M1 仍然没做的（限流/配额/计量/多渠道路由/M4 控制台）。
+- 把端口说明改准：**Redis 宿主端口是 6380**（容器内仍 6379），原因是本机原生 Redis 占用 6379；`docs/CONVENTIONS.md` 与 README 里凡写 `Redis 6379` 的地方都要区分"宿主 / 容器内"。
 - 更新测试数量为**你实测的数字**。
 
 - [ ] **Step 3: 全量测试**
