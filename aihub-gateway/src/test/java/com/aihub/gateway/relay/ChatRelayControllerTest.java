@@ -52,6 +52,9 @@ class ChatRelayControllerTest {
         assertThat(response.headers().firstValue("Content-Type"))
                 .hasValueSatisfying(v -> assertThat(v).contains("text/event-stream"));
         assertThat(response.body()).contains("你").contains("好").contains("[DONE]");
+        // 顺序也是契约的一部分：只断言 contains("你")/contains("好") 的话，两帧**颠倒**同样是绿的，
+        // 而客户端会拿到乱序增量。indexOf 的相对位置把「先你后好」钉死（两者必然都存在，上一行已断言）。
+        assertThat(response.body().indexOf("你")).isLessThan(response.body().indexOf("好"));
     }
 
     @Test

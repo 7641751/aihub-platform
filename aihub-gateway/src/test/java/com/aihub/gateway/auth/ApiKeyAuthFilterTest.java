@@ -85,6 +85,24 @@ class ApiKeyAuthFilterTest {
         assertThat(response.body()).contains("\"type\":\"invalid_request_error\"");
     }
 
+    /**
+     * 缺口覆盖：新增的数据面端点 {@code GET /v1/models} 也落在守备范围 {@code /v1/**} 内，
+     * 必须和 {@code /v1/chat/completions} 一样先过鉴权。少了这条，「新端点被过滤器漏掉」在测试里
+     * 毫无痕迹 —— 它只在线上表现为「任何人都能匿名列出模型」。
+     *
+     * <p>断言的是 401 + OpenAI 错误体本身，而不是「不是 200」：状态码对但错误体换成框架默认页，
+     * OpenAI SDK 同样解析不了。本类与 {@code ModelsControllerTest}（{@code auth.enabled=false}）
+     * 一起才构成完整契约：端点存在（那边 200 + list 形状）且确实在过滤器后面（这边 401）。
+     */
+    @Test
+    void modelsEndpointIsGuardedLikeEveryOtherV1Path() throws Exception {
+        HttpResponse<String> response = get("/v1/models");
+
+        assertThat(response.statusCode()).isEqualTo(401);
+        assertThat(response.body()).contains("\"code\":\"invalid_api_key\"");
+        assertThat(response.body()).contains("\"type\":\"invalid_request_error\"");
+    }
+
     @Test
     void unknownApiKeyIsRejected() throws Exception {
         assertThat(post("Bearer ak_x.unknown").statusCode()).isEqualTo(401);
@@ -107,10 +125,7 @@ class ApiKeyAuthFilterTest {
 
     @Test
     void healthEndpointIsNotGuarded() throws Exception {
-        HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + gatewayPort + "/healthz"))
-                .GET().build();
-        HttpResponse<String> response = HttpClient.newHttpClient()
-                .send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = get("/healthz");
 
         assertThat(response.statusCode()).isEqualTo(200);
     }
@@ -165,6 +180,13 @@ class ApiKeyAuthFilterTest {
 
     private HttpResponse<String> post(String authorization) throws Exception {
         return postPath("/v1/chat/completions", authorization);
+    }
+
+    /** 不带 Authorization 的 GET：用于「某些端点必须被守卫拦下」的断言。 */
+    private HttpResponse<String> get(String path) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(
+                URI.create("http://127.0.0.1:" + gatewayPort + path)).GET().build();
+        return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
     }
 
     private HttpResponse<String> postPath(String path, String authorization) throws Exception {
