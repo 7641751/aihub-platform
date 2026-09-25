@@ -35,10 +35,17 @@ class RequestLogServiceTest extends AbstractIntegrationTest {
                 12, 34, 46, 1200, 250, MeteringEvent.STATUS_SUCCESS, null, createdAtMillis);
     }
 
+    /** 同上，但显式给 {@code tenant_id}：决策 9 要钉住网关的 {@code 0} 哨兵原样落库。 */
+    private static MeteringEvent event(String requestId, long tenantId, long createdAtMillis) {
+        return new MeteringEvent(requestId, tenantId, null, null, "deepseek-chat",
+                12, 34, 46, 1200, 250, MeteringEvent.STATUS_SUCCESS, null, createdAtMillis);
+    }
+
     private Map<String, Object> row(String requestId) {
         return jdbcTemplate.queryForMap(
-                "select tenant_id, model, prompt_tokens, completion_tokens, total_tokens, latency_ms,"
-                        + " ttft_ms, status, error_code, created_at from request_log where request_id = ?",
+                "select tenant_id, api_key_id, channel_id, model, prompt_tokens, completion_tokens,"
+                        + " total_tokens, latency_ms, ttft_ms, status, error_code, created_at"
+                        + " from request_log where request_id = ?",
                 requestId);
     }
 
@@ -50,6 +57,12 @@ class RequestLogServiceTest extends AbstractIntegrationTest {
 
         Map<String, Object> row = row(requestId);
         assertThat(row.get("tenant_id")).isEqualTo(7L);
+        // 决策 8：M2 的共享 ApiKeyView 还没有数值主键，api_key_id / channel_id **必须**落 NULL。
+        // containsKey 不能省：queryForMap 少了列时 get() 同样返回 null，只断言 isNull() 会被漏列骗过。
+        assertThat(row).containsKey("api_key_id");
+        assertThat(row).containsKey("channel_id");
+        assertThat(row.get("api_key_id")).isNull();
+        assertThat(row.get("channel_id")).isNull();
         assertThat(row.get("model")).isEqualTo("deepseek-chat");
         assertThat(row.get("prompt_tokens")).isEqualTo(12);
         assertThat(row.get("completion_tokens")).isEqualTo(34);
@@ -67,6 +80,30 @@ class RequestLogServiceTest extends AbstractIntegrationTest {
         LocalDateTime expected = LocalDateTime.ofInstant(Instant.ofEpochMilli(CREATED_AT_MILLIS), ZoneOffset.UTC);
         assertThat(expected).isEqualTo(LocalDateTime.parse("2027-01-15T08:00:00.123"));
         assertThat(row.get("created_at")).isEqualTo(expected);
+    }
+
+    /**
+     * 决策 9：{@code tenant_id} 取**事件**里的值，网关在没有认证视图时发 {@code 0} 哨兵。
+     * 真值 {@code 0} 必须原样落库 —— 不能被丢弃、也不能被写成 NULL。
+     *
+     * <p>判别力：把 {@code RequestLogService} 改成
+     * {@code entity.setTenantId(event.tenantId() == 0L ? null : event.tenantId())}（或把 MyBatis-Plus
+     * 的 null 字段插入策略换成「null 即省略列」）本用例立刻红：{@code tenant_id} 是
+     * {@code BIGINT NOT NULL} 且无默认值，插入会直接失败。
+     */
+    @Test
+    void tenantZeroSentinelFromEventIsPersistedAsZeroNotNull() {
+        String requestId = "req-m2-tenant-zero";
+
+        assertThat(requestLogService.persist(event(requestId, 0L, CREATED_AT_MILLIS))).isTrue();
+
+        Integer rows = jdbcTemplate.queryForObject(
+                "select count(*) from request_log where request_id = ?", Integer.class, requestId);
+        assertThat(rows).isEqualTo(1);
+
+        Map<String, Object> row = row(requestId);
+        assertThat(row.get("tenant_id")).isNotNull();
+        assertThat(row.get("tenant_id")).isEqualTo(0L);
     }
 
     /**
