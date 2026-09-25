@@ -44,7 +44,10 @@ public final class FakeUpstream {
     /**
      * 握手响应「等测试放行」的预算。**必须严格大于客户端的读取预算**（{@code SseStreamingTest} 现为 5 秒）：
      * 它只是兜底（客户端侧机制真的坏了时才轮到它），绝不与客户端读取竞争。两个预算相等时「谁先到期」
-     * 由时序抖动决定，会把一个**正确**的中继判红 —— 见 {@code task-6-report.md} 的「评审修复」一节。
+     * 由时序抖动决定，会把一个**正确**的中继判红。该不变式不是靠这段注释维持的：
+     * {@code SseStreamingTest#upstreamHoldBudgetMustExceedClientReadBudget()} 会断言这里的值严格大于
+     * 客户端预算，任何调小它的改动都会立刻变红。任务背景见
+     * {@code docs/superpowers/plans/2026-09-23-m2-metering.md} 的 Task 6。
      */
     public static final long SECOND_FRAME_HOLD_BUDGET_SECONDS = 30;
 
@@ -108,8 +111,7 @@ public final class FakeUpstream {
      * 它在收到第一帧时既不提交响应头也不回吐字节 → 客户端的 {@code send()} 一直在等响应头；
      * 而「客户端读到第一帧」正是测试放行上游的前提，于是**没人放行**，上游的等待预算自然到期、
      * 写出第二帧并关闭 body → 网关这才把整段字节一次性回吐 → 客户端读到第一帧，但此刻
-     * {@code secondFrameWritten()} 已经是 true，用例在该断言上变红（实测 33 s，红在
-     * {@code secondFrameWritten()}，见 {@code task-6-report.md} 的「评审修复」一节）。
+     * {@code secondFrameWritten()} 已经是 true，用例在该断言上变红（失败方法耗时 ≈ 本预算的秒数）。
      *
      * <p>客户端的读取预算是**兜底路径**：只有当某个实现先把响应头提交出去、却把第一帧扣住时才会
      * 走到它，所以它绝不是攒批实现的主失败点。上游的等待预算因此被刻意设为**远大于**客户端读取

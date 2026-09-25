@@ -56,7 +56,10 @@ class SseStreamingTest {
     private static final String FIRST_FRAME = "data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\n\n";
     private static final String SECOND_FRAME = "data: [DONE]\n\n";
 
-    /** 客户端读第一帧的预算；**必须远小于** {@link FakeUpstream#SECOND_FRAME_HOLD_BUDGET_SECONDS}。 */
+    /**
+     * 客户端读第一帧的预算；**必须严格小于** {@link FakeUpstream#SECOND_FRAME_HOLD_BUDGET_SECONDS}
+     * （该不变式由 {@link #upstreamHoldBudgetMustExceedClientReadBudget()} 守卫）。
+     */
     private static final long CLIENT_READ_TIMEOUT_SECONDS = 5;
 
     private static FakeUpstream upstream;
@@ -101,11 +104,13 @@ class SseStreamingTest {
         ExecutorService readerThread = Executors.newSingleThreadExecutor();
         try {
             Future<String> firstLine = readerThread.submit(reader::readLine);
-            // 客户端的读取预算是**兜底路径**：只有当某个实现先把响应头提交出去、却把第一帧扣住时
-            // 才会走到这里。攒批实现的实测失败点在下面的 secondFrameWritten() 断言上（它连响应头都
-            // 提交不出来，客户端的 send() 先一直阻塞到上游的等待预算到期）。这里仍把超时包成一条
-            // 明确的诊断，免得兜底路径退化成一个裸的 TimeoutException。客户端预算（5 秒）刻意远小于
-            // 上游预算（30 秒），正确实现下第一帧是毫秒级到达的。
+            // 这里是一个**当前没有任何用例能驱动的兜底诊断**，不要把它当成攒批实现的主失败点：
+            // 攒批实现连响应头都提交不出来（客户端 send() 先一直阻塞到上游预算到期），
+            // 实测红在下面的 secondFrameWritten() 断言上。它之所以存在，是为了覆盖「不 flush」
+            // 的**另一种形状** —— 先提交了响应头、却把第一帧扣住的实现：那种实现会走到这里，
+            // 于是拿到一条明确的诊断，而不是一个裸的 TimeoutException。
+            // 客户端预算（5 秒）刻意远小于上游预算（30 秒），正确实现下第一帧是毫秒级到达的；
+            // 这个不变式由 {@link #upstreamHoldBudgetMustExceedClientReadBudget()} 钉住。
             String line;
             try {
                 line = firstLine.get(CLIENT_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS);
@@ -160,9 +165,12 @@ class SseStreamingTest {
             BufferedReader reader = new BufferedReader(new InputStreamReader(response.body(), StandardCharsets.UTF_8));
             assertThat(reader.readLine()).contains("你");
 
-            // 客户端断连：关掉响应流（JDK HttpClient 会取消这次交换），并放行上游的收尾帧。
+            // 客户端断连：关掉响应流（JDK HttpClient 会**异步**取消这次交换）。
+            // 这里刻意**不**放行上游的第二帧：上游一直在扣留它，中继就不可能走到 ON_COMPLETE，
+            // 因此断言求值期间唯一可能出现的终态只能来自断连本身。若同步放行上游，
+            // 取消尚未抵达 Netty 通道 / WebClient 订阅时中继会正常收尾（SUCCESS + 200），
+            // 把一个**正确**的实现判红 —— 这条假红窗口现在被结构性关掉，只由 finally 放行。
             response.body().close();
-            upstream.releaseSecondFrame();
 
             MeteringEvent event = recorder.awaitEvent(requestId, Duration.ofSeconds(10));
             assertThat(event).as("客户端断连后仍必须有计量事件（设计文档 §8.1 ⑤）").isNotNull();
@@ -177,6 +185,23 @@ class SseStreamingTest {
                 response.body().close();
             }
         }
+    }
+
+    /**
+     * 握手用例之所以成立的前提不变式：上游扣留第二帧的预算**严格大于**客户端读取第一帧的预算。
+     * <p>反过来（上游预算 ≤ 客户端预算）会重新引入一条**假红**：正确的中继还没读到第一帧，上游就已经
+     * 等不下去、补写第二帧并收尾，于是「上游已写出第二帧」先于「客户端读到第一帧」成为事实，
+     * 一个**正确**的实现会在 {@code secondFrameWritten()} 断言上被判红。
+     * <p>这条守卫没有运行时行为，只把该不变式从注释变成可执行断言：将来任何「顺手」调小上游预算
+     * 或调大客户端预算的改动都会在这里立刻变红，而不是留到某次 CI 上偶发。
+     */
+    @Test
+    void upstreamHoldBudgetMustExceedClientReadBudget() {
+        assertThat(FakeUpstream.SECOND_FRAME_HOLD_BUDGET_SECONDS)
+                .as("上游扣帧等待预算（" + FakeUpstream.SECOND_FRAME_HOLD_BUDGET_SECONDS
+                        + " 秒）必须严格大于客户端读取预算（" + CLIENT_READ_TIMEOUT_SECONDS
+                        + " 秒）：两者相等或反过来，会让一个正确的中继在 secondFrameWritten() 上被误判为攒批")
+                .isGreaterThan(CLIENT_READ_TIMEOUT_SECONDS);
     }
 
     /**
