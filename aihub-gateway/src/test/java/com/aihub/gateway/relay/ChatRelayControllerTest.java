@@ -14,6 +14,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -133,6 +134,44 @@ class ChatRelayControllerTest {
         assertThat(response.statusCode()).isEqualTo(200);
         assertThat(response.headers().firstValue("Content-Type")).isEmpty();
         assertThat(response.body()).isEqualTo("no content type here");
+    }
+
+    /**
+     * 上游 429 的 {@code Retry-After} 是客户端唯一的退避依据；网关把它吃掉等于让所有 SDK
+     * 只能瞎猜重试间隔。M3 的限流治理同样依赖这条透传（台账 t1-6 的遗留项）。
+     */
+    @Test
+    void relaysRetryAfterOnUpstream429() throws Exception {
+        upstream.enqueueWithHeaders(429, "application/json; charset=utf-8",
+                "{\"error\":{\"message\":\"rate limited\"}}", Map.of("Retry-After", "7"));
+
+        HttpResponse<String> response = post("/v1/chat/completions", "{\"stream\":false}",
+                "application/json", "application/json");
+
+        assertThat(response.statusCode()).isEqualTo(429);
+        assertThat(response.headers().firstValue("Retry-After")).hasValue("7");
+    }
+
+    @Test
+    void relaysUpstreamRateLimitHeaders() throws Exception {
+        Map<String, String> headers = Map.of(
+                "x-ratelimit-limit-requests", "100",
+                "x-ratelimit-limit-tokens", "100000",
+                "x-ratelimit-remaining-requests", "0",
+                "x-ratelimit-remaining-tokens", "0",
+                "x-ratelimit-reset-requests", "7s",
+                "x-ratelimit-reset-tokens", "7s");
+        upstream.enqueueWithHeaders(429, "application/json; charset=utf-8",
+                "{\"error\":{\"message\":\"rate limited\"}}", headers);
+
+        HttpResponse<String> response = post("/v1/chat/completions", "{\"stream\":false}",
+                "application/json", "application/json");
+
+        assertThat(response.statusCode()).isEqualTo(429);
+        headers.forEach((name, value) ->
+                assertThat(response.headers().firstValue(name))
+                        .as("header %s 必须原样透传", name)
+                        .hasValue(value));
     }
 
     private HttpResponse<String> post(String path, String body, String contentType, String accept)

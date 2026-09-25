@@ -51,8 +51,23 @@ public class ChatRelayController {
      * <p>{@code x-request-id} 曾经也在这张白名单里。M2 起网关自己生成 {@code x-request-id}
      * （见 {@code RequestIdFilter}）并把它作为计量幂等键，因此**不再透传上游的同名头**：
      * 同一响应里同名的两个值无法共存，而幂等键必须是网关自产的那一个。
+     * <p>限流/退避头是**显式列举的精确名**，不是前缀匹配（{@code x-ratelimit-*} 在这里只是
+     * 命名上的族，匹配机制仍是 {@code Set#contains}）：白名单要的是「只回传已知且安全的头」，
+     * 前缀匹配会让上游随手新增的 {@code x-ratelimit-<任意>} 自动穿过网关，等于把白名单
+     * 变成开放集合。新增头必须像下面这样显式登记。
+     * <p>加头**不改变**状态码、{@code Content-Type} 与响应体字节：它们只是额外的键值对，
+     * 不参与「字节级透传」那条路径。
      */
-    private static final Set<String> RELAYED_HEADERS = Set.of("content-type");
+    private static final Set<String> RELAYED_HEADERS = Set.of(
+            "content-type",
+            // 上游限流/退避信号：客户端唯一的依据，吃掉它等于让 SDK 瞎猜（M3 的治理也依赖它）。
+            "retry-after",
+            "x-ratelimit-limit-requests",
+            "x-ratelimit-limit-tokens",
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-remaining-tokens",
+            "x-ratelimit-reset-requests",
+            "x-ratelimit-reset-tokens");
 
     private static final Logger log = LoggerFactory.getLogger(ChatRelayController.class);
 

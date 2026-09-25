@@ -1,6 +1,7 @@
 package com.aihub.gateway.relay;
 
 import com.aihub.gateway.upstream.UpstreamProperties;
+import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
@@ -25,14 +26,21 @@ public class ModelsController {
         this.properties = properties;
     }
 
+    /**
+     * 没有配置默认模型时返回**空列表**（OpenAI 协议允许），既不 NPE 也不编造 id。
+     */
     @GetMapping("/v1/models")
     public Mono<Map<String, Object>> listModels() {
-        Map<String, Object> model = Map.of(
-                "id", properties.defaultModel(),
-                "object", "model",
-                "owned_by", "aihub");
+        String defaultModel = properties.defaultModel();
+        // 没配默认模型时返回空列表，而不是编造一个 id，也不是 NPE（Map.of 不接受 null 值）。
+        List<Map<String, Object>> data = StringUtils.hasText(defaultModel)
+                ? List.of(Map.of(
+                        "id", defaultModel,
+                        "object", "model",
+                        "owned_by", "aihub"))
+                : List.of();
         return Mono.just(Map.of(
                 "object", "list",
-                "data", List.of(model)));
+                "data", data));
     }
 }

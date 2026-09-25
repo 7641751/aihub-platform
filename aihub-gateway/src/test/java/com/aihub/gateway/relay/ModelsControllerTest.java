@@ -1,5 +1,6 @@
 package com.aihub.gateway.relay;
 
+import com.aihub.gateway.upstream.UpstreamProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -10,6 +11,9 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -59,6 +63,24 @@ class ModelsControllerTest {
         assertThat(model.path("id").asText()).isEqualTo("m1-test-model");
         assertThat(model.path("object").asText()).isEqualTo("model");
         assertThat(model.path("owned_by").asText()).isEqualTo("aihub");
+    }
+
+    /**
+     * {@code defaultModel} 为 null（属性整个缺失）或空白（环境变量被设成空串）都不该 500：
+     * OpenAI 协议下 {@code data} 是数组，空数组是合法且诚实的回答；编造一个 id 会让 SDK
+     * 拿着一个不存在的模型名去打下游。修复前这里是 {@code Map.of("id", null)} → NPE → 500。
+     */
+    @Test
+    void blankOrMissingDefaultModelYieldsAnEmptyList() {
+        for (String model : Arrays.asList(null, "", "   ")) {
+            ModelsController controller =
+                    new ModelsController(new UpstreamProperties("http://127.0.0.1:1", null, model));
+
+            Map<String, Object> body = controller.listModels().block();
+
+            assertThat(body).containsEntry("object", "list");
+            assertThat((List<?>) body.get("data")).isEmpty();
+        }
     }
 
     private HttpResponse<String> get(String path) throws Exception {
