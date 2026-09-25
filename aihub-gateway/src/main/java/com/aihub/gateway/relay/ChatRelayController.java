@@ -39,8 +39,11 @@ public class ChatRelayController {
      * {@code InvalidMediaTypeException}，把上游状态码/响应体一起吞成 500。原样拷贝没有这个问题；
      * 上游没发 {@code Content-Type} 时我们也不补默认值 —— 透传的字面意思就是「上游发什么就回什么」。
      * <p>其余头（如 Content-Length、Transfer-Encoding）由本服务自行决定。
+     * <p>{@code x-request-id} 曾经也在这张白名单里。M2 起网关自己生成 {@code x-request-id}
+     * （见 {@code RequestIdFilter}）并把它作为计量幂等键，因此**不再透传上游的同名头**：
+     * 同一响应里同名的两个值无法共存，而幂等键必须是网关自产的那一个。
      */
-    private static final Set<String> RELAYED_HEADERS = Set.of("x-request-id", "content-type");
+    private static final Set<String> RELAYED_HEADERS = Set.of("content-type");
 
     private static final Logger log = LoggerFactory.getLogger(ChatRelayController.class);
 
