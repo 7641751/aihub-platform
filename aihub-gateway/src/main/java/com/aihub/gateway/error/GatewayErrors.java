@@ -26,6 +26,11 @@ public final class GatewayErrors {
 
     public static Mono<Void> write(ServerHttpResponse response, HttpStatus status,
                                   String type, String code, String message) {
+        // 响应已提交（典型：上游中途断开、头部已 flush 给客户端）时，改状态码/头是非法的，
+        // 会从错误处理器里再抛一次异常。此时只把响应收尾。
+        if (response.isCommitted()) {
+            return response.setComplete();
+        }
         response.setStatusCode(status);
         response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
         byte[] payload = serialize(type, code, message);

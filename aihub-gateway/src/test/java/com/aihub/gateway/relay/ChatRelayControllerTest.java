@@ -96,6 +96,37 @@ class ChatRelayControllerTest {
                 null, "this-is-not/a-media-type;;;q=x");
 
         assertThat(response.statusCode()).isEqualTo(200);
+        // 不只断言 200：空 body 的兜底响应也会是 200，必须确认 body 真的透传了。
+        assertThat(response.headers().firstValue("Content-Type"))
+                .hasValueSatisfying(v -> assertThat(v).contains("application/json"));
+        assertThat(response.body()).contains("\"object\":\"chat.completion\"").contains("你好");
+    }
+
+    @Test
+    void malformedUpstreamContentTypeRelaysStatusAndBodyInsteadOf500() throws Exception {
+        upstream.enqueueRaw(429, "not a media type",
+                "{\"error\":{\"message\":\"rate limited\",\"type\":\"rate_limit_error\"}}");
+
+        HttpResponse<String> response = post("/v1/chat/completions", "{\"stream\":false}",
+                "application/json", "application/json");
+
+        // 旧的 setContentType(...) 会在这里抛 InvalidMediaTypeException，被吞成 500 并丢掉上游状态码。
+        assertThat(response.statusCode()).isEqualTo(429);
+        // 头本身也原样透传（不做解析、不做归一化）。
+        assertThat(response.headers().firstValue("Content-Type")).hasValue("not a media type");
+        assertThat(response.body()).contains("rate limited");
+    }
+
+    @Test
+    void absentUpstreamContentTypeIsNotFabricated() throws Exception {
+        upstream.enqueueRaw(200, null, "no content type here");
+
+        HttpResponse<String> response = post("/v1/chat/completions", "{\"stream\":false}",
+                "application/json", "application/json");
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.headers().firstValue("Content-Type")).isEmpty();
+        assertThat(response.body()).isEqualTo("no content type here");
     }
 
     private HttpResponse<String> post(String path, String body, String contentType, String accept)

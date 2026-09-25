@@ -1,6 +1,8 @@
 package com.aihub.gateway.relay;
 
 import com.aihub.gateway.error.GatewayErrors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -30,8 +32,17 @@ public class ChatRelayController {
 
     public static final String CHAT_COMPLETIONS_PATH = "/v1/chat/completions";
 
-    /** 需要从上游回传给客户端的具体头；其余（如 Content-Length、Transfer-Encoding）由本服务自行决定。 */
-    private static final Set<String> RELAYED_HEADERS = Set.of("x-request-id");
+    /**
+     * 需要从上游原样回传给客户端的头。
+     * <p>{@code content-type} 也走这条白名单，**不做解析**：{@code HttpHeaders#contentType()} 用
+     * {@code MediaType.parseMediaType} 解析上游值，遇到畸形值（如 {@code not a media type}）会抛
+     * {@code InvalidMediaTypeException}，把上游状态码/响应体一起吞成 500。原样拷贝没有这个问题；
+     * 上游没发 {@code Content-Type} 时我们也不补默认值 —— 透传的字面意思就是「上游发什么就回什么」。
+     * <p>其余头（如 Content-Length、Transfer-Encoding）由本服务自行决定。
+     */
+    private static final Set<String> RELAYED_HEADERS = Set.of("x-request-id", "content-type");
+
+    private static final Logger log = LoggerFactory.getLogger(ChatRelayController.class);
 
     private final WebClient upstreamWebClient;
 
@@ -47,15 +58,17 @@ public class ChatRelayController {
                 .accept(MediaType.TEXT_EVENT_STREAM, MediaType.APPLICATION_JSON)
                 .bodyValue(body)
                 .exchangeToMono(upstream -> relay(upstream, response))
-                .onErrorResume(WebClientRequestException.class, ex -> GatewayErrors.write(response,
-                        HttpStatus.BAD_GATEWAY, "api_error", "upstream_unreachable",
-                        "上游服务不可达: " + ex.getMessage()));
+                .onErrorResume(WebClientRequestException.class, ex -> {
+                    // 上游内网地址/异常细节只写日志，不回给客户端（避免泄漏如 "Connection refused: /10.0.0.5:443"）。
+                    log.warn("upstream request failed, returning 502 upstream_unreachable ({}) : {}",
+                            ex.getClass().getName(), ex.getMessage());
+                    return GatewayErrors.write(response, HttpStatus.BAD_GATEWAY,
+                            "api_error", "upstream_unreachable", "Upstream service is unreachable");
+                });
     }
 
     private Mono<Void> relay(ClientResponse upstream, ServerHttpResponse response) {
         response.setStatusCode(upstream.statusCode());
-        response.getHeaders().setContentType(
-                upstream.headers().contentType().orElse(MediaType.APPLICATION_JSON));
 
         HttpHeaders upstreamHeaders = upstream.headers().asHttpHeaders();
         upstreamHeaders.forEach((name, values) -> {

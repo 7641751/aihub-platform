@@ -58,6 +58,14 @@ public final class FakeUpstream {
         queued.add(new Response(status, "application/json; charset=utf-8", body));
     }
 
+    /**
+     * 原样发送 {@code Content-Type} 头，用于构造上游异常场景：
+     * {@code contentType == null} 表示**完全不发**该头，其它值按字节原样写出（可以是畸形值）。
+     */
+    public synchronized void enqueueRaw(int status, String contentType, String body) {
+        queued.add(new Response(status, contentType, body));
+    }
+
     public CapturedRequest lastRequest() {
         return lastRequest;
     }
@@ -85,7 +93,9 @@ public final class FakeUpstream {
             response = new Response(200, "application/json; charset=utf-8", "{}");
         }
         byte[] payload = response.body().getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().add("Content-Type", response.contentType());
+        if (response.contentType() != null) {
+            exchange.getResponseHeaders().add("Content-Type", response.contentType());
+        }
         exchange.sendResponseHeaders(response.status(), payload.length);
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(payload);
