@@ -19,7 +19,7 @@
 
 **M1 到底做了什么**：`/v1/**` 现在必须带 API Key，缺省或非法一律 `401` 加 OpenAI 形状错误体（`{"error":{"code":"invalid_api_key",...}}`）；密钥解析走三级回源（本机 Caffeine → 共享 Redis → admin 的 HMAC 内部接口），任一级故障都降级到下一级而不是拒绝请求；转发端点是**字节级直通代理**，上游的状态码、响应体字节与 `Content-Type` 原样回写，因此流式（SSE）与非流式（JSON）由请求体里的 `stream` 字段决定，网关不分流、也不再把上游错误折叠成 `500`；新增 `GET /v1/models`，单渠道场景下回报配置的默认模型。
 
-**M2 到底做了什么**：用量捕获是**旁路观察者** —— 转发路径仍然是字节级直通（上游状态码 / `Content-Type` / 响应体字节一字不改），只是挂了一只只读的 `asByteBuffer()` 探针，把经过的字节复制进一个有界尾窗。非流式从整体 JSON 里读 `usage`；流式则在请求体里注入 `stream_options.include_usage`（**这是唯一被允许的请求体改写**），再从最后一帧读 `usage`。每个 `/v1/**` 请求由网关铸一个 UUID 写进响应头 `x-request-id`，它就是计量事件的 `request_id`；幂等键是 `(request_id, created_at)`，两个值都由**网关**在请求开始时各生成一次（`created_at` 截断到毫秒）并随事件投递，消费端原样使用 —— 消费端若用自己的 `now()`，每次重投都会写成新的一行。事件经 RabbitMQ 用共享的分隔符文本 codec（不是 JSON：`aihub-common` 是零依赖的）投给 admin，由 admin 幂等落 `request_log`；**只有 admin 声明拓扑**，网关只发布。broker 不可用时网关先落内存队列（有界）、再落磁盘 spool，由定时任务重投，任何丢弃都会让 `dropped` 计数 +1 并打 ERROR（绝不静默丢弃）。`request_log` 的月分区由运行时维护：启动补齐 + 每日 03:10 UTC 前推 2 个月。另有 M1 的三处遗留修复：SSE 增量 flush 的可证伪断言、客户端断连计量、`retry-after` 与 `x-ratelimit-*` 透传，以及 `defaultModel` 为空的 NPE。
+**M2 到底做了什么**：用量捕获是**旁路观察者** —— 转发路径仍然是字节级直通（上游状态码 / `Content-Type` / 响应体字节一字不改），只是挂了一只只读的 `asByteBuffer()` 探针，把经过的字节复制进一个有界尾窗。非流式从整体 JSON 里读 `usage`；流式则在请求体里注入 `stream_options.include_usage`（**这是唯一被允许的请求体改写**），再从最后一帧读 `usage`。每个 `/v1/**` 请求由网关铸一个 UUID 写进响应头 `x-request-id`，`POST /v1/chat/completions` 同时把它当作计量事件的 `request_id`；幂等键是 `(request_id, created_at)`，两个值都由**网关**在请求开始时各生成一次（`created_at` 截断到毫秒）并随事件投递，消费端原样使用 —— 消费端若用自己的 `now()`，每次重投都会写成新的一行。事件经 RabbitMQ 用共享的分隔符文本 codec（不是 JSON：`aihub-common` 是零依赖的）投给 admin，由 admin 幂等落 `request_log`；**只有 admin 声明拓扑**，网关只发布。broker 不可用时网关先落内存队列（有界）、再落磁盘 spool，由定时任务重投，任何丢弃都会让 `dropped` 计数 +1 并打 ERROR（绝不静默丢弃）。`request_log` 的月分区由运行时维护：启动补齐 + 每日 03:10 UTC 前推 2 个月。另有 M1 的三处遗留修复：SSE 增量 flush 的可证伪断言、客户端断连计量、`retry-after` 与 `x-ratelimit-*` 透传，以及 `defaultModel` 为空的 NPE。
 
 **验收状态**：全量测试实测 **200 项通过 / 0 失败 / 0 错误 / 0 跳过**（aihub-common 21、aihub-web 47、aihub-gateway 132；`mvn -B clean test` → `BUILD SUCCESS`）。真实上游端到端验收（Docker Compose 全栈 + 真实模型）结论：非流式与流式响应都带 `x-request-id`，两次请求在 `request_log` 各落一行且 token 数与上游响应体里的 `usage` **完全一致**，非流式那行 `ttft_ms` 为 `NULL`、流式那行为正数，行的 `request_id` 等于客户端看到的响应头、`created_at` 等于事件里的值，重放同一事件不产生第二行。M0/M1 时代「用自建 stub 上游验收」的做法已被这一轮真实上游验收取代，M1 遗留的「真实模型回答了问题」就此关闭。
 
@@ -51,6 +51,12 @@ M2 新增的边界：
 - **`mandatory` / publisher-returns 这条分支没有得到真实 broker 的端到端验证**：发布端在 gateway 模块，broker 夹具在 admin 侧，模块依赖方向不允许两边相遇（gateway 的测试也不允许依赖 Docker）。代码把「消息被退回」当作投递失败从而落盘，但这条分支目前只有单元测试撑着。
 - **分区维护的边界**：启动补齐 + 每日 03:10 UTC 前推 `aihub.metering.partition-months-ahead`（默认 2）个月；**中间空洞只告警、不自动补**（补它要把已有数据搬到锁下，属运维决策）。另外「启动补齐」今天**观测不到**，因为 V1 基线迁移的分区已经到 `2026-12`，在 2026 年 12 月之前不会有新分区被创建。
 - 真实上游那一轮只覆盖了**一条**上游、一个模型、一次非流式 + 一次流式；真实上游的错误路径（上游 `429` / 中途断流 / `retry-after` 的实际取值）仍是 stub 级别的验证。
+- **计量只覆盖 `POST /v1/chat/completions` 一个端点**：网关全树只有一个发布点（`ChatRelayController.chatCompletions` 的 `doFinally`，`ChatRelayController.java` 里那一次 `meteringPublisher.publish(...)`）。`GET /v1/models`、`POST /v1/embeddings`（M5 才有实现，当前是 `404`）以及所有在控制器之前就被短路的响应（`401 invalid_api_key`、`404` 等）都带 `x-request-id`，但**没有计量事件、也不会在 `request_log` 落行**。所以「每个 `/v1/**` 请求一行」是错的：M4 做账单 / 对账时，不能把「日志里出现过某个 `x-request-id`」当作「库里一定有对应的行」。
+- **客户端在首个字节之前中断，会被记成 `ERROR` / `gateway_error` 而不是 `CANCELLED`**：`gateway_error` 这条分支覆盖的是「响应**尚未提交**时冒出来的异常」，而响应提交之前的客户端中断无法与网关自身的真实故障可靠区分（Reactor 在提交之前不会给出可分辨的信号），代码因此不猜测、按未预期异常记账 —— 这是 brief 指定、评审后保留的行为。设计文档 §9 的「客户端断连不计入错误告警」只对**响应已提交之后**的断连成立（那条才记 `CANCELLED` / `client_disconnected`）。**按 `gateway_error` 告警前必须先确认客户端侧没有对应的主动中断**，否则会把客户端行为误报成网关故障。
+- **本地 compose 下网关「起得来」要 broker，「跑得下去」不要**：`docker-compose.yml` 里 gateway 配了 `depends_on: rabbitmq: service_healthy`，所以本地 compose 下 broker 不健康时网关**根本不会被启动**；这是编排上的便利约定，**不是**运行时要求 —— 运行期 broker 挂掉网关照常转发（事件先落内存队列、再落磁盘 spool，恢复后重投）。直接 `java -jar` 跑网关没有这条依赖。
+- **超长 `model` 会让那一行落不进 `request_log`，并最终进死信队列**：`model` 直接取自客户端请求体（网关既不截断也不校验），而 `request_log.model` 是 `VARCHAR(128)`（`V1__init_schema.sql`）。模型名超过 128 字符时，客户端**照常拿到上游响应**（计量是旁路），admin 侧 INSERT 报「数据过长」→ `DataAccessException` → 重试 3 次 → 进 `aihub.metering.dlq`：这一行在 `request_log` 里根本不存在，而 DLQ 成了**任何持合法 API Key 的客户端都能触碰**的入口。网关侧的截断 / 校验属于后续里程碑（M2 有意不做）。
+- **admin 起不来会连带把网关降级成「冷缓存一律 `401`」**：`RequestLogPartitionMaintainer` 是 `ApplicationRunner`，分区覆盖建立不起来时（缺 `pmax`、补建后仍不覆盖、DDL 失败）它直接抛异常，**admin 拒绝启动**。admin 同时是网关的密钥回源后端，所以 admin 不在 = 缓存未命中的 key 一律 fail-closed `401 invalid_api_key`（与「key 是错的」在客户端不可区分）。补分区是 DDL，因此应用数据库账号需要对 `request_log` 的 **`ALTER` 权限**（见 `docs/CONVENTIONS.md` 第 7 节）。
+- **流式中途上游断流，网关不会给客户端发 SSE `error` 事件**：设计文档 §9 写的是「发 SSE `error` 事件后关流」，而 M1/M2 的实现是**直接收尾**（响应已提交时 `response.setComplete()`），客户端看到的是**被截断的流**（没有错误帧、通常也没有 `[DONE]`），计量侧照记 `ERROR` / `upstream_stream_error`。这是 M1 起就有的形状，M2 未改动、也未声称改过。
 
 ## 技术栈
 
@@ -188,9 +194,9 @@ tenant   : demo
 
 ## 计量与 `request_log`
 
-每个 `/v1/**` 请求都会在网关侧被计量，最终由 admin 落到 `request_log` 一行。要点：
+`POST /v1/chat/completions` 会在网关侧被计量，最终由 admin 落到 `request_log` 一行。**只有这一个端点会**：网关全树只有一个发布点（该控制器的 `doFinally`），`GET /v1/models` 以及所有在控制器之前就被短路的响应（`401 invalid_api_key`、`404` 等）都带 `x-request-id`，却既不产生计量事件、也不在 `request_log` 落行（详见「已知边界」）。要点：
 
-- **`request_id` 就是响应头 `x-request-id`**：网关为每个请求铸一个 UUID，既写进响应头、也写进计量事件。客户端自带的同名请求头不回显；上游返回的同名头也不透传（幂等键必须是网关自产的那个）。
+- **`request_id` 就是响应头 `x-request-id`**：网关为每个 `/v1/**` 请求铸一个 UUID 并写进响应头；`POST /v1/chat/completions` 再把它写进计量事件。客户端自带的同名请求头不回显；上游返回的同名头也不透传（幂等键必须是网关自产的那个）。
 - **幂等键是 `(request_id, created_at)`**（与唯一索引 `uk_request_log_request_id` 一致）：两个值都由**网关**在请求开始时各生成一次（`created_at` 截断到毫秒）并随事件投递，消费端**原样写入**。因此重投 / 重放**不会**产生第二行，而且 `created_at` 是**事件发生的时刻**，不是落库时刻。
 - **`status`** 取 `SUCCESS` / `ERROR` / `CANCELLED`；**`error_code`** 取 `upstream_http_<code>`（上游非 2xx）、`upstream_unreachable`（根本没连上上游，客户端看到 `502`）、`upstream_stream_error`（流式中途断）、`usage_missing`（2xx 但拿不到 usage）、`client_disconnected`（客户端断连）、`gateway_error`（网关未预期异常）。
 - **`ttft_ms` 只有流式请求有值**，非流式为 `NULL`；`latency_ms` 两者都有。

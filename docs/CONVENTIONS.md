@@ -106,6 +106,13 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - **`status` / `error_code` 取值**：`SUCCESS`（2xx 且拿到 usage）/ `ERROR`（上游非 2xx、连不上、中途断流、
   网关未预期异常）/ `CANCELLED`（客户端断连）；`error_code` 取 `upstream_http_<code>`、
   `upstream_unreachable`、`upstream_stream_error`、`usage_missing`、`client_disconnected`、`gateway_error`。
+- **例外：「响应提交之前」的失败按未预期异常记账（M2 的已知分类缺口，先读这段再按 `error_code` 告警）**：
+  `gateway_error` 覆盖的是「响应**尚未提交**时冒出来的异常」这条分支，**客户端在首个字节之前就中断**的情形
+  也落在这里：响应提交之前 Reactor 无法可靠区分「客户端中断」与「网关真实故障」，代码因此不猜测、按未预期
+  异常计。所以「客户端断连 ⇒ `CANCELLED` / `client_disconnected`」**只对响应已提交之后的断连成立**。
+  运营含义：**看到 `gateway_error` 不能不加核对就当作网关故障告警** —— 必须先确认客户端侧没有对应的主动
+  中断，否则会把客户端行为误报成网关故障。这是 brief 指定、M2 评审后保留的行为，不是待修的笔误；设计文档
+  §9 的「客户端断连不计入错误告警」要照此理解。
 - **拿不到 usage 时** `completion_tokens` 是**估算值**（1 个汉字 ≈ 0.6 token、1 个非汉字字符 ≈ 0.3 token，
   向上取整），`prompt_tokens` 记 0，并用 `error_code` 标出这个事实。M4 的账单/对账必须把带
   `usage_missing` / `client_disconnected` 的行当近似值处理。
