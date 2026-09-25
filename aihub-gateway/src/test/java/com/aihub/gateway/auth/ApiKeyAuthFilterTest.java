@@ -115,9 +115,55 @@ class ApiKeyAuthFilterTest {
         assertThat(response.statusCode()).isEqualTo(200);
     }
 
+    /**
+     * 回归：守备判定用的路径必须与 handler mapping 一致（解码后、剥掉 path parameter）。
+     * {@code /%761/chat/completions} 解码后就是 {@code /v1/chat/completions}，用原始的
+     * {@code getPath().value()} 做字符串前缀判断会漏掉它 → 过滤器放行 → 无密钥直达上游。
+     */
+    @Test
+    void percentEncodedGuardedPathCannotBypassTheGuard() throws Exception {
+        assertRejectedWithoutTouchingUpstream("/%761/chat/completions");
+    }
+
+    /** 回归：{@code /v1;x=/chat/completions} 同样命中 controller，但原始路径不以 {@code /v1/} 开头。 */
+    @Test
+    void pathParameterVariantCannotBypassTheGuard() throws Exception {
+        assertRejectedWithoutTouchingUpstream("/v1;x=/chat/completions");
+    }
+
+    /** RFC 7235：scheme 大小写不敏感，{@code bearer} 必须与 {@code Bearer} 等价。 */
+    @Test
+    void bearerSchemeIsCaseInsensitive() throws Exception {
+        upstream.enqueueJson(200, FakeUpstream.completionJson());
+
+        HttpResponse<String> response = postPath("/v1/chat/completions",
+                "bearer ak_valid." + TestKeys.VALID_SECRET);
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).contains("chat.completion");
+    }
+
+    /**
+     * 不带 Authorization 打「过滤器看不见、handler mapping 却看得见」的路径变体：既必须 401，
+     * 又必须**没有触到上游**。只断言状态码的话，将来把绕过改成另一种拒绝（例如 400/403）就会假绿。
+     */
+    private void assertRejectedWithoutTouchingUpstream(String path) throws Exception {
+        upstream.clearLastRequest();
+
+        HttpResponse<String> response = postPath(path, null);
+
+        assertThat(response.statusCode()).isEqualTo(401);
+        assertThat(response.body()).contains("\"code\":\"invalid_api_key\"");
+        assertThat(upstream.lastRequest()).isNull();
+    }
+
     private HttpResponse<String> post(String authorization) throws Exception {
+        return postPath("/v1/chat/completions", authorization);
+    }
+
+    private HttpResponse<String> postPath(String path, String authorization) throws Exception {
         HttpRequest.Builder builder = HttpRequest.newBuilder(
-                        URI.create("http://127.0.0.1:" + gatewayPort + "/v1/chat/completions"))
+                        URI.create("http://127.0.0.1:" + gatewayPort + path))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString("{\"stream\":false}"));
         if (authorization != null) {

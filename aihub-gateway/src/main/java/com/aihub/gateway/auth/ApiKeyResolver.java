@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
+import java.util.Optional;
 
 /**
  * 三级解析：Caffeine（本地，最快）→ Redis（跨实例共享）→ admin（真相源）。
@@ -25,9 +26,14 @@ public class ApiKeyResolver {
 
     private static final Logger log = LoggerFactory.getLogger(ApiKeyResolver.class);
 
-    /** 负缓存：同一个不存在的 key 不必每次都打 admin。usable() 为 false，调用方据此 401。 */
+    /**
+     * 负缓存：同一个不存在的 key 不必每次都打 admin。usable() 为 false，调用方据此 401。
+     * <p><b>只存在于本地 Caffeine，不写 Redis。</b>admin 侧只把**命中**的 view 写进共享缓存，
+     * 从不写「不存在」这种载荷；解析器这边也只对非 MISS 结果调 {@code writeRedis}。既然两端
+     * 都不写，Redis 里就不存在 MISS 载荷，读取侧也就没有可判的分支 —— 不要在这里凭空发明一个
+     * 跨服务契约。
+     */
     private static final ApiKeyView MISS = new ApiKeyView("", 0L, "", "MISSING", null);
-    private static final String MISS_PAYLOAD = ApiKeyCacheCodec.encode(MISS);
 
     private final Cache<String, ApiKeyView> local;
     private final StringRedisTemplate redis;
@@ -58,23 +64,29 @@ public class ApiKeyResolver {
             local.put(keyHash, fromRedis);
             return Mono.just(fromRedis);
         }
-        return adminClient.resolve(keyHash).map(maybeView -> {
-            ApiKeyView view = maybeView.orElse(MISS);
-            local.put(keyHash, view);
-            if (view != MISS) {
-                writeRedis(keyHash, view);
-            }
-            return view;
-        });
+        // 双重兜底：AdminClient 自己的约定是「不抛异常」，但解析器也绝不允许任何异常从这里逃到
+        // 过滤器 —— 逃出去就是 WebFlux 的 500，而约定是「key 不存在 → 401」。
+        // Mono.defer 同时保证 adminClient.resolve 的**同步**抛错（例如空 internal secret 时
+        // InternalHmac.sign 抛 IllegalStateException）也落进 onErrorResume。
+        return Mono.defer(() -> adminClient.resolve(keyHash))
+                .onErrorResume(ex -> {
+                    log.warn("admin 回源异常，按「key 不存在」处理: {}", ex.toString());
+                    return Mono.just(Optional.empty());
+                })
+                .map(maybeView -> {
+                    ApiKeyView view = maybeView.orElse(MISS);
+                    local.put(keyHash, view);
+                    if (view != MISS) {
+                        writeRedis(keyHash, view);
+                    }
+                    return view;
+                });
     }
 
     private ApiKeyView readRedis(String keyHash) {
         try {
             String payload = redis.opsForValue().get(ApiKeyCacheCodec.CACHE_KEY_PREFIX + keyHash);
-            if (payload == null) {
-                return null;
-            }
-            return MISS_PAYLOAD.equals(payload) ? MISS : ApiKeyCacheCodec.decode(payload);
+            return payload == null ? null : ApiKeyCacheCodec.decode(payload);
         } catch (RuntimeException e) {
             log.warn("Redis 读取失败，降级回源 admin: {}", e.toString());
             return null;

@@ -55,21 +55,26 @@ public interface AdminClient {
 
         @Override
         public Mono<Optional<ApiKeyView>> resolve(String keyHash) {
-            String timestamp = String.valueOf(Instant.now().getEpochSecond());
-            String signature = InternalHmac.sign(internalSecret, timestamp, "POST", RESOLVE_PATH);
+            // 签名与请求构造**必须**惰性：InternalHmac.sign 在 secret 为空（仓库默认 aihub.internal.secret
+            // 就是空串）时会抛 IllegalStateException，急切求值会让它在返回 Mono **之前**就逃出去，
+            // 那样下面的 onErrorResume 根本看不见它，客户端拿到的是 500 而不是约定的 401。
+            // Mono.defer 之后，签名失败与网络失败走同一条 fail-closed 路径。
+            return Mono.defer(() -> {
+                String timestamp = String.valueOf(Instant.now().getEpochSecond());
+                String signature = InternalHmac.sign(internalSecret, timestamp, "POST", RESOLVE_PATH);
 
-            return webClient.post()
-                    .uri(RESOLVE_PATH)
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .header("X-Internal-Timestamp", timestamp)
-                    .header("X-Internal-Signature", signature)
-                    .bodyValue("{\"keyHash\":\"" + keyHash + "\"}")
-                    .exchangeToMono(response -> response.bodyToMono(String.class).defaultIfEmpty("")
-                            .map(body -> parse(response.statusCode().value(), body)))
-                    .onErrorResume(ex -> {
-                        log.warn("admin 内部接口调用失败: {}", ex.toString());
-                        return Mono.just(Optional.empty());
-                    });
+                return webClient.post()
+                        .uri(RESOLVE_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Internal-Timestamp", timestamp)
+                        .header("X-Internal-Signature", signature)
+                        .bodyValue("{\"keyHash\":\"" + keyHash + "\"}")
+                        .exchangeToMono(response -> response.bodyToMono(String.class).defaultIfEmpty("")
+                                .map(body -> parse(response.statusCode().value(), body)));
+            }).onErrorResume(ex -> {
+                log.warn("admin 内部接口调用失败: {}", ex.toString());
+                return Mono.just(Optional.empty());
+            });
         }
 
         /** 非 2xx、缺 {@code data}、字段畸形都折算成「不存在」，绝不向上抛。 */

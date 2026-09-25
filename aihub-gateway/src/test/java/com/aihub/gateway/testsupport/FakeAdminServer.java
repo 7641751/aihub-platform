@@ -15,12 +15,16 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * 基于 JDK 内置 HttpServer 的假上游：无需 Docker、无需额外依赖。
- * 每个 start() 绑定随机端口；按入队顺序（FIFO）返回预置响应，队列空时返回 200 + 空 JSON。
+ * 基于 JDK 内置 {@link HttpServer} 的假 admin 内部接口：无需 Docker、无需 Redis，与
+ * {@link FakeUpstream} 同款。每个 {@link #start()} 绑定随机端口；按入队顺序（FIFO）返回预置响应，
+ * 队列空时返回 200 + 空 JSON。
+ * <p>与 {@code FakeUpstream} 的唯一区别：这里记录 {@code getRawPath()}（**原始**路径），
+ * 因为「签名/请求打的是应用内相对路径而不是带前缀的 URL」正是要钉住的契约，用解码后的
+ * {@code getPath()} 断言会掩盖一次编码/前缀改写。
  */
-public final class FakeUpstream {
+public final class FakeAdminServer {
 
-    public record CapturedRequest(String method, String path, Map<String, String> headers, String body) {
+    public record CapturedRequest(String method, String rawPath, Map<String, String> headers, String body) {
     }
 
     private record Response(int status, String contentType, String body) {
@@ -30,19 +34,19 @@ public final class FakeUpstream {
     private final Deque<Response> queued = new ArrayDeque<>();
     private volatile CapturedRequest lastRequest;
 
-    private FakeUpstream(HttpServer server) {
+    private FakeAdminServer(HttpServer server) {
         this.server = server;
     }
 
-    public static FakeUpstream start() {
+    public static FakeAdminServer start() {
         try {
             HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-            FakeUpstream fake = new FakeUpstream(server);
+            FakeAdminServer fake = new FakeAdminServer(server);
             server.createContext("/", fake::handle);
             server.start();
             return fake;
         } catch (IOException e) {
-            throw new IllegalStateException("无法启动假上游", e);
+            throw new IllegalStateException("无法启动假 admin", e);
         }
     }
 
@@ -50,32 +54,17 @@ public final class FakeUpstream {
         return "http://127.0.0.1:" + server.getAddress().getPort();
     }
 
-    public synchronized void enqueueSse(String frames) {
-        queued.add(new Response(200, "text/event-stream; charset=utf-8", frames));
-    }
-
     public synchronized void enqueueJson(int status, String body) {
         queued.add(new Response(status, "application/json; charset=utf-8", body));
     }
 
-    /**
-     * 原样发送 {@code Content-Type} 头，用于构造上游异常场景：
-     * {@code contentType == null} 表示**完全不发**该头，其它值按字节原样写出（可以是畸形值）。
-     */
+    /** 原样发送 {@code Content-Type}；{@code null} 表示完全不发该头。 */
     public synchronized void enqueueRaw(int status, String contentType, String body) {
         queued.add(new Response(status, contentType, body));
     }
 
     public CapturedRequest lastRequest() {
         return lastRequest;
-    }
-
-    /**
-     * 清空捕获。用例之间共享同一个假上游，而「请求根本没有到达上游」这一断言只有先把上一次的
-     * 捕获清掉才成立（JUnit 不保证方法顺序）。
-     */
-    public void clearLastRequest() {
-        lastRequest = null;
     }
 
     public void stop() {
@@ -91,7 +80,7 @@ public final class FakeUpstream {
         exchange.getRequestHeaders().forEach((name, values) ->
                 headers.put(name.toLowerCase(Locale.ROOT), String.join(",", values)));
         lastRequest = new CapturedRequest(exchange.getRequestMethod(),
-                exchange.getRequestURI().getPath(), headers, body);
+                exchange.getRequestURI().getRawPath(), headers, body);
 
         Response response;
         synchronized (this) {
@@ -108,23 +97,5 @@ public final class FakeUpstream {
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(payload);
         }
-    }
-
-    public static String sseFrames() {
-        return """
-                data: {"choices":[{"delta":{"content":"你"}}]}
-
-                data: {"choices":[{"delta":{"content":"好"}}]}
-
-                data: [DONE]
-
-                """;
-    }
-
-    public static String completionJson() {
-        return """
-                {"id":"chatcmpl-1","object":"chat.completion","model":"m1","created":1,\
-                "choices":[{"index":0,"message":{"role":"assistant","content":"你好"},"finish_reason":"stop"}],\
-                "usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}""";
     }
 }
