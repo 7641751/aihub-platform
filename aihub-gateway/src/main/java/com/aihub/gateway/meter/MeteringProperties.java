@@ -15,7 +15,9 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * 落在窗口内（{@code UsageCaptureTest.parsesALargeNonStreamingBodyThatFitsTheDefaultCaptureWindow}
  * 就是这条底线）。
  *
- * @param enabled                  计量总开关；关掉后 {@code MeteringPublisher} 直接返回（不发、不落盘）
+ * @param enabled                  计量总开关；关掉后 {@code MeteringPublisher} 直接返回：新事件不再入队、也不落盘。
+ *                                 <b>注意它挡不住重投</b> —— 磁盘 spool 里已有的事件仍会被 {@code MeteringSpoolReplayer}
+ *                                 按间隔发出去；想让在途事件也停下来，必须先清空 spool
  * @param maxCaptureBytes          单请求捕获上限（尾部滑窗，见 {@code TailBuffer}）
  * @param queueCapacity            内存队列上界；满了就丢弃 + 计数（绝不阻塞 event loop、绝不 OOM）
  * @param spoolMaxFiles            磁盘 spool 文件数上界
