@@ -73,7 +73,21 @@ class SchemaMigrationTest extends AbstractIntegrationTest {
                         + "order by partition_ordinal_position",
                 String.class);
 
-        assertThat(names).containsExactly("p202609", "p202610", "p202611", "pmax");
+        // 不再断言「恰好这四个」：M2 的分区维护器会在启动/定时补建未来月份（实测会真的加），
+        // 精确相等会在 12 月一到就变红。这里钉住的是**结构契约**：
+        // V1 的三个历史分区是前缀、pmax 是最后一个、中间只允许 pYYYYMM。
+        assertThat(names.subList(0, 3)).containsExactly("p202609", "p202610", "p202611");
+        assertThat(names.get(names.size() - 1)).isEqualTo("pmax");
+        assertThat(names.subList(3, names.size() - 1)).allSatisfy(name -> assertThat(name).matches("p\\d{6}"));
+        // 必须覆盖「今天」：最后一个有界分区的上界要晚于今天，否则行会落进 pmax（M2 的陷阱）。
+        String lastBounded = names.get(names.size() - 2);
+        assertThat(lastBounded).matches("p\\d{6}");
+        assertThat(jdbcTemplate.queryForObject(
+                "select count(*) from information_schema.partitions "
+                        + "where table_schema = database() and table_name = 'request_log' "
+                        + "and partition_name <> 'pmax' and partition_name is not null "
+                        + "and str_to_date(replace(partition_description, '''', ''), '%Y-%m-%d') > curdate()",
+                Integer.class)).isGreaterThan(0);
     }
 
     @Test

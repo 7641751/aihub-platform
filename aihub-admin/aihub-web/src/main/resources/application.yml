@@ -57,3 +57,8 @@ aihub:
     cache-ttl: 5m
   mint-key:
     enabled: ${AIHUB_MINT_KEY_ENABLED:false}
+  metering:
+    # 分区维护前推的月数：保证「今天 + N 个月」都有专属分区（默认 2，即本月底再加两个月）。
+    partition-months-ahead: 2
+    # 每天 03:10（与 M4 的 02:00 对账错开，避免同时动表）。
+    partition-cron: "0 10 3 * * *"
