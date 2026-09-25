@@ -6,9 +6,11 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * {@code aihub-common} 里四个共享类的单元测试。
@@ -125,6 +127,58 @@ class ApiKeyToolingTest {
         assertThat(InternalHmac.verify(secret, null, "POST", "/internal/api-keys/resolve", signature)).isFalse();
         assertThat(InternalHmac.verify(secret, "1700000000", "POST", "/internal/api-keys/resolve", "0".repeat(64)))
                 .isFalse();
+    }
+
+    /**
+     * 签名不能依赖默认 locale：tr_TR 下 {@code "options".toUpperCase()} 是 {@code "OPTİONS"}
+     * （带点的大写 I），两端默认 locale 不同就会算出不同签名 —— 一个现有测试都抓不到的不定时 401。
+     * 先用 {@link Locale#ROOT} 算出基准，再切到 tr_TR 复算。
+     */
+    @Test
+    void internalHmacIsIndependentOfTheDefaultLocale() {
+        String secret = "change-me-internal-secret-change-me";
+        String path = "/internal/api-keys/resolve";
+        Locale original = Locale.getDefault();
+        String expected;
+        try {
+            Locale.setDefault(Locale.ROOT);
+            expected = InternalHmac.sign(secret, "1700000000", "options", path);
+        } finally {
+            Locale.setDefault(original);
+        }
+
+        try {
+            Locale.setDefault(Locale.forLanguageTag("tr-TR"));
+            assertThat(InternalHmac.sign(secret, "1700000000", "options", path))
+                    .as("tr_TR 下的签名必须与 ROOT 下的一致")
+                    .isEqualTo(expected);
+            assertThat(InternalHmac.sign(secret, "1700000000", "OPTIONS", path)).isEqualTo(expected);
+            assertThat(InternalHmac.verify(secret, "1700000000", "options", path, expected)).isTrue();
+        } finally {
+            Locale.setDefault(original);
+        }
+    }
+
+    /**
+     * 密钥没配好时必须 fail-closed：{@code verify} 返回 false（未来过滤器里是 401），
+     * 而不是让 {@code sign} 的 {@link IllegalStateException} 冒出去变成 500。
+     * {@code sign} 自身的「编程错误就抛」保持不变。
+     */
+    @Test
+    void internalHmacVerifyFailsClosedWhenTheSecretIsMissing() {
+        String path = "/internal/api-keys/resolve";
+        String signature = InternalHmac.sign("change-me-internal-secret-change-me", "1700000000", "POST", path);
+
+        assertThat(InternalHmac.verify(null, "1700000000", "POST", path, signature)).isFalse();
+        assertThat(InternalHmac.verify("", "1700000000", "POST", path, signature)).isFalse();
+        assertThat(InternalHmac.verify("   ", "1700000000", "POST", path, signature)).isFalse();
+        // 密钥缺失时也不该因为 timestamp/signature 都合法就放行。
+        assertThat(InternalHmac.verify(null, "1700000000", "POST", path, "0".repeat(64))).isFalse();
+
+        assertThatThrownBy(() -> InternalHmac.sign(null, "1700000000", "POST", path))
+                .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> InternalHmac.sign("", "1700000000", "POST", path))
+                .isInstanceOf(IllegalStateException.class);
     }
 
     // --- ApiKeyView -------------------------------------------------------
