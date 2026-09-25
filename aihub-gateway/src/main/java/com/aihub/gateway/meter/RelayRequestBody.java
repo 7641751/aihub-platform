@@ -1,5 +1,6 @@
 package com.aihub.gateway.meter;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -22,7 +23,15 @@ import org.slf4j.LoggerFactory;
 public final class RelayRequestBody {
 
     private static final Logger log = LoggerFactory.getLogger(RelayRequestBody.class);
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /**
+     * 本类专用 mapper（**不是**共享的那一个）：只多开严格解析 —— JSON 之后还有别的字节就算解析失败。
+     * <p>Jackson 默认允许尾部残留（{@code {"stream":true} garbage} 会被成功解析成对象），那样流式注入分支
+     * 会重新序列化并把尾部字节**静默丢掉**，等于在「唯一允许的改写」之外又改了请求体。
+     * 打开它只会把更多输入推向 fail-open（原样转发），因此不允许被改写的输入集合只会**变小**。
+     */
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
     public record Prepared(String bodyToForward, boolean streaming, String model) {
     }

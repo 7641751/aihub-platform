@@ -1,10 +1,17 @@
 package com.aihub.gateway.meter;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.context.properties.source.MapConfigurationPropertySource;
+import org.springframework.boot.env.YamlPropertySourceLoader;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -186,19 +193,20 @@ class UsageCaptureTest {
     /**
      * 非流式的捕获上限底线：**尾部**滑窗对「整体 JSON」是危险的 —— 一旦 body 超过窗口，头部被丢掉、
      * JSON 不再可解析，精确 usage 会被静默降级成 {@code usage_missing} + {@code prompt_tokens = 0}。
-     * 本用例用一个**远大于**现实非流式 body（300 KB 正文 + usage）的响应，在**默认配置**的上限下
+     * 本用例用一个**远大于**现实非流式 body（300 KB 正文 + usage）的响应，在**配置里的**上限下
      * 断言 usage 仍然精确可解析。
-     * <p>所以：把 {@code aihub.metering.max-capture-bytes} 的默认值调到 300 KB 以下，本用例必然变红 ——
-     * 这就是「默认值够不够大」这条判断的可执行版本（口径写在 {@code MeteringProperties} 上）。
+     * <p>上限是**绑定出来的**（{@code MeteringProperties} 的 {@code @DefaultValue}，并与出厂
+     * {@code application.yml} 核对一致），不是写死在测试里的字面量：把
+     * {@code aihub.metering.max-capture-bytes} 调到 300 KB 以下（改注解默认值或改 application.yml），
+     * 本用例必然变红 —— 这就是「默认值够不够大」这条判断的可执行版本
+     * （口径写在 {@code MeteringProperties} 上）。
      */
     @Test
     void parsesALargeNonStreamingBodyThatFitsTheDefaultCaptureWindow() {
         String content = "x".repeat(300 * 1024);
         String body = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"" + content + "\"}}],"
                 + "\"usage\":{\"prompt_tokens\":123,\"completion_tokens\":456,\"total_tokens\":579}}";
-        int defaultMaxCaptureBytes = new MeteringProperties(true, 1048576, 10_000, 50_000,
-                30_000L, 5_000L, 5_000L, "data/metering-spool").maxCaptureBytes();
-        UsageCapture capture = new UsageCapture(clock::get, false, defaultMaxCaptureBytes);
+        UsageCapture capture = new UsageCapture(clock::get, false, configuredMaxCaptureBytes());
 
         capture.onChunk(buffer(body));
 
@@ -208,6 +216,40 @@ class UsageCaptureTest {
                 .isEqualTo(UsageCapture.Source.EXACT);
         assertThat(captured.promptTokens()).isEqualTo(123);
         assertThat(captured.totalTokens()).isEqualTo(579);
+    }
+
+    /**
+     * 绑定**当前生效的**捕获上限：源里只放一个同级键（Spring Boot 的 Binder 必须看到
+     * {@code aihub.metering.*} 存在才会进入值对象绑定），{@code max-capture-bytes} 本身**不在**源里，
+     * 因此绑出来的只可能是 {@code MeteringProperties} 的 {@code @DefaultValue} —— 也就是网关在没有配置
+     * 这个键时真正用的值。随后与出厂 {@code application.yml} 里的显式键核对：两者漂移时这里立刻变红，
+     * 而不是让上面那条底线测试继续对着一个已经不发货的数字放行。
+     */
+    private static int configuredMaxCaptureBytes() {
+        MapConfigurationPropertySource source = new MapConfigurationPropertySource(
+                Map.of("aihub.metering.spool-dir", "not-used-by-this-test"));
+        MeteringProperties defaults = new Binder(source)
+                .bind("aihub.metering", Bindable.of(MeteringProperties.class))
+                .get();
+        assertThat(defaults.maxCaptureBytes())
+                .as("@DefaultValue 必须与出厂 application.yml 里的 aihub.metering.max-capture-bytes 一致")
+                .isEqualTo(shippedMaxCaptureBytesFromApplicationYml());
+        return defaults.maxCaptureBytes();
+    }
+
+    /** 直接读出厂 {@code aihub-gateway/src/main/resources/application.yml} 里的那个键。 */
+    private static int shippedMaxCaptureBytesFromApplicationYml() {
+        try {
+            var shipped = new YamlPropertySourceLoader()
+                    .load("application.yml", new ClassPathResource("application.yml"));
+            Object value = shipped.get(0).getProperty("aihub.metering.max-capture-bytes");
+            assertThat(value)
+                    .as("application.yml 必须显式写死 aihub.metering.max-capture-bytes")
+                    .isNotNull();
+            return Integer.parseInt(value.toString());
+        } catch (IOException e) {
+            throw new IllegalStateException("读不到出厂 application.yml", e);
+        }
     }
 
     /**

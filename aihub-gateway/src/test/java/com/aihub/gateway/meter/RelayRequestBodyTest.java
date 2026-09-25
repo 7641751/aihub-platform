@@ -52,6 +52,29 @@ class RelayRequestBodyTest {
         assertThat(prepared.model()).isNull();
     }
 
+    /**
+     * 决策 10 的 fail-open 边界：JSON **后面还跟着别的字节**时必须按「解析失败」处理，原样转发。
+     * <p>默认的宽松 Jackson 会把 {@code {"stream":true,...} garbage} 解析成对象，于是走「流式注入」分支
+     * 重新序列化 —— 尾部那些字节被**静默丢掉**，请求体被改写了，而计划里说过只有
+     * {@code stream_options.include_usage} 这一种改写、且解析不了就必须逐字节转发。
+     */
+    @Test
+    void bodyWithTrailingTokensIsForwardedUnchanged() {
+        String body = "{\"stream\":true,\"messages\":[]} garbage";
+
+        RelayRequestBody.Prepared prepared = RelayRequestBody.prepare(body);
+
+        assertThat(prepared.bodyToForward()).isEqualTo(body);
+        assertThat(prepared.streaming()).isFalse();
+        assertThat(prepared.model()).isNull();
+
+        // 反向界线：行尾空白**不是**尾部残留（查尾部 token 时会跳过空白）。否则打开严格解析就会把
+        // 合法的流式请求推进 fail-open，静默丢掉 usage —— 那是「把能计量的请求变得不能计量」。
+        assertThat(RelayRequestBody.prepare("{\"stream\":true,\"messages\":[]}\n").streaming())
+                .as("行尾空白不得让合法流式请求失去 include_usage 注入")
+                .isTrue();
+    }
+
     @Test
     void extractsTheModelFromTheBody() {
         assertThat(RelayRequestBody.prepare("{\"model\":\"deepseek-reasoner\"}").model())

@@ -12,6 +12,7 @@ import org.springframework.mock.web.server.MockServerWebExchange;
 import reactor.core.publisher.SignalType;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -127,13 +128,33 @@ class RelayMeteringTest {
 
     @Test
     void tenantComesFromTheKeyViewWhileIdsStayNull() {
-        MeteringEvent withKey = meteringFor(exchangeWithTenant(7L), false).toEvent(SignalType.ON_COMPLETE);
+        RelayMetering metering = meteringFor(exchangeWithTenant(7L), false);
+        MeteringEvent withKey = metering.toEvent(SignalType.ON_COMPLETE);
         MeteringEvent withoutKey = meteringFor(exchangeWithTenant(null), false).toEvent(SignalType.ON_COMPLETE);
+        // 决策 2：幂等键的两半各只生成一次。用**同一个**请求状态再组装一次事件，
+        // 就模拟了重投/重放（投递失败后重发同一个对象）—— 两次必须是逐字相同的两个值。
+        MeteringEvent replayed = metering.toEvent(SignalType.ON_COMPLETE);
 
         assertThat(withKey.tenantId()).isEqualTo(7L);
         assertThat(withoutKey.tenantId()).isEqualTo(RelayMetering.TENANT_UNKNOWN);
         assertThat(withKey.apiKeyId()).isNull();
         assertThat(withKey.channelId()).isNull();
-        assertThat(withKey.createdAtEpochMilli() % 1_000L).isGreaterThanOrEqualTo(0L);
+
+        // created_at 必须是「毫秒单位的、接近当前时刻」的值：写成 0 / 秒 / 每次组装重新采样都会变红。
+        assertThat(Math.abs(withKey.createdAtEpochMilli() - System.currentTimeMillis()))
+                .as("created_at 必须接近当前时刻（且单位是毫秒而不是秒/微秒）")
+                .isLessThan(5_000L);
+        assertThat(replayed.requestId()).isEqualTo(withKey.requestId());
+        assertThat(replayed.createdAtEpochMilli()).isEqualTo(withKey.createdAtEpochMilli());
+
+        // 「截断到毫秒」在事件边界上唯一可观测的口径：带 123456789ns 亚毫秒部分的时刻，
+        // 落到事件里只剩 .123 —— 亚毫秒部分不得进入事件（旧的 % 1_000 >= 0 是恒真断言，钉不住任何东西）。
+        Instant withNanos = Instant.parse("2026-09-25T10:15:30.123456789Z");
+        MeteringEvent truncated = new RelayMetering("req-nanos", withNanos, 7L, null, null, "deepseek-chat",
+                UsageCapture.start(false, 4096)).toEvent(SignalType.ON_COMPLETE);
+        assertThat(truncated.createdAtEpochMilli()).isEqualTo(withNanos.toEpochMilli());
+        assertThat(truncated.createdAtEpochMilli() % 1_000L)
+                .as("毫秒位必须是输入时刻的毫秒位（实现若按微秒/纳秒写入，这里会是 0）")
+                .isEqualTo(123L);
     }
 }

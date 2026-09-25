@@ -1,5 +1,6 @@
 package com.aihub.gateway.relay;
 
+import com.aihub.common.meter.MeteringEvent;
 import com.aihub.gateway.error.GatewayErrors;
 import com.aihub.gateway.meter.MeteringProperties;
 import com.aihub.gateway.meter.MeteringPublisher;
@@ -98,13 +99,13 @@ public class ChatRelayController {
                 .onErrorResume(WebClientRequestException.class, ex -> {
                     if (response.isCommitted()) {
                         // 响应已提交说明是**流中途**断的：状态码改不了，只能收尾 + 记 ERROR。
-                        metering.onUpstreamFailure(com.aihub.common.meter.MeteringEvent.ERROR_UPSTREAM_STREAM);
+                        metering.onUpstreamFailure(MeteringEvent.ERROR_UPSTREAM_STREAM);
                         log.warn("上游流中途失败（响应已提交，无法改状态码）: {} : {}",
                                 ex.getClass().getName(), ex.getMessage());
                         return response.setComplete();
                     }
                     // 上游内网地址/异常细节只写日志，不回给客户端（避免泄漏如 "Connection refused: /10.0.0.5:443"）。
-                    metering.onUpstreamFailure(com.aihub.common.meter.MeteringEvent.ERROR_UPSTREAM_UNREACHABLE);
+                    metering.onUpstreamFailure(MeteringEvent.ERROR_UPSTREAM_UNREACHABLE);
                     log.warn("upstream request failed, returning 502 upstream_unreachable ({}) : {}",
                             ex.getClass().getName(), ex.getMessage());
                     return GatewayErrors.write(response, HttpStatus.BAD_GATEWAY,
