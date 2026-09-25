@@ -52,6 +52,16 @@ class ApiKeyToolingTest {
 
     // --- ApiKeyCacheCodec -------------------------------------------------
 
+    /**
+     * 缓存前缀是 admin 与 gateway 之间的另一条线上契约：两侧都按
+     * {@code CACHE_KEY_PREFIX + key_hash} 读写同一批 entry。写错了不会报错，只会永久缓存未命中
+     * （每次都回源 MySQL），因此这里把字面量钉死 —— 改前缀必须同时是一次有意识的契约变更。
+     */
+    @Test
+    void cacheKeyPrefixIsThePinnedCrossServiceContract() {
+        assertThat(ApiKeyCacheCodec.CACHE_KEY_PREFIX).isEqualTo("aihub:apikey:");
+    }
+
     @Test
     void cacheCodecRoundTripsANormalView() {
         ApiKeyView view = new ApiKeyView("ak_n60pawrjbxfj5oez", 42L, "acme", ApiKeyView.STATUS_ACTIVE,

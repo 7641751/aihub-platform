@@ -31,7 +31,6 @@ import java.util.Optional;
 public class ApiKeyService {
 
     private static final Logger log = LoggerFactory.getLogger(ApiKeyService.class);
-    private static final String CACHE_PREFIX = "aihub:apikey:";
 
     private final ApiKeyMapper apiKeyMapper;
     private final TenantMapper tenantMapper;
@@ -110,7 +109,7 @@ public class ApiKeyService {
     /** 缓存读写都吞掉异常：Redis 不可用时降级回 MySQL，而不是让鉴权失败。 */
     private void cache(String keyHash, ApiKeyView view) {
         try {
-            redis.opsForValue().set(CACHE_PREFIX + keyHash, ApiKeyCacheCodec.encode(view), cacheTtl);
+            redis.opsForValue().set(cacheKey(keyHash), ApiKeyCacheCodec.encode(view), cacheTtl);
         } catch (RuntimeException e) {
             log.warn("写入密钥缓存失败，忽略: {}", e.toString());
         }
@@ -118,10 +117,18 @@ public class ApiKeyService {
 
     private ApiKeyView readCache(String keyHash) {
         try {
-            return ApiKeyCacheCodec.decode(redis.opsForValue().get(CACHE_PREFIX + keyHash));
+            return ApiKeyCacheCodec.decode(redis.opsForValue().get(cacheKey(keyHash)));
         } catch (RuntimeException e) {
             log.warn("读取密钥缓存失败，回源 MySQL: {}", e.toString());
             return null;
         }
+    }
+
+    /**
+     * 缓存 key 的唯一构造点。前缀来自 {@link ApiKeyCacheCodec#CACHE_KEY_PREFIX}（跨服务共享），
+     * Task 4 的 gateway 会用**同一个**前缀读同一批 entry，这里绝不能出现第二个字面量。
+     */
+    private static String cacheKey(String keyHash) {
+        return ApiKeyCacheCodec.CACHE_KEY_PREFIX + keyHash;
     }
 }

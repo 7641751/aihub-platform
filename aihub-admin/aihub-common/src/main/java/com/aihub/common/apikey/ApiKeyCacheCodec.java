@@ -16,6 +16,14 @@ import java.util.List;
  */
 public final class ApiKeyCacheCodec {
 
+    /**
+     * 密钥缓存的 Redis key 前缀，完整 key 是 {@code CACHE_KEY_PREFIX + key_hash}。
+     * <p>这是一条**跨服务契约**：admin 铸造时写入，gateway 校验时读取（以及回填）。任何一侧
+     * 私自改动或写错前缀都不会报错，只会变成永久缓存未命中，因此固定放在共享模块里，
+     * 并由 {@code ApiKeyToolingTest} 钉住字面量。
+     */
+    public static final String CACHE_KEY_PREFIX = "aihub:apikey:";
+
     private static final String DELIMITER = "|";
     private static final int FIELD_COUNT = 5;
 

@@ -1,6 +1,7 @@
 package com.aihub.admin.apikey;
 
 import com.aihub.admin.support.AbstractIntegrationTest;
+import com.aihub.common.apikey.ApiKeyCacheCodec;
 import com.aihub.common.apikey.ApiKeyHasher;
 import com.aihub.common.apikey.ApiKeyView;
 import com.aihub.common.internal.InternalHmac;
@@ -8,13 +9,17 @@ import com.aihub.service.apikey.ApiKeyService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -30,18 +35,58 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
     @Autowired
     private TestRestTemplate restTemplate;
 
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
     @Test
     void mintedKeyIsResolvableBySecretHashAndNeverStoresPlaintext() {
         ApiKeyService.IssuedKey issued = apiKeyService.mint("t-mint", "key-1", null);
         String secret = secretOf(issued);
+        String keyHash = ApiKeyHasher.hash(secret);
+        String cacheKey = ApiKeyCacheCodec.CACHE_KEY_PREFIX + keyHash;
 
-        Optional<ApiKeyView> resolved = apiKeyService.resolve(ApiKeyHasher.hash(secret));
+        // mint 顺带写了一份缓存；先删掉它，否则后面所有断言都由 Redis 兜住，
+        // loadFromDb 永远不会执行 —— 那样「MySQL 才是真相源」和「缓存可降级」都没有被守住。
+        redisTemplate.delete(cacheKey);
+        assertThat(redisTemplate.opsForValue().get(cacheKey))
+                .as("缓存必须已清空，否则本用例证明不了回源路径")
+                .isNull();
+
+        Optional<ApiKeyView> resolved = apiKeyService.resolve(keyHash);
 
         assertThat(resolved).isPresent();
         assertThat(resolved.get().keyId()).isEqualTo(issued.keyId());
         assertThat(resolved.get().tenantName()).isEqualTo("t-mint");
         assertThat(resolved.get().usable()).isTrue();
         assertThat(apiKeyService.resolve(ApiKeyHasher.hash("wrong-secret"))).isEmpty();
+
+        // 用例名里的安全不变量必须真的被验证：直接查库，只看落盘的 hash。
+        assertThat(jdbcTemplate.queryForObject(
+                "select key_hash from api_key where key_id = ?", String.class, issued.keyId()))
+                .isEqualTo(keyHash);
+
+        // 不写死列名清单：扫 api_key 的**全部**文本列，这样将来新加一列也不会悄悄存明文。
+        List<String> textColumns = jdbcTemplate.queryForList(
+                "select column_name from information_schema.columns "
+                        + "where table_schema = database() and table_name = 'api_key' "
+                        + "and data_type in ('char', 'varchar', 'text', 'tinytext', 'mediumtext', 'longtext') "
+                        + "order by ordinal_position", String.class);
+        assertThat(textColumns).contains("key_id", "key_hash", "name", "status");
+
+        Map<String, Object> row = jdbcTemplate.queryForMap(
+                "select " + String.join(", ", textColumns) + " from api_key where key_id = ?", issued.keyId());
+        assertThat(row)
+                .as("api_key 里必须能查到刚铸造的这一行")
+                .isNotEmpty();
+        for (Map.Entry<String, Object> column : row.entrySet()) {
+            assertThat(String.valueOf(column.getValue()))
+                    .as("api_key.%s 不得包含明文 secret", column.getKey())
+                    .doesNotContain(secret)
+                    .doesNotContain(issued.token());
+        }
     }
 
     @Test
@@ -66,6 +111,17 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
                 new HttpEntity<>(body, signedHeaders("POST", RESOLVE_PATH)), String.class);
         assertThat(signed.getStatusCode().is2xxSuccessful()).isTrue();
         assertThat(signed.getBody()).contains("\"code\":\"OK\"").contains(issued.keyId());
+
+        // 用另一个密钥签名 → 必须 401。否则「只检查签名非空、不校验密钥」的实现也能全绿。
+        ResponseEntity<String> wrongSecret = restTemplate.exchange(RESOLVE_PATH, HttpMethod.POST,
+                new HttpEntity<>(body, signedHeaders("POST", RESOLVE_PATH, "wrong-internal-secret-wrong-internal-secret")),
+                String.class);
+        assertThat(wrongSecret.getStatusCode().value()).isEqualTo(401);
+
+        // 同一密钥、签在另一个路径上 → 同样必须 401（钉住 path 参与签名）。
+        ResponseEntity<String> wrongPath = restTemplate.exchange(RESOLVE_PATH, HttpMethod.POST,
+                new HttpEntity<>(body, signedHeaders("POST", RESOLVE_PATH + "-elsewhere")), String.class);
+        assertThat(wrongPath.getStatusCode().value()).isEqualTo(401);
     }
 
     @Test
@@ -93,11 +149,15 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
     }
 
     private HttpHeaders signedHeaders(String method, String path) {
+        return signedHeaders(method, path, TEST_SECRET);
+    }
+
+    private HttpHeaders signedHeaders(String method, String path, String secret) {
         HttpHeaders headers = jsonHeaders();
         String timestamp = String.valueOf(Instant.now().getEpochSecond());
         headers.add("X-Internal-Timestamp", timestamp);
         // body 不参与签名 —— M1 的最小内部守卫只防未授权调用，body 签名留待需要时再加
-        headers.add("X-Internal-Signature", InternalHmac.sign(TEST_SECRET, timestamp, method, path));
+        headers.add("X-Internal-Signature", InternalHmac.sign(secret, timestamp, method, path));
         return headers;
     }
 }
