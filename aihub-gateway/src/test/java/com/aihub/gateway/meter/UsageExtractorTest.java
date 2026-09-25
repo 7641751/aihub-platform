@@ -74,6 +74,23 @@ class UsageExtractorTest {
                 .contains(new UsageExtractor.Usage(1, 2, 3));
     }
 
+    /**
+     * **区分性用例**：坏帧**带** {@code data:} 前缀、只是 JSON 被截断。
+     * <p>{@link #skipsAPartialFirstLine} 覆盖不了这一形态 —— 那半截首行没有 {@code data:} 前缀，
+     * 在解析之前就被过滤掉了，因此「遇到第一个不可解析的帧就中止」的实现在那条用例下**仍然是绿的**。
+     * 真实场景里上游的帧可以任意断（网络分片、上游异常收尾），所以「跳过这一帧、继续解后面的帧」
+     * 必须真的被钉住：坏帧里那组 9/9/18 若被抢救出来，或实现直接中止，下面的断言都拿不到 1/2/3。
+     */
+    @Test
+    void skipsATruncatedDataFrameAndKeepsParsingTheRest() {
+        String truncatedFrame = "data: {\"id\":\"1\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":9,\"total_tokens\":18}\n\n"
+                + "data: {\"id\":\"1\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n"
+                + "data: [DONE]\n\n";
+
+        assertThat(UsageExtractor.fromSse(bytes(truncatedFrame)))
+                .contains(new UsageExtractor.Usage(1, 2, 3));
+    }
+
     @Test
     void concatenatesSseDeltaContent() {
         assertThat(UsageExtractor.sseContent(bytes(STREAMING_SSE))).isEqualTo("你好");

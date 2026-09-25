@@ -3,6 +3,7 @@ package com.aihub.gateway.auth;
 import com.aihub.common.apikey.ApiKeyView;
 import com.aihub.gateway.admin.AdminClient;
 import com.aihub.gateway.testsupport.FakeUpstream;
+import com.aihub.gateway.trace.RequestIdFilter;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -85,6 +86,24 @@ class ApiKeyAuthFilterTest {
         assertThat(response.statusCode()).isEqualTo(401);
         assertThat(response.body()).contains("\"code\":\"invalid_api_key\"");
         assertThat(response.body()).contains("\"type\":\"invalid_request_error\"");
+    }
+
+    /**
+     * Task 2 的过滤器**顺序**契约（{@code RequestIdFilter} 的 {@code HIGHEST_PRECEDENCE + 50} 早于
+     * {@code ApiKeyAuthFilter} 的 {@code +100}）当初只用一次性探针验证过、随后被删掉，于是没有任何
+     * 提交物守备它。它值得守备：401 是最需要 {@code x-request-id} 来排查的一类响应，而顺序一改，
+     * 401 就会变成「没有 request id 的失败请求」——线上只能靠时间戳猜，且计量事件也不会产生。
+     * <p>本用例**不需要**假 admin、也**不需要** Redis：缺 {@code Authorization} 头在过滤器里直接短路
+     * 成 401，解析器（会碰 Redis/admin）根本不会被调用。
+     */
+    @Test
+    void carriesRequestIdOnA401() throws Exception {
+        HttpResponse<String> response = post(null);
+
+        assertThat(response.statusCode()).isEqualTo(401);
+        assertThat(response.headers().firstValue(RequestIdFilter.HEADER))
+                .hasValueSatisfying(v -> assertThat(v).matches(
+                        "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"));
     }
 
     /**
