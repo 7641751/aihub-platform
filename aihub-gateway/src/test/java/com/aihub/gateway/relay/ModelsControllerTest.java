@@ -3,9 +3,11 @@ package com.aihub.gateway.relay;
 import com.aihub.gateway.upstream.UpstreamProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.test.context.NestedTestConfiguration;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -87,5 +89,58 @@ class ModelsControllerTest {
         HttpRequest request = HttpRequest.newBuilder(
                 URI.create("http://127.0.0.1:" + gatewayPort + path)).GET().build();
         return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    /**
+     * 空白 {@code aihub.upstream.default-model} 的**真实 HTTP 状态行**：上面那条用例直接把控制器方法
+     * {@code block()} 掉，只能钉住「不抛异常」，钉不住「客户端拿到的是 200 + 空 {@code data}」。
+     *
+     * <p><b>为什么是空串而不是「属性缺失」</b>：主配置是
+     * {@code aihub.upstream.default-model: ${AIHUB_UPSTREAM_DEFAULT_MODEL:default}}，键**永远存在**，
+     * 因此配置绑定不可能产出 {@code null}（实测：把本类属性去掉后上下文拿到的是 {@code default}，
+     * {@code data} 有 1 个元素）。也就是说 {@code defaultModel == null} 这条 NPE → 500 路径在 HTTP 层
+     * **不可达**（只能由直接构造触发，见上面那条用例），HTTP 层唯一可达的「空白」是空串
+     * （环境变量/属性被设成空）。本用例钉的正是它：旧代码在这里是 200 + 编造出来的空 id，
+     * 修复后必须是 200 + 空 {@code data}。
+     *
+     * <p><b>为什么用 {@code @Nested}</b>：属性在上下文启动时就绑定进 {@code UpstreamProperties}，
+     * 同一个上下文里改不了，而外层上下文的 {@code default-model=m1-test-model} 正是
+     * {@link #listsTheConfiguredModelInOpenAiListShape} 的断言依据。因此不动那个上下文，改用
+     * {@link NestedTestConfiguration} 的 {@code OVERRIDE} 另起一个**只差这一个属性**的上下文
+     * （本类其余测试与断言一行未改）。
+     */
+    @Nested
+    @NestedTestConfiguration(NestedTestConfiguration.EnclosingConfiguration.OVERRIDE)
+    @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+            properties = {
+                    "aihub.auth.enabled=false",
+                    "aihub.upstream.default-model=",
+                    "aihub.upstream.base-url=http://127.0.0.1:1"})
+    class BlankDefaultModelOverHttp {
+
+        @LocalServerPort
+        private int gatewayPort;
+
+        @Test
+        void blankDefaultModelYields200WithAnEmptyListInsteadOfAFabricatedId() throws Exception {
+            HttpResponse<String> response = get("/v1/models");
+
+            assertThat(response.statusCode()).isEqualTo(200);
+            // 「这个上下文真的把 default-model 绑成了空白」本身也要可证伪：
+            // 一旦继承错上下文（拿到 m1-test-model 或主配置的 default），下面两条会先红。
+            assertThat(response.body()).doesNotContain("m1-test-model");
+
+            JsonNode root = MAPPER.readTree(response.body());
+            assertThat(root.path("object").asText()).isEqualTo("list");
+            assertThat(root.path("data").isArray()).as("data 必须是数组").isTrue();
+            // 旧代码在这里是 1（编造出 {"id":""}）；修复后必须是 0。
+            assertThat(root.path("data").size()).isZero();
+        }
+
+        private HttpResponse<String> get(String path) throws Exception {
+            HttpRequest request = HttpRequest.newBuilder(
+                    URI.create("http://127.0.0.1:" + gatewayPort + path)).GET().build();
+            return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+        }
     }
 }
