@@ -84,8 +84,12 @@ public class ChatRelayController {
      * 变成开放集合。新增头必须像下面这样显式登记。
      * <p>加头**不改变**状态码、{@code Content-Type} 与响应体字节：它们只是额外的键值对，
      * 不参与「字节级透传」那条路径。
+     *
+     * <p><b>包内可见（不是 private）是刻意的</b>：{@code ChatRelayControllerTest} 用**字面量集合**
+     * 钉住它的成员资格（既不许静默放宽成前缀匹配，也不许静默删掉一个名字）。集合本身不可变
+     * （{@code Set.of}），因此放宽可见性不带来任何写入口。
      */
-    private static final Set<String> RELAYED_HEADERS = Set.of(
+    static final Set<String> RELAYED_HEADERS = Set.of(
             "content-type",
             // 上游限流/退避信号：客户端唯一的依据，吃掉它等于让 SDK 瞎猜（M3 的治理也依赖它）。
             "retry-after",

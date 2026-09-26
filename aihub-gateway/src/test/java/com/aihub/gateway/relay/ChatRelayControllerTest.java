@@ -240,6 +240,67 @@ class ChatRelayControllerTest {
         assertThat(event.requestId()).isEqualTo(requestId);
     }
 
+    /**
+     * M2 的透传白名单是**精确名**（前缀匹配会把白名单变成开放集合）。M3 补进了
+     * {@code retry-after-ms} 与 IETF 的 {@code RateLimit-*} 三兄弟，但**不得**顺手放宽成前缀匹配
+     * —— 这条用例用一个「差一点」的头名（{@code retry-after-ms-x}）证明白名单仍然是封闭集合。
+     *
+     * <p>{@code x-ratelimit-limit-requests} 同时也在构造里：它是 M2 就有的六个 OpenAI 名字之一，
+     * 一条用例同时钉住「新增的进来了」与「已有的没被挤掉」。
+     */
+    @Test
+    void relaysRetryAfterMsAndTheIetfRateLimitFamilyButNothingElse() throws Exception {
+        upstream.enqueueWithHeaders(429, "application/json; charset=utf-8",
+                "{\"error\":{\"message\":\"slow down\"}}",
+                Map.of("Retry-After", "3",
+                        "Retry-After-Ms", "250",
+                        "RateLimit-Limit", "10, 20",
+                        "RateLimit-Remaining", "0",
+                        "RateLimit-Reset", "1",
+                        "Retry-After-Ms-X", "should-not-pass",
+                        "X-RateLimit-Limit-Requests", "100"));
+
+        HttpResponse<String> response = post("/v1/chat/completions", "{\"stream\":false}",
+                "application/json", "application/json");
+
+        assertThat(response.statusCode()).isEqualTo(429);
+        assertThat(response.headers().firstValue("retry-after")).contains("3");
+        assertThat(response.headers().firstValue("retry-after-ms")).contains("250");
+        assertThat(response.headers().firstValue("ratelimit-limit")).contains("10, 20");
+        assertThat(response.headers().firstValue("ratelimit-remaining")).contains("0");
+        assertThat(response.headers().firstValue("ratelimit-reset")).contains("1");
+        assertThat(response.headers().firstValue("x-ratelimit-limit-requests")).contains("100");
+        assertThat(response.headers().firstValue("retry-after-ms-x"))
+                .as("白名单是精确名：差一点的名字不得穿过")
+                .isEmpty();
+    }
+
+    /**
+     * **字面量钉子**：白名单的成员资格是一个契约，既不许静默放宽（前缀匹配 / 上游随手新增的头
+     * 自动穿过），也不许静默收窄（某人删掉一个名字，只会在某个下游 SDK 那里表现为「莫名其妙地
+     * 拿不到退避建议」，没有任何测试会红）。
+     *
+     * <p>断言整个集合而不是「包含某几个」：新增一个头必须**有意**改这里，改的时候要回答
+     * 「为什么这个头可以穿过网关」。同时它也钉住 {@code x-request-id} 不在其中（参见
+     * {@link #forgedUpstreamRequestIdNeverOverwritesTheGatewayMintedOne}）。
+     */
+    @Test
+    void theRelayedHeaderAllowListIsExactlyThePinnedSetOfNames() {
+        assertThat(ChatRelayController.RELAYED_HEADERS).containsExactlyInAnyOrder(
+                "content-type",
+                "retry-after",
+                "retry-after-ms",
+                "x-ratelimit-limit-requests",
+                "x-ratelimit-limit-tokens",
+                "x-ratelimit-remaining-requests",
+                "x-ratelimit-remaining-tokens",
+                "x-ratelimit-reset-requests",
+                "x-ratelimit-reset-tokens",
+                "ratelimit-limit",
+                "ratelimit-remaining",
+                "ratelimit-reset");
+    }
+
     private HttpResponse<String> post(String path, String body, String contentType, String accept)
             throws Exception {
         HttpRequest.Builder builder = HttpRequest.newBuilder(

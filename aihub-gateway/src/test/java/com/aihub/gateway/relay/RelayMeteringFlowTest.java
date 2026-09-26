@@ -3,6 +3,7 @@ package com.aihub.gateway.relay;
 import com.aihub.common.apikey.ApiKeyView;
 import com.aihub.common.meter.MeteringEvent;
 import com.aihub.gateway.admin.AdminClient;
+import com.aihub.gateway.config.LegacyChannel;
 import com.aihub.gateway.testsupport.FakeUpstream;
 import com.aihub.gateway.testsupport.MeteringTestConfig;
 import com.aihub.gateway.testsupport.RecordingMeteringTransport;
@@ -219,6 +220,59 @@ class RelayMeteringFlowTest {
         assertThat(event.status()).isEqualTo(MeteringEvent.STATUS_ERROR);
         assertThat(event.errorCode()).isEqualTo("upstream_http_429");
         assertThat(event.totalTokens()).isZero();
+    }
+
+    /**
+     * M2 决策 8 留下的缺口（{@code api_key_id} / {@code channel_id} 恒为 NULL）在本里程碑关闭：
+     * {@code apiKeyId} 来自共享的 {@code ApiKeyView}（决策 14），{@code channelId} 来自路由结果
+     * （多渠道让「哪条渠道服务了这次请求」第一次有含义）。单渠道兜底路径会写
+     * {@code LegacyChannel.ID}（哨兵，不是 NULL），因此「走了兜底」在库里可查。
+     *
+     * <p>判别性：把 {@code RelayMetering.start} 里的 {@code view.apiKeyId()} 改回 {@code null}
+     * （M2 的写法），第一条断言立刻红 —— 这条链路（视图 → 事件 → MQ → request_log.api_key_id）
+     * 正是本任务要闭合的那一段。
+     */
+    @Test
+    void meteringCarriesTheNumericApiKeyIdAndTheServingChannelId() throws Exception {
+        upstream.enqueueJson(200, FakeUpstream.completionJson());
+
+        HttpResponse<String> response = post("{\"model\":\"flow-model\",\"stream\":false}");
+
+        MeteringEvent event = recorder.awaitEvent(
+                response.headers().firstValue(RequestIdFilter.HEADER).orElseThrow(), Duration.ofSeconds(5));
+        assertThat(event).isNotNull();
+        assertThat(event.apiKeyId()).as("api_key_id 取自鉴权视图（Task 2 的数值主键）").isEqualTo(42L);
+        assertThat(event.channelId()).as("兜底单渠道也必须给出可区分的渠道 id").isNotNull();
+        assertThat(event.channelId())
+                .as("没有快照时服务的是遗留兜底渠道：库里因此能区分「走了兜底」")
+                .isEqualTo(LegacyChannel.ID);
+    }
+
+    /**
+     * 决策 15：超长 model **只**在计量事件里被截断到 128（{@code request_log.model} 是 VARCHAR(128)），
+     * 转发给上游的请求体**逐字节不变**。M2 时这一行会 INSERT 失败 → 重试 3 次 → 进死信队列，
+     * 而 DLQ 是任何持合法 API Key 的客户端都能触碰的入口。
+     *
+     * <p>两条断言必须同时成立：只断言「事件被截断」时，一个把截断错放在转发路径上的实现照样绿 ——
+     * 那是客户端可见的行为改变，违反 M1 的字节级透传铁律。因此这里把上游真正收到的 body 与
+     * 客户端发出的 body 做**整体相等**断言（不是 contains）。
+     */
+    @Test
+    void oversizedModelIsTruncatedInTheEventButForwardedVerbatim() throws Exception {
+        String longModel = "m".repeat(200);
+        String clientBody = "{\"model\":\"" + longModel + "\",\"stream\":false}";
+        upstream.enqueueJson(200, FakeUpstream.completionJson());
+
+        HttpResponse<String> response = post(clientBody);
+
+        MeteringEvent event = recorder.awaitEvent(
+                response.headers().firstValue(RequestIdFilter.HEADER).orElseThrow(), Duration.ofSeconds(5));
+        assertThat(event).isNotNull();
+        assertThat(event.model()).hasSize(128);
+        assertThat(event.model()).isEqualTo(longModel.substring(0, 128));
+        assertThat(upstream.lastRequest().body())
+                .as("上游必须收到客户端原始的请求体，逐字节相同（截断只发生在计量事件里）")
+                .isEqualTo(clientBody);
     }
 
     private HttpResponse<String> post(String body) throws Exception {

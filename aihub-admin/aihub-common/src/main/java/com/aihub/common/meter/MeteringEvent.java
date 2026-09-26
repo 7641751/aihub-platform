@@ -11,8 +11,16 @@ import java.time.Instant;
  * 消费端如果用自己的 {@code now()} 生成 {@code created_at}，同一事件就会写成两行
  * （实测：同一 request_id、created_at 差 333ms → 2 行）。
  *
- * <p>{@code apiKeyId} / {@code channelId} 在 M2 恒为 {@code null}（见计划「决策登记」第 8 条）；
- * {@code ttftMs} 在非流式请求里为 {@code null}；{@code model} / {@code errorCode} 可空。
+ * <p>{@code apiKeyId} 在 M2 恒为 {@code null}（见计划「决策登记」第 8 条：当时共享类型里没有数值主键）；
+ * M3（Task 11）起 gateway 填**鉴权视图里的真实值**，鉴权关闭或视图没有数值主键时仍为 {@code null}
+ * —— 该列可空，没有「哨兵」语义（与 {@code tenantId} 的 {@code 0} 不同）。{@code channelId} 同理：
+ * M2 为 {@code null}，M3 起填**实际服务**（故障转移后是备用）的那条渠道 id。
+ * 两者都只是**值**的变化：字段数、顺序与转义规则（即跨服务契约面）没有改动，
+ * {@code MeteringEventCodec} 的固定向量与畸形载荷用例因此一行未改。
+ *
+ * <p>{@code ttftMs} 在非流式请求里为 {@code null}；{@code model} / {@code errorCode} 可空。
+ * {@code model} 不保证与客户端原样一致：超长时 gateway 在**事件组装处**截断到
+ * {@code request_log.model} 的列宽（{@code VARCHAR(128)}），而转发给上游的请求体不受影响。
  */
 public record MeteringEvent(
         String requestId,

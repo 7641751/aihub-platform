@@ -41,6 +41,15 @@ class RequestLogServiceTest extends AbstractIntegrationTest {
                 12, 34, 46, 1200, 250, MeteringEvent.STATUS_SUCCESS, null, createdAtMillis);
     }
 
+    /**
+     * 同上，但把 Task 11 起真的有值的两列（{@code api_key_id} / {@code channel_id}）显式填上。
+     * 它们对应网关侧的「鉴权视图的数值主键」与「实际服务的那条渠道」。
+     */
+    private static MeteringEvent event(String requestId, Long apiKeyId, Long channelId, long createdAtMillis) {
+        return new MeteringEvent(requestId, 7L, apiKeyId, channelId, "deepseek-chat",
+                12, 34, 46, 1200, 250, MeteringEvent.STATUS_SUCCESS, null, createdAtMillis);
+    }
+
     private Map<String, Object> row(String requestId) {
         return jdbcTemplate.queryForMap(
                 "select tenant_id, api_key_id, channel_id, model, prompt_tokens, completion_tokens,"
@@ -57,7 +66,8 @@ class RequestLogServiceTest extends AbstractIntegrationTest {
 
         Map<String, Object> row = row(requestId);
         assertThat(row.get("tenant_id")).isEqualTo(7L);
-        // 决策 8：M2 的共享 ApiKeyView 还没有数值主键，api_key_id / channel_id **必须**落 NULL。
+        // 这个事件里这两个字段是 null（鉴权关闭 / 没有视图的哨兵形态），因此列必须落 NULL ——
+        // 不许被数据库默认值或「省略 null 列」的策略悄悄填成别的东西。
         // containsKey 不能省：queryForMap 少了列时 get() 同样返回 null，只断言 isNull() 会被漏列骗过。
         assertThat(row).containsKey("api_key_id");
         assertThat(row).containsKey("channel_id");
@@ -80,6 +90,31 @@ class RequestLogServiceTest extends AbstractIntegrationTest {
         LocalDateTime expected = LocalDateTime.ofInstant(Instant.ofEpochMilli(CREATED_AT_MILLIS), ZoneOffset.UTC);
         assertThat(expected).isEqualTo(LocalDateTime.parse("2027-01-15T08:00:00.123"));
         assertThat(row.get("created_at")).isEqualTo(expected);
+    }
+
+    /**
+     * Task 11 把 M2 决策 8 的缺口（{@code api_key_id} / {@code channel_id} 恒为 NULL）闭合掉了：
+     * 事件里带了值，落库这一侧必须**原样写进列**，而不是被插入策略（MyBatis-Plus 默认省略 null 字段）
+     * 或某个「只 set 一次」的实体复用悄悄丢掉。
+     *
+     * <p>判别力：删掉 {@code RequestLogService} 里的 {@code entity.setApiKeyId(...)} /
+     * {@code setChannelId(...)} 任一行，本用例立刻红 —— 而既有用例全部用的是 null 事件，
+     * 一行都不会红（这正是本用例存在的理由：它把「列有值」这条链路钉在库里）。
+     *
+     * <p>用的两个值刻意不同且都不是 0：0 与 NULL 在失败输出里不好区分，
+     * 而 {@code api_key_id} 没有任何哨兵语义（可空），因此不能被 {@code tenant_id} 的 0 哨兵惯例带偏。
+     */
+    @Test
+    void persistsTheNumericApiKeyIdAndChannelIdFromTheEvent() {
+        String requestId = "req-m3-api-key-and-channel";
+
+        assertThat(requestLogService.persist(event(requestId, 42L, 13L, CREATED_AT_MILLIS))).isTrue();
+
+        Map<String, Object> row = row(requestId);
+        assertThat(row).containsKey("api_key_id");
+        assertThat(row).containsKey("channel_id");
+        assertThat(row.get("api_key_id")).isEqualTo(42L);
+        assertThat(row.get("channel_id")).isEqualTo(13L);
     }
 
     /**

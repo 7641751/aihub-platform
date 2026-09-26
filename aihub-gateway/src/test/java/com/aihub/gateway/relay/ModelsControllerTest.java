@@ -1,8 +1,16 @@
 package com.aihub.gateway.relay;
 
+import com.aihub.common.config.ChannelDescriptor;
+import com.aihub.common.config.ConfigSnapshot;
+import com.aihub.common.config.ModelRouteDescriptor;
+import com.aihub.gateway.admin.AdminClient;
+import com.aihub.gateway.config.ConfigCache;
+import com.aihub.gateway.config.ConfigClient;
+import com.aihub.gateway.config.GatewayConfigProperties;
 import com.aihub.gateway.upstream.UpstreamProperties;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -13,22 +21,26 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 /**
- * {@code GET /v1/models} 的契约：单渠道场景只回报一个模型，形状遵循 OpenAI 的 list 协议
- * （{@code {"object":"list","data":[{"id":<defaultModel>,"object":"model","owned_by":"aihub"}]}}）。
+ * {@code GET /v1/models} 的契约：模型列表 = **快照里的模型名 ∪ 遗留默认模型**（去重、字典序），
+ * 形状遵循 OpenAI 的 list 协议
+ * （{@code {"object":"list","data":[{"id":<model>,"object":"model","owned_by":"aihub"}]}}）。
  *
- * <p>这里按 JSON 结构断言而不是子串匹配：模型 id 来自 {@code aihub.upstream.default-model} 配置项，
- * 用配置值而非硬编码常量来断言，才真的证明它是「配置驱动」的。用 Jackson 解析也避免了键序问题
- * （{@code Map.of} 的迭代顺序不保证）。
+ * <p>这里按 JSON 结构断言而不是子串匹配：模型 id 来自配置与快照，用真实值而非硬编码常量来断言，
+ * 才真的证明它是「配置/快照驱动」的。用 Jackson 解析也避免了键序问题（{@code Map.of} 的迭代顺序不保证）。
  *
  * <p>{@code base-url} 故意指向必然连接被拒的端口：{@code /v1/models} 必须是网关**本地**应答，
- * 一旦实现改成回源，本用例会立刻变成 502 而不是 200。
+ * 一旦实现改成回源，本用例会立刻变成 502 而不是 200。{@code spring.data.redis.port} 同样指向
+ * 死端口 —— 本机可能真的跑着一个 Redis（docker compose），而一份**别的进程留下的**快照会让
+ * 「data 恰好有 1 个元素」这条断言取决于环境而不是代码。
  *
  * <p>鉴权开关关闭时本端点应放行；「开着鉴权时必须 401」由
  * {@code ApiKeyAuthFilterTest.modelsEndpointIsGuardedLikeEveryOtherV1Path} 覆盖（那边是
@@ -38,10 +50,14 @@ import static org.assertj.core.api.Assertions.assertThat;
         properties = {
                 "aihub.auth.enabled=false",
                 "aihub.upstream.default-model=m1-test-model",
-                "aihub.upstream.base-url=http://127.0.0.1:1"})
+                "aihub.upstream.base-url=http://127.0.0.1:1",
+                "spring.data.redis.port=1"})
 class ModelsControllerTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private static final UpstreamProperties LEGACY =
+            new UpstreamProperties("http://127.0.0.1:11434", null, "legacy");
 
     @LocalServerPort
     private int gatewayPort;
@@ -68,6 +84,37 @@ class ModelsControllerTest {
     }
 
     /**
+     * M3 起「平台提供哪些模型」= 配置快照的 {@code model_route} 里出现过的模型名。
+     * **仍然并入遗留默认模型**：迁移期（或 admin 不可达走了兜底）时不能突然把这个端点变成空列表
+     * —— 那会让所有客户端以为平台没有任何模型。
+     */
+    @Test
+    void listsTheUnionOfSnapshotModelsAndTheLegacyDefaultModel() {
+        ModelsController controller = new ModelsController(
+                legacyProperties("legacy"), configClientReturning(snapshotWithModels("model-b", "model-a")));
+
+        assertThat(ids(controller)).containsExactly("legacy", "model-a", "model-b");
+    }
+
+    /** 没有快照（冷启动 + admin 不可达）时仍然回报遗留默认模型，而不是空列表。 */
+    @Test
+    void fallsBackToTheLegacyDefaultModelWhenThereIsNoSnapshot() {
+        ModelsController controller = new ModelsController(
+                legacyProperties("legacy"), configClientReturning(ConfigSnapshot.empty()));
+
+        assertThat(ids(controller)).containsExactly("legacy");
+    }
+
+    /** 快照里的模型名与遗留默认模型重名时只出现一次（集合语义，不是列表拼接）。 */
+    @Test
+    void aModelNamePresentInBothSourcesAppearsOnce() {
+        ModelsController controller = new ModelsController(
+                legacyProperties("legacy"), configClientReturning(snapshotWithModels("legacy", "model-a")));
+
+        assertThat(ids(controller)).containsExactly("legacy", "model-a");
+    }
+
+    /**
      * {@code defaultModel} 为 null（属性整个缺失）或空白（环境变量被设成空串）都不该 500：
      * OpenAI 协议下 {@code data} 是数组，空数组是合法且诚实的回答；编造一个 id 会让 SDK
      * 拿着一个不存在的模型名去打下游。修复前这里是 {@code Map.of("id", null)} → NPE → 500。
@@ -75,14 +122,61 @@ class ModelsControllerTest {
     @Test
     void blankOrMissingDefaultModelYieldsAnEmptyList() {
         for (String model : Arrays.asList(null, "", "   ")) {
-            ModelsController controller =
-                    new ModelsController(new UpstreamProperties("http://127.0.0.1:1", null, model));
+            ModelsController controller = new ModelsController(
+                    legacyProperties(model), configClientReturning(ConfigSnapshot.empty()));
 
-            Map<String, Object> body = controller.listModels().block();
+            Map<String, Object> body = controller.listModels().block(Duration.ofSeconds(5));
 
             assertThat(body).containsEntry("object", "list");
             assertThat((List<?>) body.get("data")).isEmpty();
         }
+    }
+
+    private static UpstreamProperties legacyProperties(String defaultModel) {
+        return new UpstreamProperties("http://127.0.0.1:1", null, defaultModel);
+    }
+
+    /**
+     * 只回报给定快照的 {@link ConfigClient} 替身。
+     *
+     * <p>本类的关注点是「模型列表 = 快照 ∪ 遗留默认」，不是缓存编排（回源 / 版本比对 / 降级顺序
+     * 已在 {@code ConfigCacheTest} 里逐条钉过），所以直接覆写 {@link ConfigClient#current()}；
+     * **不**为了一个测试去给 {@code ConfigClient} 抽接口。缓存与 admin 用 mock 占位：它们在本类里
+     * 一次都不会被调用（被覆写的 {@code current()} 不碰它们）。
+     *
+     * <p>显式传 {@link SimpleMeterRegistry}：4 参重载会把指标落进全局注册表，在用例之间互相污染。
+     */
+    private static ConfigClient configClientReturning(ConfigSnapshot snapshot) {
+        return new ConfigClient(
+                mock(ConfigCache.class), mock(AdminClient.class), LEGACY,
+                new GatewayConfigProperties(Duration.ofSeconds(30), Duration.ofMinutes(10), 300,
+                        Duration.ofSeconds(5)),
+                new SimpleMeterRegistry()) {
+            @Override
+            public ConfigSnapshot current() {
+                return snapshot;
+            }
+        };
+    }
+
+    /** 快照里每个模型一条 ACTIVE 路由（本测试只看模型名，渠道细节无关）。 */
+    private static ConfigSnapshot snapshotWithModels(String... models) {
+        List<ModelRouteDescriptor> routes = Arrays.stream(models)
+                .map(model -> new ModelRouteDescriptor(model, 11L, 100, 0, ModelRouteDescriptor.STATUS_ACTIVE))
+                .toList();
+        return new ConfigSnapshot(1L, 0L, List.of(channel(11L)), routes, List.of(), null);
+    }
+
+    private static ChannelDescriptor channel(long id) {
+        return new ChannelDescriptor(id, "ch-" + id, "https://ch" + id + ".example.com", "v1:QUJD", 1,
+                5_000, ChannelDescriptor.STATUS_ACTIVE, 100, 0);
+    }
+
+    private static List<String> ids(ModelsController controller) {
+        Map<String, Object> body = controller.listModels().block(Duration.ofSeconds(5));
+        return ((List<?>) body.get("data")).stream()
+                .map(entry -> String.valueOf(((Map<?, ?>) entry).get("id")))
+                .toList();
     }
 
     private HttpResponse<String> get(String path) throws Exception {
@@ -115,7 +209,8 @@ class ModelsControllerTest {
             properties = {
                     "aihub.auth.enabled=false",
                     "aihub.upstream.default-model=",
-                    "aihub.upstream.base-url=http://127.0.0.1:1"})
+                    "aihub.upstream.base-url=http://127.0.0.1:1",
+                    "spring.data.redis.port=1"})
     class BlankDefaultModelOverHttp {
 
         @LocalServerPort

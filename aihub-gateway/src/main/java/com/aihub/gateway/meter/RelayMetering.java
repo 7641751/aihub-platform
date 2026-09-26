@@ -4,6 +4,7 @@ import com.aihub.common.apikey.ApiKeyView;
 import com.aihub.common.config.ChannelDescriptor;
 import com.aihub.common.meter.MeteringEvent;
 import com.aihub.gateway.auth.ApiKeyAuthFilter;
+import com.aihub.gateway.relay.RelayAttempts;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.web.server.ServerWebExchange;
@@ -23,6 +24,12 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * <p>{@code tenantId} 取自 {@code ApiKeyAuthFilter} 写进 exchange 的 {@link ApiKeyView}；鉴权关闭时
  * 用 {@link #TENANT_UNKNOWN} 哨兵（列 NOT NULL，丢数据比记哨兵更糟）。
+ *
+ * <p>{@code apiKeyId}（Task 11 起）同样取自 {@link ApiKeyView#apiKeyId()}：鉴权关闭、或视图里没有
+ * 数值主键时保持 {@code null}（列可空，「不知道」比编一个 id 诚实，也不会把用量记到别的 key 头上）。
+ *
+ * <p>{@code model} 在**事件组装时**被截断到 {@code request_log.model} 的列宽（{@link RelayAttempts#MODEL_MAX_LENGTH}，
+ * 决策 15）。转发给上游的请求体从不经过本类，因此仍是客户端写的那串字节。
  *
  * <p>{@code channelId} 由控制器在每次尝试前通过 {@link #onChannelSelected(ChannelDescriptor)} 更新，
  * 因此事件里记的是**实际服务**（或最后尝试）的那条渠道 —— 故障转移之后它不再是首选那条。
@@ -60,7 +67,10 @@ public final class RelayMetering {
                 requestId,
                 Instant.now().truncatedTo(ChronoUnit.MILLIS),
                 view == null ? TENANT_UNKNOWN : view.tenantId(),
-                null,   // apiKeyId：计量侧的落库是 Task 11 的遗留项之一（决策 14 的契约在 Task 2 已就位）
+                // 决策 14：数值 api_key_id 进共享契约（Task 2）后，用量第一次能按 API Key 聚合。
+                // 鉴权关闭（没有视图）或视图里没有数值主键时保持 NULL —— 不发明值（与 tenant_id
+                // 的 0 哨兵不同：api_key_id 可空，空着是诚实的）。
+                view == null ? null : view.apiKeyId(),
                 model,
                 UsageCapture.start(streaming, maxCaptureBytes));
     }
@@ -172,7 +182,11 @@ public final class RelayMetering {
             totalTokens = 0;
         }
 
-        return new MeteringEvent(requestId, tenantId, apiKeyId, channelId.get(), model,
+        // 决策 15：只截断**事件里**的 model。转发给上游的请求体由 RelayRequestBody 原样保留
+        // （M1 的字节级透传铁律），而 request_log.model 是 VARCHAR(128) —— 超长会让这一行
+        // INSERT 失败 → 重投 → 死信队列，而 DLQ 是任何持合法 API key 的客户端都能触碰的入口。
+        return new MeteringEvent(requestId, tenantId, apiKeyId, channelId.get(),
+                RelayAttempts.truncateModel(model),
                 promptTokens, completionTokens, totalTokens,
                 capture.latencyMs(), captured.ttftMs(), resolvedStatus, code,
                 createdAt.toEpochMilli());

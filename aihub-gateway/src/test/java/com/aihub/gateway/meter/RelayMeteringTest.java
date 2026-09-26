@@ -5,6 +5,7 @@ import com.aihub.common.config.ChannelDescriptor;
 import com.aihub.common.meter.MeteringEvent;
 import com.aihub.gateway.auth.ApiKeyAuthFilter;
 import com.aihub.gateway.config.LegacyChannel;
+import com.aihub.gateway.relay.RelayAttempts;
 import com.aihub.gateway.upstream.UpstreamProperties;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.buffer.DataBuffer;
@@ -28,11 +29,16 @@ class RelayMeteringTest {
     private static final DefaultDataBufferFactory FACTORY = new DefaultDataBufferFactory();
 
     private static MockServerWebExchange exchangeWithTenant(Long tenantId) {
+        return exchangeWithView(tenantId == null
+                ? null
+                : new ApiKeyView("ak_1", tenantId, "demo", ApiKeyView.STATUS_ACTIVE, null, 42L));
+    }
+
+    private static MockServerWebExchange exchangeWithView(ApiKeyView view) {
         MockServerWebExchange exchange =
                 MockServerWebExchange.from(MockServerHttpRequest.post("/v1/chat/completions").build());
-        if (tenantId != null) {
-            exchange.getAttributes().put(ApiKeyAuthFilter.ATTRIBUTE_KEY_VIEW,
-                    new ApiKeyView("ak_1", tenantId, "demo", ApiKeyView.STATUS_ACTIVE, null, 42L));
+        if (view != null) {
+            exchange.getAttributes().put(ApiKeyAuthFilter.ATTRIBUTE_KEY_VIEW, view);
         }
         return exchange;
     }
@@ -129,8 +135,15 @@ class RelayMeteringTest {
         assertThat(event.errorCode()).isEqualTo(MeteringEvent.ERROR_GATEWAY);
     }
 
+    /**
+     * M2 决策 8 留下的缺口（{@code api_key_id} 恒为 NULL）在 Task 11 关闭：数值主键取自
+     * {@code ApiKeyView.apiKeyId()}（Task 2 就已就位的共享契约）。
+     *
+     * <p>{@code channel_id} 在这里仍然是 NULL —— 本用例没有经过控制器，**没有任何候选被选中**。
+     * 「谁服务了这次请求」只能由 {@code onChannelSelected} 给出（见下面那条故障转移用例）。
+     */
     @Test
-    void tenantComesFromTheKeyViewWhileIdsStayNull() {
+    void tenantAndNumericApiKeyComeFromTheKeyViewWhileChannelAwaitsRouting() {
         RelayMetering metering = meteringFor(exchangeWithTenant(7L), false);
         MeteringEvent withKey = metering.toEvent(SignalType.ON_COMPLETE);
         MeteringEvent withoutKey = meteringFor(exchangeWithTenant(null), false).toEvent(SignalType.ON_COMPLETE);
@@ -140,8 +153,11 @@ class RelayMeteringTest {
 
         assertThat(withKey.tenantId()).isEqualTo(7L);
         assertThat(withoutKey.tenantId()).isEqualTo(RelayMetering.TENANT_UNKNOWN);
-        assertThat(withKey.apiKeyId()).isNull();
-        assertThat(withKey.channelId()).isNull();
+        assertThat(withKey.apiKeyId())
+                .as("api_key_id 必须来自鉴权视图的数值主键，而不是发明一个值")
+                .isEqualTo(42L);
+        assertThat(withKey.channelId()).as("没有候选被选中时 channel_id 保持 NULL").isNull();
+        assertThat(withoutKey.apiKeyId()).as("鉴权关闭（没有视图）时 api_key_id 保持 NULL").isNull();
 
         // created_at 必须是「毫秒单位的、接近当前时刻」的值：写成 0 / 秒 / 每次组装重新采样都会变红。
         assertThat(Math.abs(withKey.createdAtEpochMilli() - System.currentTimeMillis()))
@@ -159,6 +175,46 @@ class RelayMeteringTest {
         assertThat(truncated.createdAtEpochMilli() % 1_000L)
                 .as("毫秒位必须是输入时刻的毫秒位（实现若按微秒/纳秒写入，这里会是 0）")
                 .isEqualTo(123L);
+    }
+
+    /**
+     * 视图存在但**没有**数值主键（契约允许的 {@code null}，例如 Task 2 之前铸造的 key）时，
+     * {@code api_key_id} 保持 NULL：宁可空着，也不能编一个 id 让用量聚合到别人头上。
+     */
+    @Test
+    void apiKeyIdStaysNullWhenTheViewHasNoNumericId() {
+        RelayMetering metering = meteringFor(exchangeWithView(
+                new ApiKeyView("ak_1", 7L, "demo", ApiKeyView.STATUS_ACTIVE, null, null)), false);
+
+        MeteringEvent event = metering.toEvent(SignalType.ON_COMPLETE);
+
+        assertThat(event.tenantId()).as("租户维度仍然有值").isEqualTo(7L);
+        assertThat(event.apiKeyId()).isNull();
+    }
+
+    /**
+     * 决策 15：超长 model **只**在计量事件里被截断（{@code request_log.model} 是 {@code VARCHAR(128)}），
+     * 否则这一行 INSERT 会失败 → 重投 → 死信队列，而 DLQ 是任何持合法 API key 的客户端都能触碰的入口。
+     *
+     * <p>事件里剩下的是**前缀**（前 128 个字符），不是摘要也不是空值 —— 前缀才能让人在库里认出是哪个模型。
+     * 截断只发生在这里：转发给上游的请求体由 {@code RelayRequestBody} 原样保留（端到端证据见
+     * {@code RelayMeteringFlowTest#oversizedModelIsTruncatedInTheEventButForwardedVerbatim}）。
+     */
+    @Test
+    void oversizedModelIsTruncatedToTheColumnWidthInTheEvent() {
+        String longModel = "m".repeat(200);
+
+        MeteringEvent event = RelayMetering.start(exchangeWithTenant(7L), "req-1", longModel, false, 4096)
+                .toEvent(SignalType.ON_COMPLETE);
+
+        assertThat(RelayAttempts.MODEL_MAX_LENGTH)
+                .as("必须与 V1 的 model VARCHAR(128) 一致")
+                .isEqualTo(128);
+        assertThat(event.model()).hasSize(RelayAttempts.MODEL_MAX_LENGTH);
+        assertThat(event.model()).isEqualTo(longModel.substring(0, RelayAttempts.MODEL_MAX_LENGTH));
+        // 边界之内逐字不变（截断不能顺手改动合法模型名）。
+        assertThat(meteringFor(exchangeWithTenant(7L), false).toEvent(SignalType.ON_COMPLETE).model())
+                .isEqualTo("deepseek-chat");
     }
 
     /**
