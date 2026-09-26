@@ -22,29 +22,32 @@ import static org.mockito.Mockito.when;
 /**
  * 桶 key 的**布局**契约，两级各一条（控制器评审 G4）。
  *
- * <p>门面 {@link RateLimiter} 按 Redis 布局拼桶 key
- * （{@code aihub:ratelimit:{tenantId}:{sha256}}，决策 8），而 {@link LocalRateLimiter} 自己再补一层
- * 前缀。两层前缀是**两个不同的东西**：门面交给本机桶的必须是**未加本机前缀的那一份**，
- * {@link LocalRateLimiter#tryConsume} 自己会补 {@link LocalRateLimiter#KEY_PREFIX}。
+ * <p>两级存储的键前缀**刻意不同**，因为一个 key 的字符串本身就应当说明它在哪一级：
+ * <ul>
+ *   <li>Redis 桶：{@code aihub:ratelimit:{tenantId}:{sha256}}（决策 8），前缀由 {@link RateLimiter}
+ *       在 Redis 那一侧加上；</li>
+ *   <li>本机桶：{@code local:ratelimit:{tenantId}:{sha256}}，前缀由 {@link LocalRateLimiter#tryConsume}
+ *       在它自己那一侧加上。</li>
+ * </ul>
  *
- * <p>修复前的写法是 {@code local:ratelimit:} + {@code aihub:ratelimit:…}，即
- * {@code local:ratelimit:aihub:ratelimit:7:abc} —— 与 {@link LocalRateLimiter#KEY_PREFIX} 自己的
- * 「刻意与 Redis 布局不同」注释矛盾：同一串里出现两个前缀，日志与抓包里反而更难判断一个 key 在哪一级。
- * 桶 key 没有任何解析方（只用于查表），因此改布局是安全的。
+ * <p>G4 的判据是**本机键上恰好有一个 {@code local:ratelimit:} 前缀**，而不是「两个前缀叠在同一串里」
+ * （{@code local:ratelimit:aihub:ratelimit:…}）。因此 {@link RateLimiter#acquire} 交给本机桶的是
+ * **身份**（{@code {tenantId}:{keyHash}}），Redis 布局那一份键是 Redis 路径自己的事 ——
+ * 前缀属于各自的存储，谁都不复用对方那一个。桶 key 没有任何解析方（只用于查表），因此改布局是安全的。
  */
 class BucketKeyLayoutTest {
 
     /**
-     * G4 的正面钉子：**门面**交给本机桶的键必须是 Redis 布局那一份，而本机前缀只由本机桶自己补一次。
-     * <p>修复前门面拼的是 {@code local:ratelimit:} + {@code aihub:ratelimit:…}，本机桶再补一次，
-     * 于是桶键里出现两个前缀（本用例断言的就是那份完整键）。
+     * G4 的正面钉子：**门面**交给本机桶的是身份（{@code tenantId:hash}），本机前缀由本机桶自己补一次，
+     * 于是本机键里恰好只有一个 {@code local:ratelimit:} 前缀 —— {@code aihub:ratelimit:}（Redis 布局的
+     * 身份）**不出现**在它里面。
      * <p>注意不能直接对 {@link LocalRateLimiter#tryConsume} 传一个已带本机前缀的键来断言 ——
      * 那一层**本来就该**再补一次（它不知道调用方是谁），那样断言的只是一句同义反复。
      * 契约在门面这一层，所以钉子也必须在门面这一层。
      */
     @SuppressWarnings("unchecked")
     @Test
-    void theFacadeAddsNoPrefixOfItsOwnSoTheLocalKeyCarriesExactlyOne() {
+    void theLocalKeyCarriesExactlyOneLocalPrefixAndNoRedisLayoutPrefix() {
         StringRedisTemplate redis = mock(StringRedisTemplate.class);
         when(redis.execute(any(RedisScript.class), anyList(), any(Object[].class)))
                 .thenThrow(new RedisConnectionFailureException("测试桩：Redis 不可用"));
@@ -55,14 +58,11 @@ class BucketKeyLayoutTest {
         RateLimitDecision decision = limiter.acquire(7L, 42L, "abc");
 
         assertThat(decision.allowed()).isTrue();
-        // 本机桶里的完整键：前缀只有一层（local 那一层），后面紧跟 Redis 布局的键。
-        assertThat(local.trackedKeys()).containsExactly(LocalRateLimiter.KEY_PREFIX + "aihub:ratelimit:7:abc");
-        // 「双前缀」= 门面**又**拼了一次 local 前缀（修复前的 bug）。注意别把
-        // LocalRateLimiter.KEY_PREFIX + LuaTokenBucket.KEY_PREFIX 当成「双前缀」——
-        // 那一串恰好就是**正确**的单层形态（写反过一次，断言会与上面那条互相矛盾）。
+        // 本机桶里的完整键：local:ratelimit:{tenant}:{hash} —— 前缀只有一层。
+        assertThat(local.trackedKeys()).containsExactly(LocalRateLimiter.KEY_PREFIX + "7:abc");
         assertThat(local.trackedKeys())
-                .as("门面不得自己再拼一次 local 前缀")
-                .noneMatch(key -> key.startsWith(LocalRateLimiter.KEY_PREFIX + LocalRateLimiter.KEY_PREFIX));
+                .as("Redis 布局的前缀属于 Redis 那一路，不得出现在本机键里")
+                .noneMatch(key -> key.contains(LuaTokenBucket.KEY_PREFIX));
     }
 
     /**
@@ -93,13 +93,13 @@ class BucketKeyLayoutTest {
         limiter.acquire(7L, 42L, "hash-of-secret");
 
         assertThat(local.trackedKeys())
-                .containsExactly(LocalRateLimiter.KEY_PREFIX + "aihub:ratelimit:7:hash-of-secret");
+                .containsExactly(LocalRateLimiter.KEY_PREFIX + "7:hash-of-secret");
     }
 
     /**
      * 端到端形状：真门面 + 真 Lettuce 客户端指向死端口 → 本机桶，且**同一个
-     * {@code (tenantId, keyHash)} 只产生一个桶**。修复前后这一条都是 1（双前缀也还是一对一），
-     * 所以它证明不了前缀本身；它证明的是「门面到本机桶这条链真的接通了、维度也没多算」。
+     * {@code (tenantId, keyHash)} 只产生一个桶**。它证明的是「门面到本机桶这条链真的接通了、
+     * 维度也没多算」，同时把本机键的字面量钉在真实 Lettuce 路径上。
      */
     @Test
     void theFacadeRoutesTheDegradedDecisionIntoASingleLocalBucketPerTenantAndHash() {
@@ -125,7 +125,7 @@ class BucketKeyLayoutTest {
             assertThat(limiter.acquire(7L, 42L, "abc").degraded()).isTrue();
 
             assertThat(local.trackedBuckets()).as("同一 (tenantId, hash) 必须共用一个本机桶").isEqualTo(1);
-            assertThat(local.trackedKeys()).containsExactly(LocalRateLimiter.KEY_PREFIX + "aihub:ratelimit:7:abc");
+            assertThat(local.trackedKeys()).containsExactly(LocalRateLimiter.KEY_PREFIX + "7:abc");
         } finally {
             factory.destroy();
         }

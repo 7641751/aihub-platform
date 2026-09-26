@@ -51,19 +51,25 @@ public class RateLimiter {
      */
     public RateLimitDecision acquire(long tenantId, Long apiKeyId, String keyHash) {
         RatePolicy policy = resolver.resolve(tenantId, apiKeyId);
-        // Redis 布局的桶键（决策 8）。本机桶那一级**自己**会补上它自己的前缀
-        // （{@code LocalRateLimiter.KEY_PREFIX}），因此这里绝不能预先拼 local 前缀 ——
-        // 那会拼出 local:ratelimit:aihub:ratelimit:…，与本机前缀「刻意与 Redis 布局不同」的
-        // 理由（一眼看出一个 key 在哪一级）正好相反。
-        String bucketKey = LuaTokenBucket.KEY_PREFIX + tenantId + ":" + keyHash;
+        // 两级各拼**自己的**键，谁都不复用对方那一个（G4）。这背后是同一条理由：两个存储的键
+        // 前缀「刻意不同」（{@code LocalRateLimiter.KEY_PREFIX} 的 Javadoc），为的是一眼看出
+        // 一个 key 在哪一级。若把 Redis 布局那一份原样交给本机桶，本机键就会变成
+        // local:ratelimit:aihub:ratelimit:…（两个前缀叠在一串里），恰好把这条理由反过来。
+        //
+        // 两个键的唯一共同点是**身份**（{@code tenantId:keyHash}）—— 它构造一次、再用两次：
+        //   · 本机桶：local:ratelimit:{tenantId}:{keyHash}
+        //   · Redis： aihub:ratelimit:{tenantId}:{keyHash}
+        // 前缀属于各自的存储，因此「加前缀」这件事只发生在各自那一侧。
+        String identity = tenantId + ":" + keyHash;
 
         if (isDegradedNow()) {
-            return local.tryConsume(bucketKey, policy.qps(), policy.burst());
+            return local.tryConsume(identity, policy.qps(), policy.burst());
         }
-        RateLimitDecision decision = redis.tryConsume(bucketKey, policy.qps(), policy.burst());
+        RateLimitDecision decision = redis.tryConsume(LuaTokenBucket.KEY_PREFIX + identity, policy.qps(),
+                policy.burst());
         if (decision == null) {
             markDegraded();
-            return local.tryConsume(bucketKey, policy.qps(), policy.burst());
+            return local.tryConsume(identity, policy.qps(), policy.burst());
         }
         clearDegraded();
         return decision;

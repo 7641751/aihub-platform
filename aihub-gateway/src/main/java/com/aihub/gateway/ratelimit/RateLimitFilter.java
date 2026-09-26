@@ -18,6 +18,8 @@ import org.springframework.web.server.WebFilterChain;
 import org.springframework.web.util.pattern.PathPattern;
 import org.springframework.web.util.pattern.PathPatternParser;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -37,6 +39,16 @@ import java.util.concurrent.atomic.AtomicLong;
  * 与鉴权的 fail-closed 相反，这是刻意的取舍（保护层的故障方向应当朝向「让请求过去」，
  * 而信任层的故障方向应当朝向「拒绝」）。守卫覆盖的是**整个判定动作**：{@code acquire} 抛异常、
  * 以及它返回 {@code null}（契约被打破）都算自身故障 —— 后者若不加判断，就是一个 NPE → 500。
+ *
+ * <p><b>线程模型：判定整体在 {@link #LIMITER_SCHEDULER} 上执行，绝不占 event loop。</b>
+ * 这条链上一个判定要做两件**阻塞**的事：策略解析会调 {@code ConfigClient.current()}（两级缓存
+ * 未命中时是同步 Redis GET，必要时还有一次同步回源），而 {@code RedisRateLimiter} 是阻塞的
+ * Lua 调用。{@code spring.data.redis.timeout} 是 2 秒：Redis **卡住**（不是拒绝）时，在 event loop
+ * 上做这些事会把共享同一个 loop 的所有请求一起按住 2 秒 —— {@code /healthz} 也不例外，
+ * 而且这不是异常，{@code catch} 救不了一个正在阻塞的线程。这与 M2 给 {@code ApiKeyResolver} 的
+ * Redis 读取所做的处置是同一件事（同一套理由：`StringRedisTemplate` 是阻塞驱动，而调用方是
+ * {@code WebFilter}）。顺带它也把「{@code ConfigClient} 在冷缓存时会 {@code Mono.block()}」
+ * 变成合法动作 —— 阻塞调用本来就该发生在弹性线程池上。
  */
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE + 150)
@@ -62,13 +74,17 @@ public class RateLimitFilter implements WebFilter {
     public static final String REJECTED_METRIC = "aihub.ratelimit.rejected";
 
     /**
-     * 判定发生在哪一级的标签（G12）。
+     * 判定发生在哪一级的标签（G12）。**只加在会取两个值的计数器上 —— 目前是
+     * {@link #REJECTED_METRIC}**（拒绝可能来自 Redis 桶，也可能来自降级的本机桶）。
      *
-     * <p><b>为什么必须带这个标签</b>：{@code degraded} 这个名字在 M3 里有**两个**互不相同的信号 ——
+     * <p><b>为什么需要它</b>：{@code degraded} 这个名字在 M3 里有**两个**互不相同的信号 ——
      * {@link RateLimitDecision#degraded()}（这一跳在哪一级判定，逐请求）与
      * {@link RateLimiter#redisDegraded()}（熔断状态，粘性一秒）。一个只按「degraded 为真」报警的
-     * 面板会在 Redis 变黑期间每个请求响一次。带上 {@code source} 之后，这条计数器读作
-     * 「有多少请求是用单机近似放行的」，而「Redis 现在是不是黑的」由熔断状态表达 —— 两者不再混用。
+     * 面板会在 Redis 变黑期间每个请求响一次。
+     *
+     * <p><b>为什么只加在那里</b>：{@link #DEGRADED_METRIC} 只在判定来自本机桶时才 +1，
+     * {@code source=local} 对它是一个**常量**标签 —— 多出来的那个维度永远只有一个取值，
+     * 不区分任何两个时间序列（复审 Fix 4）。把会变的维度放在会变的地方，标签才有信息量。
      */
     public static final String SOURCE_TAG = "source";
 
@@ -82,6 +98,16 @@ public class RateLimitFilter implements WebFilter {
 
     /** 没有 {@code ApiKeyView}（鉴权关闭）时的桶维度：仍然限流，而不是无限放行。 */
     public static final String ANONYMOUS_KEY_HASH = "anonymous";
+
+    /**
+     * 判定动作的执行器。与 M2 的 {@code ApiKeyResolver.REDIS_SCHEDULER} 同一取舍：用
+     * {@link Schedulers#boundedElastic()} 而不是 {@code single()}，因为阻塞任务天然可能堆积，
+     * 单线程会把堆积变成队列延迟。
+     *
+     * <p>它是静态共享的（不是每实例一个）：线程池按 JVM 共享本来就是 {@code boundedElastic} 的语义，
+     * 而本类是单例 bean。用全局调度器也让测试能断言「判定不发生在订阅它的那个线程上」。
+     */
+    private static final Scheduler LIMITER_SCHEDULER = Schedulers.boundedElastic();
 
     private final RateLimiter limiter;
     private final boolean enabled;
@@ -120,17 +146,82 @@ public class RateLimitFilter implements WebFilter {
         // 因此这里直接读真值：没有 view（鉴权关闭）时为 null → 策略解析只走租户级那一维。
         Long apiKeyId = view == null ? null : view.apiKeyId();
 
-        RateLimitDecision decision;
-        try {
-            decision = limiter.acquire(tenantId, apiKeyId, hash);
-        } catch (RuntimeException | Error e) {
-            return failOpen(chain, exchange, e);
-        }
-        // null 判定同样是「限流机制故障」：它的字段访问就写在下面，没有这一句就是 NPE → 500。
-        if (decision == null) {
-            return failOpen(chain, exchange, new NullPointerException("RateLimiter.acquire 返回了 null"));
-        }
+        // 判定（含策略解析与令牌桶 I/O）整体切到 LIMITER_SCHEDULER：这些调用是**阻塞**的，
+        // 在 event loop 上做会把整个 loop 按住（见类 Javadoc 的「线程模型」）。
+        // fromRunnable 的 runnable 就在调度器线程上同步执行（判定 + 指标 + 响应头），
+        // 随后的 then(Mono.defer(...)) 也在同一个线程上订阅下游链 / 错误体写入 ——
+        // 顺序与同步版逐字相同，只是换了一个线程执行。
+        // 判定结果放**本次请求自己的** holder（不是实例字段）：本类是单例，实例字段会让并发请求互相踩。
+        Outcome outcome = new Outcome();
+        return Mono.fromRunnable(() -> acquire(exchange, tenantId, apiKeyId, hash, outcome))
+                .subscribeOn(LIMITER_SCHEDULER)
+                .then(Mono.defer(() -> finish(exchange, chain, tenantId, outcome)));
+    }
 
+    /**
+     * 调用限流器并落地它的直接后果：指标与响应头。**只会在 {@link #LIMITER_SCHEDULER} 上执行**
+     * （由 {@link #filter} 的 {@code subscribeOn} 保证），因此这里的阻塞调用不占 event loop。
+     *
+     * <p>结果写进 {@code outcome}；自身故障折算成 {@code fault} 交给 {@link #finish} fail-open。
+     * 这里**刻意不把异常继续向上抛**（除了 {@code Error}）：判定链的故障必须变成放行，
+     * 而放行要带着下游链的 {@code Mono} 一起组合，那一步只能在 {@code finish} 里做。
+     */
+    private void acquire(ServerWebExchange exchange, long tenantId, Long apiKeyId, String hash,
+                         Outcome outcome) {
+        try {
+            RateLimitDecision decided = limiter.acquire(tenantId, apiKeyId, hash);
+            // null 判定同样是「限流机制故障」：它的字段访问就写在下面，没有这一句就是 NPE → 500。
+            if (decided == null) {
+                throw new NullPointerException("RateLimiter.acquire 返回了 null");
+            }
+            outcome.decision = decided;
+            reportDecision(decided);
+            writeDecisionHeaders(exchange, decided);
+        } catch (RuntimeException e) {
+            // **只兜 RuntimeException**：它精确表达「限流机制本身故障了」。Error（OOM、StackOverflow
+            // 这类 JVM 级故障）必须继续向上抛 —— 把一个已经失去资源的 JVM 当成「限流降级」继续放行
+            // 请求，只会让故障扩散（与 M2 在 Redis 读取处只兜 RuntimeException 是同一条纪律）。
+            outcome.fault = e;
+        }
+    }
+
+    /**
+     * 判定的结局：自身故障 → fail-open，超限 → 429，其余 → 交给下游链。
+     *
+     * <p>放行与拒绝在这里分岔，而**判定本身已经落地**（{@link #acquire}）—— 因此下游链拿到的
+     * 响应头一定是最新那一次判定的，不存在「先转发后写头」的竞态。
+     */
+    private Mono<Void> finish(ServerWebExchange exchange, WebFilterChain chain, long tenantId,
+                              Outcome outcome) {
+        if (outcome.fault != null) {
+            return failOpen(chain, exchange, outcome.fault);
+        }
+        RateLimitDecision decided = outcome.decision;
+        // 判定只有两种来源：要么 acquire 写下了它，要么 acquire 记下了 fault（上面已经返回）。
+        if (decided == null) {
+            return failOpen(chain, exchange, new IllegalStateException("限流判定缺失"));
+        }
+        if (decided.allowed()) {
+            return chain.filter(exchange);
+        }
+        long retryAfterMs = Math.max(1L, decided.retryAfterMs());
+        log.debug("限流拒绝: tenant={} source={} limit={}qps burst={} retryAfter={}ms", tenantId,
+                decided.source(), decided.limit(), decided.burst(), retryAfterMs);
+
+        return GatewayErrors.write(exchange.getResponse(), HttpStatus.TOO_MANY_REQUESTS,
+                "rate_limit_error", "rate_limit_exceeded",
+                "请求过于频繁：租户 " + tenantId + " 的限额为 " + decided.limit() + " QPS（突发 "
+                        + decided.burst() + "），请在 " + retryAfterMs + " 毫秒后重试");
+    }
+
+    /** 一次判定的结果：要么是判定本身，要么是「限流机制故障了」这条事实。 */
+    private static final class Outcome {
+        private RateLimitDecision decision;
+        private RuntimeException fault;
+    }
+
+    /** 观测：降级计数 + 节流 WARN、拒绝计数。**绝不改变判定结论**（写失败只记一条 WARN）。 */
+    private void reportDecision(RateLimitDecision decision) {
         try {
             if (decision.degraded()) {
                 degradedCounter().increment();
@@ -140,28 +231,21 @@ public class RateLimitFilter implements WebFilter {
                 rejectedCounter(decision).increment();
             }
         } catch (RuntimeException e) {
-            // 观测手段坏掉不该改变判定结论：头照发、该 429 还是 429。
             log.warn("限流指标记录失败（不影响判定结果）: {}", e.toString());
         }
+    }
 
+    /** 放行与拒绝**都**写这两条：客户端据此知道自己离限额还有多远。 */
+    private static void writeDecisionHeaders(ServerWebExchange exchange, RateLimitDecision decision) {
         exchange.getResponse().getHeaders().set(LIMIT_HEADER, decision.limit() + ", " + decision.burst());
         exchange.getResponse().getHeaders().set(REMAINING_HEADER, String.valueOf(decision.remaining()));
-
-        if (decision.allowed()) {
-            return chain.filter(exchange);
+        if (!decision.allowed()) {
+            long retryAfterMs = Math.max(1L, decision.retryAfterMs());
+            // Retry-After 的单位只能是秒，且 0 是非法值：向上取整并至少给 1。
+            long retryAfterSeconds = Math.max(1L, (retryAfterMs + 999L) / 1000L);
+            exchange.getResponse().getHeaders().set(RETRY_AFTER_HEADER, String.valueOf(retryAfterSeconds));
+            exchange.getResponse().getHeaders().set(RETRY_AFTER_MS_HEADER, String.valueOf(retryAfterMs));
         }
-
-        long retryAfterMs = Math.max(1L, decision.retryAfterMs());
-        long retryAfterSeconds = Math.max(1L, (retryAfterMs + 999L) / 1000L);
-        exchange.getResponse().getHeaders().set(RETRY_AFTER_HEADER, String.valueOf(retryAfterSeconds));
-        exchange.getResponse().getHeaders().set(RETRY_AFTER_MS_HEADER, String.valueOf(retryAfterMs));
-        log.debug("限流拒绝: tenant={} source={} limit={}qps burst={} retryAfter={}ms", tenantId,
-                decision.source(), decision.limit(), decision.burst(), retryAfterMs);
-
-        return GatewayErrors.write(exchange.getResponse(), HttpStatus.TOO_MANY_REQUESTS,
-                "rate_limit_error", "rate_limit_exceeded",
-                "请求过于频繁：租户 " + tenantId + " 的限额为 " + decision.limit() + " QPS（突发 "
-                        + decision.burst() + "），请在 " + retryAfterMs + " 毫秒后重试");
     }
 
     /**
@@ -172,15 +256,23 @@ public class RateLimitFilter implements WebFilter {
         // 只记录异常类型/消息，不记录请求内容（可能含密钥或正文）。
         log.error("限流器自身故障，本次请求放行（fail-open）: {}", fault.toString());
         try {
-            registry.counter(FAIL_OPEN_METRIC, SOURCE_TAG, SOURCE_LOCAL).increment();
+            // 与 degraded 同理：这条计数器只在「限流机制自身故障」时 +1，来源维度是常量，
+            // 因此不带 source 标签（复审 Fix 4 的同一个理由，顺手一并处理）。
+            registry.counter(FAIL_OPEN_METRIC).increment();
         } catch (RuntimeException e) {
             log.warn("fail-open 指标记录失败: {}", e.toString());
         }
         return chain.filter(exchange);
     }
 
+    /**
+     * 降级计数（判定落在本机桶，即 Redis 不可用）。**刻意不带 {@code source} 标签**：
+     * 这条计数器只在判定来自本机桶时才 +1，因此 {@code source=local} 是一个常量标签 ——
+     * 它不区分任何两个时间序列，只是把同一个名字又写了一遍（复审 Fix 4）。
+     * 「这一跳在哪一级判定」这个**会变**的信息由 {@link #REJECTED_METRIC} 携带，那里才是它有意义的地方。
+     */
     private Counter degradedCounter() {
-        return registry.counter(DEGRADED_METRIC, SOURCE_TAG, SOURCE_LOCAL);
+        return registry.counter(DEGRADED_METRIC);
     }
 
     private Counter rejectedCounter(RateLimitDecision decision) {

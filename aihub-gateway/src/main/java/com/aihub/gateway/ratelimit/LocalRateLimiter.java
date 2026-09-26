@@ -36,6 +36,11 @@ public final class LocalRateLimiter {
      * 本机桶的键前缀。**刻意与 Redis 布局（{@code aihub:ratelimit:}）不同**：
      * 两种存储混用同一个字符串时，日志与抓包里无法判断一个 key 到底在哪一级，
      * 而且将来万一有人把本机桶写进 Redis，前缀会让这件事立刻可见。
+     *
+     * <p>因此 {@link #tryConsume} 收的是**身份**（{@code {tenantId}:{keyHash}}），而不是
+     * Redis 布局那一份键 —— 完整键是 {@code local:ratelimit:{tenantId}:{keyHash}}，前缀只有**一层**
+     * （见 {@link RateLimiter#acquire}）。把 Redis 布局的键原样传进来的话，这一层再补一次就得到
+     * {@code local:ratelimit:aihub:ratelimit:…}，两个前缀叠在同一串里。
      */
     public static final String KEY_PREFIX = "local:ratelimit:";
 

@@ -29,13 +29,27 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       —— 与 M1「缓存故障绝不变成 500」是同一条纪律。</li>
  * </ol>
  *
- * <p>另有两条由控制器评审带进来的钉子（G3/G4）：
+ * <p>本类**只**覆盖过滤器自己的行为（判定怎么变成响应、降级怎么计数、故障怎么放行）：
+ * 它自己 {@code new} 过滤器、自己塞 exchange 属性，因此对它而言「过滤器有没有被 Spring 装进链上」
+ * 是无意义的 —— 那两条必须由**别的**类证明，别在这里假装：
  * <ul>
- *   <li>{@code chain.filter} 必须**先于** {@code limiter.acquire}：全链路 test slice 用假 limiter
- *       即可自证「过滤器真的挂在链上」，而放行顺序决定了这个自证成不成立；</li>
+ *   <li>「真实 HTTP 穿过真实过滤器链、限流组件真的被装配」→ {@code RateLimitWiringTest}
+ *       （{@code @SpringBootTest(RANDOM_PORT)}，不构造任何限流组件）；</li>
+ *   <li>「桶 key 的两级布局 / 本机前缀恰好一层」（G4）→ {@code BucketKeyLayoutTest}
+ *       （本类的 {@code RecordingRateLimiter} 把 {@code acquire} 整个换掉了，看不到任何桶 key）。</li>
+ * </ul>
+ *
+ * <p>本类里由控制器评审带进来的钉子只有两条，且都在「过滤器自己这一层」能自证的范围内：
+ * <ul>
+ *   <li>放行与拒绝的分岔：拒绝时**不**调用 {@code chain.filter}，放行时调用 —— test slice 的假链
+ *       是这一点的唯一证据；</li>
  *   <li>没有哈希时用 {@code ANONYMOUS_KEY_HASH} 哨兵，**绝不**把 {@code null} 拼进桶 key ——
  *       否则所有无哈希请求共享一个桶（还会被字面量 {@code "null"} 拼出 {@code aihub:ratelimit:7:null}）。</li>
  * </ul>
+ *
+ * <p><b>线程模型</b>：判定被切到 {@code Schedulers.boundedElastic()} 上执行，本类的用例因此都
+ * 在订阅之后 {@code block(...)} 等结果（与真实请求路径一样是异步的）。「判定不占 event loop」
+ * 这条不变式由 {@code RateLimitEventLoopTest} 单独证明。
  */
 class RateLimitFilterTest {
 
@@ -217,24 +231,37 @@ class RateLimitFilterTest {
     }
 
     /**
-     * G12：降级计数器必须**只按「这一跳在哪一级判定」**打标签，且该标签是 {@code local}——
-     * 因为它与 {@code RateLimiter.redisDegraded()}（熔断状态，粘性一秒）是**两个不同的信号**：
-     * 把两者混成一个「degraded=true 就报警」的指标，会在 Redis 变黑期间每个请求都报一次。
+     * G12（复审 Fix 4 之后的形态）：{@code source} 标签只加在**会取两个值**的计数器上 —— 拒绝计数。
+     * 降级的判定（{@code decision.degraded()}）可能来自本机桶，也可能来自 Redis 桶，因此这个标签
+     * 在这里才有信息量；而 {@code aihub.ratelimit.degraded} 只在判定来自本机桶时才 +1，
+     * {@code source=local} 对它是一个常量标签（复审指出：常量标签不区分任何两个时间序列）。
+     *
+     * <p>两条断言合起来把「标签加在会变的地方、且取值正确」钉死：同一个 Redis 侧判定必须进
+     * {@code source=redis} 那条时间序列，而带 {@code source=local} 的那条必须**一个都没有**。
      */
     @Test
-    void theDegradedCounterIsTaggedWithTheLevelThatMadeTheDecision() {
-        RecordingRateLimiter limiter = new RecordingRateLimiter(allow(1, RateLimitDecision.Source.LOCAL));
+    void theRejectedCounterCarriesTheVaryingSourceTagAndTheDegradedOneDoesNot() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
 
-        new RateLimitFilter(limiter, true, registry)
+        new RateLimitFilter(new RecordingRateLimiter(deny(1L, RateLimitDecision.Source.REDIS)), true, registry)
                 .filter(exchange("/v1/chat/completions", true), chain(new AtomicReference<>()))
                 .block(Duration.ofSeconds(5));
 
-        assertThat(registry.get(RateLimitFilter.DEGRADED_METRIC)
-                .tag(RateLimitFilter.SOURCE_TAG, RateLimitFilter.SOURCE_LOCAL)
+        assertThat(registry.get(RateLimitFilter.REJECTED_METRIC)
+                .tag(RateLimitFilter.SOURCE_TAG, RateLimitFilter.SOURCE_REDIS)
                 .counter().count())
-                .as("降级计数必须带 source=local 标签，运维才能把它与熔断状态分开")
+                .as("Redis 侧的拒绝必须进 source=redis 这一条时间序列")
                 .isEqualTo(1.0);
+        assertThat(registry.find(RateLimitFilter.REJECTED_METRIC)
+                .tag(RateLimitFilter.SOURCE_TAG, RateLimitFilter.SOURCE_LOCAL)
+                .counter())
+                .as("Redis 侧拒绝不得被记成本机（降级）拒绝")
+                .isNull();
+        assertThat(registry.find(RateLimitFilter.DEGRADED_METRIC)
+                .tag(RateLimitFilter.SOURCE_TAG, RateLimitFilter.SOURCE_LOCAL)
+                .counter())
+                .as("degraded 计数器不再带 source 这个常量标签（它只有一个取值）")
+                .isNull();
     }
 
     @Test

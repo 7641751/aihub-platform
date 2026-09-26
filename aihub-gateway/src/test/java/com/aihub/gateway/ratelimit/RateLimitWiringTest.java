@@ -46,9 +46,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>三个被钉住的事实，每一个都只能由「真的接上了」来解释：
  * <ol>
- *   <li>第 21 个请求是 **429**（内置默认策略 {@code qps=10/burst=20}：新桶满桶 → 前 20 个放行）；</li>
+ *   <li>请求一直打到**出现 429 为止**，且这个 429 必然落在尝试次数上界（{@link #MAX_ATTEMPTS}）之内
+ *       —— 钉的是规则（超限必拒）而不是时序：「第几个请求被拒」取决于机器快慢，
+ *       写死次数就是一条依赖时序的假断言；</li>
  *   <li>该 429 的 body 是 **OpenAI 形状**（数据面铁律，不是 admin 信封），并带 IETF 头
- *       （{@code RateLimit-Limit: 10, 20} / {@code RateLimit-Remaining: 0} / 退避头）；</li>
+ *       （{@code RateLimit-Limit: 1, 30} / {@code RateLimit-Remaining: 0} / 退避头）；
+ *       这里的 {@code 1, 30} 是**控制面快照**下发的租户级策略，**不是**内置默认 {@code 10, 20}
+ *       —— 内置默认的补充速率恰好追平本类的请求速率，桶永远耗不干净，那样连 429 都打不出来；</li>
  *   <li>{@code /healthz} 仍然 200：限流只守 {@code /v1/**}，运维端点不受影响。</li>
  * </ol>
  *
@@ -56,6 +60,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 本类证明的因此是**降级路径**上的端到端限流 —— 即「Redis 挂了也照样拒绝超限请求」，
  * 而这正是 §9 与控制器 ruling 要求的那一条（降级 ≠ 放行全部）。连接被拒是毫秒级的，
  * 加上短超时，整套用例的附加延迟是秒级而不是「每个请求 2 秒」。
+ *
+ * <p><b>本类会把配置缓存预热</b>（{@link #warmTheConfigSnapshotOnTheTestThread()}），
+ * 因此它证的只是「缓存有货时限流链正确」。**冷缓存**那一半（请求路径上从来没人预热过）
+ * 由 {@code RateLimitColdStartTest} 负责 —— 两个类各自成类，是因为 Spring 的测试上下文按类缓存，
+ * 而「冷」只有在上下文没被别的类调用过 {@code current()} 时才成立。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import({MeteringTestConfig.class, RateLimitWiringTest.FakeAdmin.class})
