@@ -53,6 +53,9 @@ aihub:
     local-ttl: 30s
     snapshot-ttl: 10m
     max-local-snapshot-sources: 300
+    # 两次回源尝试之间的最小间隔：抑制 admin 快速失败时的重试风暴（尝试一开始就推后窗口）。
+    # 5s 与回源等待上限同量级，又比本地 TTL（30s）小一个数量级 —— 恢复后最多 5s 就能重新拿到快照。
+    refresh-cooldown: 5s
   # 数据面限流（仅 /v1/**）。默认开：限流是保护上游的手段，不该靠部署时记得打开。
   # 关掉它 = 完全不做判定（过滤器直接放行），桶的本机容量上界仍然保留。
   ratelimit:

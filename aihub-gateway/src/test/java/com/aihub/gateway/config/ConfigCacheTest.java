@@ -1,5 +1,8 @@
 package com.aihub.gateway.config;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.aihub.common.apikey.ApiKeyView;
 import com.aihub.common.config.ChannelDescriptor;
 import com.aihub.common.config.ConfigSnapshot;
@@ -9,6 +12,7 @@ import com.aihub.gateway.admin.AdminClient;
 import com.aihub.gateway.upstream.UpstreamProperties;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
@@ -62,8 +66,15 @@ class ConfigCacheTest {
     /** 每个用例一个注册表：绝不让指标在用例之间串味。 */
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
 
+    /**
+     * 生产默认形状（30s / 10m / 300 / **5s 冷却**）。
+     *
+     * <p>冷却窗口刻意取**生产默认的那 5 秒**而不是测试自己的短值：「N 个请求只产生一次回源」这条
+     * 证据只有在冷却窗口与真实配置一致时才对生产有意义 —— 用一个 50 ms 的测试值去证明它，
+     * 等于什么都没证明。
+     */
     private final GatewayConfigProperties properties =
-            new GatewayConfigProperties(Duration.ofSeconds(30), Duration.ofMinutes(10), 300);
+            new GatewayConfigProperties(Duration.ofSeconds(30), Duration.ofMinutes(10), 300, Duration.ofSeconds(5));
 
     private final UpstreamProperties upstream =
             new UpstreamProperties("http://127.0.0.1:11434", "synthetic-upstream-key", "legacy-model");
@@ -102,6 +113,25 @@ class ConfigCacheTest {
 
     private ConfigClient client(AdminClient adminClient) {
         return new ConfigClient(cache(), adminClient, upstream, properties, registry);
+    }
+
+    /**
+     * 返回 {@link Mono} 的 admin 替身：{@link #adminReturning} 只能表达「立即给出一个 Optional」，
+     * 而「永不终结的流」与「按订阅次数改变行为」都需要自己控制 Publisher。{@code Mono.defer} 保证
+     * supplier 在**每次订阅**时才求值（与真实 {@code AdminClient} 的惰性一致）。
+     */
+    private static AdminClient adminDeferring(Supplier<Mono<Optional<ConfigSnapshot>>> supplier) {
+        return new AdminClient() {
+            @Override
+            public Mono<Optional<ApiKeyView>> resolve(String keyHash) {
+                return Mono.just(Optional.empty());
+            }
+
+            @Override
+            public Mono<Optional<ConfigSnapshot>> configSnapshot() {
+                return Mono.defer(supplier);
+            }
+        };
     }
 
     /**
@@ -253,12 +283,18 @@ class ConfigCacheTest {
     }
 
     /**
-     * 决策 6：admin 挂了也要继续服务手上已有的陈旧快照。
+     * 决策 6：admin 挂了也要继续服务手上已有的陈旧快照 —— 而且**不再为它付出回源代价**。
      *
      * <p><b>这个场景必须真的走到 admin 那一跳</b>：本地非空时 {@code resolve()} 直接返回本地副本，
      * 那个会抛异常的 admin 替身根本不会被调用 —— 于是「先问 admin 再退回缓存」的实现也会通过。
      * 所以这里先让第一跳成功（拿到 v66 并让「最近一次成功快照」记住它），再让本地过期、Redis 读空、
-     * admin 开始抛异常。此时唯一还能服务的来源就是那份**永不失效**的最近快照，且全程不得抛异常。
+     * admin 开始抛异常。
+     *
+     * <p><b>2026 二次复审修复 1 改变了这第二次读的期望</b>：旧实现把 {@code refreshBlocking()}
+     * 放在读「最近快照」**之前**，所以第二次读要先付一次完整回源（最长 5 s 阻塞）才肯服务那份
+     * 本来就在手上的快照，本用例因此断言过 {@code adminCalls >= 2}。现在正确的行为是
+     * **一次回源都不做**：手上还有快照时回源毫无意义，只会白白拖住 event loop 并砸向已经出问题的
+     * admin。所以断言改成 {@code adminCalls == 1}（只有第一跳那一次），并且必须仍然服务 66。
      */
     @Test
     void adminFailureKeepsServingTheCachedSnapshot() {
@@ -274,6 +310,7 @@ class ConfigCacheTest {
 
         assertThat(client.current().channels()).as("第一跳必须由 admin 提供，测试才有意义")
                 .extracting(ChannelDescriptor::id).containsExactly(66L);
+        assertThat(adminCalls).as("前置条件：第一跳恰好回源一次").hasValue(1);
 
         // 「已经过期」的最强形式：缓存里一份都不剩（本地被清、Redis 读空），admin 也开始抛。
         cache.invalidateLocal();
@@ -283,7 +320,9 @@ class ConfigCacheTest {
 
         assertThat(served.channels()).as("admin 挂了也要继续用陈旧快照（决策 6）")
                 .extracting(ChannelDescriptor::id).containsExactly(66L);
-        assertThat(adminCalls.get()).as("必须真的试过 admin 才能证明「admin 挂了」").isGreaterThanOrEqualTo(2);
+        assertThat(served.version()).isEqualTo(4L);
+        assertThat(adminCalls).as("手上还有快照时**一次回源都不该做**（修复 1：旧实现每次请求都先付一次回源）")
+                .hasValue(1);
     }
 
     /**
@@ -319,7 +358,8 @@ class ConfigCacheTest {
                 .extracting(ChannelDescriptor::id).containsExactly(31L);
         assertThat(served.channels()).extracting(ChannelDescriptor::id).doesNotContain(LegacyChannel.ID);
         assertThat(served.version()).isEqualTo(3L);
-        assertThat(adminCalls.get()).as("admin 必须被真的试过一次才谈得上不可达").isGreaterThanOrEqualTo(1);
+        assertThat(adminCalls).as("手上还有快照时最多回源一次（修复 1 之前是每个请求都先回源一次）")
+                .hasValue(1);
         assertThat(cache.local()).as("最近快照只留在内存里，绝不回填本地层").isEmpty();
         verify(values, never()).set(eq(ConfigCache.REDIS_KEY), anyString(), any(Duration.class));
     }
@@ -390,16 +430,22 @@ class ConfigCacheTest {
      *
      * <p>本用例的本地 TTL 是 100 ms：第一次读回源并回填；等它过期后第二次读三级全 miss，
      * 只有槽位真的被释放了才会再次调用 admin。
+     *
+     * <p><b>冷却窗口取 100 ms 并在重试前等 250 ms</b>（2026 二次复审修复 1）：成功回源同样会把
+     * 「下一次回源」推后一个窗口 —— 这是修复 1 的「尝试之间最小间隔」在成功路径上的同一份语义。
+     * 本用例要证明的是「槽位被释放」，所以跨过窗口再读；用 100 ms 而不是 5 s 只是为了不等 5 秒。
      */
     @Test
     void secondRefreshCallsAdminAgainAfterTheLocalTtlLapses() throws Exception {
         when(values.get(anyString())).thenReturn(null);
         AtomicInteger adminCalls = new AtomicInteger();
-        ConfigCache cache = cache(new GatewayConfigProperties(Duration.ofMillis(100), Duration.ofMinutes(10), 300));
+        GatewayConfigProperties shortCooldown = new GatewayConfigProperties(Duration.ofMillis(100),
+                Duration.ofMinutes(10), 300, Duration.ofMillis(100));
+        ConfigCache cache = cache(shortCooldown);
         ConfigClient client = new ConfigClient(cache, adminReturning(() -> {
             int call = adminCalls.incrementAndGet();
             return Optional.of(snapshot(call, 70L + call));
-        }), upstream, properties, registry);
+        }), upstream, shortCooldown, registry);
 
         assertThat(client.current().version()).as("第一次回源").isEqualTo(1L);
         assertThat(adminCalls).as("第一次读必须回源一次").hasValue(1);
@@ -423,19 +469,26 @@ class ConfigCacheTest {
      * <p>fixture 必须让**第一次读三级全空**（本地空、Redis 空、admin 抛），否则 Redis 会在同一次读里
      * 就把快照补给上层，掩盖掉卡死。这里让 Redis 全程读空，只放开 admin：于是「第二次读有没有再调
      * admin」就是唯一能把卡死与正常区分开的观测量 —— 卡死的实现连 admin 都不会再试一次。
+     *
+     * <p><b>冷却窗口改成 100 ms</b>（2026 二次复审修复 1）：修复 1 之后，失败的尝试会开启一个冷却
+     * 窗口，窗口内的第二次读**按设计**不碰 admin。本用例要证明的是「不会被永久钉死」，所以必须
+     * 跨过那个窗口再读 —— 这里用 100 ms 窗口 + 200 ms 等待（而不是 5 s 生产默认值）只是为了不让用例
+     * 白等 5 秒；「窗口内一次都不回源」由 {@code originRetriesAreSuppressedInsideTheCooldownWindow} 钉住。
      */
     @Test
-    void failedFirstLoadDoesNotWedgeTheInstance() {
+    void failedFirstLoadDoesNotWedgeTheInstance() throws Exception {
         // Redis 全程读空（模拟 Redis 也挂）：唯一能救回来的只有重新回源 admin。
         when(values.get(ConfigCache.REDIS_KEY)).thenReturn(null);
         AtomicInteger adminCalls = new AtomicInteger();
-        ConfigCache cache = cache();
+        GatewayConfigProperties shortCooldown = new GatewayConfigProperties(Duration.ofSeconds(30),
+                Duration.ofMinutes(10), 300, Duration.ofMillis(100));
+        ConfigCache cache = cache(shortCooldown);
         ConfigClient client = new ConfigClient(cache, adminReturning(() -> {
             if (adminCalls.incrementAndGet() == 1) {
                 throw new IllegalStateException("admin 不可达");
             }
             return Optional.of(snapshot(5L, 55L));
-        }), upstream, properties, registry);
+        }), upstream, shortCooldown, registry);
 
         ConfigSnapshot degraded = client.current();
 
@@ -444,6 +497,9 @@ class ConfigCacheTest {
         assertThat(adminCalls.get()).as("第一次读必须真的试过 admin").isGreaterThanOrEqualTo(1);
         assertThat(cache.local()).as("失败的第一次回源不得回填任何缓存").isEmpty();
 
+        // 跨过冷却窗口（按设计，窗口内的读不会碰 admin）。
+        Thread.sleep(200L);
+
         // admin 恢复：下一次读必须重新回源并恢复正常路由，而不是继续重放那个空信号。
         int beforeRetry = adminCalls.get();
         ConfigSnapshot recovered = client.current();
@@ -451,7 +507,7 @@ class ConfigCacheTest {
         assertThat(recovered.channels()).as("admin 恢复后必须能重新回源，不能被第一次失败永久钉死")
                 .extracting(ChannelDescriptor::id).containsExactly(55L);
         assertThat(recovered.version()).isEqualTo(5L);
-        assertThat(adminCalls.get()).as("第二次读必须再次调用 admin").isEqualTo(beforeRetry + 1);
+        assertThat(adminCalls.get()).as("冷却窗口过后必须再次调用 admin").isEqualTo(beforeRetry + 1);
     }
 
     @Test
@@ -512,5 +568,218 @@ class ConfigCacheTest {
         assertThat(served.version()).isEqualTo(42L);
         assertThat(client.visibleVersion()).as("第一次服务就必须报出这份快照的版本，而不是 0").isEqualTo(42L);
         assertThat(registry.get(ConfigClient.VERSION_METRIC).gauge().value()).isEqualTo(42.0d);
+    }
+
+    /**
+     * 复审修复 1（重要）：**回源失败之后必须进入冷却窗口**。
+     *
+     * <p>上一轮修复释放了单飞槽位，但释放之后就再也没有任何东西限制重试节奏 —— 「5 s 超时」
+     * 管的是单次尝试的**时长上限**，不是两次尝试之间的**间隔下限**。admin 快速失败（连接被拒，
+     * 或这份桩这样返回空快照）时，每个请求都会各付一次回源：重试速率 ≈ 请求速率。
+     *
+     * <p>fixture 刻意让**两份不同的快照先后注入**（v1 → v2）：
+     * <ul>
+     *   <li>第一步：本地空 + Redis 空 + admin 快速失败 → 冷却窗口开启，服务遗留渠道；</li>
+     *   <li>第二步：本地空 + Redis 空 + admin **已经好了**（回 v2），但在窗口内 ——
+     *       必须**一次都不回源**，继续服务遗留渠道。若冷却不存在，这里会立刻拿到 v2；</li>
+     *   <li>第三步：等窗口过去，回源恢复、拿到 v2。</li>
+     * </ul>
+     * 第三步同时钉住了「冷却不是永久熔断」：窗口一过就必须能重新回源。
+     *
+     * <p>注意这里走的是**冷启动**路径（手上没有 last-good，只有遗留渠道）：一旦手上有一份
+     * 可用快照，冷却窗口内同样短路；但**进入窗口之前**的那一次回源仍然会发生（冷却只管
+     * 「两次尝试之间的间隔」，不管「第一次尝试」）—— 那种「手上已有快照」的场景由
+     * {@code adminFailureKeepsServingTheCachedSnapshot} 与
+     * {@code combinedRedisAndAdminOutageStillServesTheLastGoodSnapshot} 覆盖。
+     */
+    @Test
+    void originRetriesAreSuppressedInsideTheCooldownWindow() throws Exception {
+        when(values.get(anyString())).thenReturn(null);
+        AtomicInteger adminCalls = new AtomicInteger();
+        AtomicInteger served = new AtomicInteger(1); // 1 = 尚未恢复, 2 = 已恢复
+        // 冷却窗口取 300 ms（生产默认是 5 s，理由见 GatewayConfigProperties）：本用例要证明的是
+        // 「窗口内一次都不回源、窗口过后必须回源」，这一点与窗口的具体长度无关 —— 用 5 s 只会让
+        // 用例白等 5 秒。生产默认值由 GatewayConfigProperties 的 @DefaultValue 与 application.yml 钉住。
+        ConfigCache cache = cache(new GatewayConfigProperties(Duration.ofSeconds(30), Duration.ofMinutes(10), 300,
+                Duration.ofMillis(300)));
+        ConfigClient client = new ConfigClient(cache, adminDeferring(() -> {
+            adminCalls.incrementAndGet();
+            return Mono.just(served.get() == 2
+                    ? Optional.of(snapshot(2L, 22L))         // 控制面恢复
+                    : Optional.<ConfigSnapshot>empty());     // 快速失败：控制面「没有快照」
+        }), upstream, new GatewayConfigProperties(Duration.ofSeconds(30), Duration.ofMinutes(10), 300,
+                Duration.ofMillis(300)), registry);
+
+        ConfigSnapshot first = client.current();
+        assertThat(first.channels()).as("第一跳快速失败，手上什么都没有 → 遗留单渠道")
+                .extracting(ChannelDescriptor::id).containsExactly(LegacyChannel.ID);
+        assertThat(adminCalls).as("第一跳必须真的试过一次").hasValue(1);
+
+        served.set(2);
+        // 冷却窗口内连打 8 次：admin 已经好了，但窗口没过，一次回源都不该发生。
+        for (int i = 0; i < 8; i++) {
+            ConfigSnapshot duringCooldown = client.current();
+            assertThat(duringCooldown.channels()).as("冷却窗口内不得回源，继续服务手上那份（这里是遗留渠道）")
+                    .extracting(ChannelDescriptor::id).containsExactly(LegacyChannel.ID);
+        }
+        assertThat(adminCalls).as("冷却窗口内的 8 个请求一次回源都不该产生（旧实现是 8 次，重试速率≈请求速率）")
+                .hasValue(1);
+        assertThat(client.refreshFailureCount())
+                .as("只有那一次真实尝试算失败；被冷却挡下的 8 次请求不是尝试，也就没有多记 8 个失败")
+                .isEqualTo(1.0d);
+
+        // 窗口过去：必须能重新回源（冷却不是永久熔断）。
+        Thread.sleep(500L);
+        assertThat(client.current().channels()).as("窗口过后必须重新回源并拿到新快照")
+                .extracting(ChannelDescriptor::id).containsExactly(22L);
+        assertThat(adminCalls).as("窗口过后只多一次回源").hasValue(2);
+    }
+
+    /**
+     * 复审修复 2（重要）：**WARN 的条数必须有界**。
+     *
+     * <p>上一轮修复把单飞槽位释放之后，「配置快照回源失败」的 WARN 变成了**每个失败的尝试一条**，
+     * 而「最近快照」的 WARN 是**每个被服务的请求一条** —— 快速失败时整个故障期最多每请求两条
+     * WARN。现在两条路径共用同一个「一次故障期只播报一条（之后每分钟一条）」的闸门，
+     * 同时 {@code aihub.config.snapshot.refresh.failures} 把每次真实尝试都计数：
+     * <b>日志给人看、计数给告警看</b>。
+     *
+     * <p>本用例把日志事件抓下来数条数（与 {@code ChannelKeyDecryptorLoggingTest} 同一套手法），
+     * 同时钉住指标确实是 1 —— 只限流日志而不计数，等于把可观测性一起限没了。
+     */
+    @Test
+    void outageWarningsAreBoundedToOnePerEpisode() {
+        when(values.get(anyString())).thenReturn(null);
+        AtomicInteger adminCalls = new AtomicInteger();
+        ConfigCache cache = cache();
+        ConfigClient client = new ConfigClient(cache, adminReturning(() -> {
+            adminCalls.incrementAndGet();
+            return Optional.empty(); // 控制面不可达：与「admin 挂了」同一条降级路径
+        }), upstream, properties, registry);
+
+        Logger clientLogger = (Logger) LoggerFactory.getLogger(ConfigClient.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        clientLogger.addAppender(appender);
+        try {
+            // 第一次读：三级全空 → 一次回源（失败）→ 转遗留渠道；此后 4 次都在冷却窗口内。
+            for (int i = 0; i < 5; i++) {
+                ConfigSnapshot served = client.current();
+                assertThat(served.channels()).as("冷启动 + 控制面不可达 → 遗留单渠道（决策 6），绝不抛异常")
+                        .extracting(ChannelDescriptor::id).containsExactly(LegacyChannel.ID);
+            }
+        } finally {
+            clientLogger.detachAppender(appender);
+            appender.stop();
+        }
+
+        assertThat(adminCalls).as("5 个请求只产生一次回源（旧实现是 5 次：重试速率≈请求速率）").hasValue(1);
+        assertThat(appender.list).as("一次故障期只能播报一条 WARN（旧实现是每请求最多两条）").hasSize(1);
+        assertThat(appender.list.get(0).getFormattedMessage()).as("那条 WARN 必须说明失败原因")
+                .contains("配置快照回源失败");
+        assertThat(client.refreshFailureCount()).as("WARN 被限流，但每一次真实失败尝试都必须计数（告警架在计数上）")
+                .isEqualTo(1.0d);
+    }
+
+    /**
+     * 复审修复 3（次要）：**缓存写入必须拒绝版本倒退**。
+     *
+     * <p>单飞槽位被释放之后，输掉 CAS 的调用者可能读到 {@code null} 并把**自己那条从未发布**的
+     * {@link Mono} 交出去，于是同一次 miss 产生第二个并发回源。而 {@code load()} 的两级写入
+     * 原本是**无条件**的，所以先发起的旧响应晚到时会覆盖掉新快照 —— 本地与 Redis 两侧都能倒退。
+     *
+     * <p>本用例针对的正是那个方向：v5 已经在两级缓存里（回源拿到的），随后把 v3 直接写进去。
+     * 没有版本守卫时，本地会变成 v3、Redis 会被 v3 覆盖，后续读也会服务 v3（回归）。
+     */
+    @Test
+    void olderSnapshotNeverOverwritesANewerOneInEitherCacheLayer() {
+        // 前置：回源拿到 v5/id=55，两级都被回填。
+        when(values.get(anyString())).thenReturn(null);
+        AtomicInteger adminCalls = new AtomicInteger();
+        ConfigCache cache = cache();
+        ConfigClient client = new ConfigClient(cache, adminReturning(() -> {
+            adminCalls.incrementAndGet();
+            return Optional.of(snapshot(5L, 55L));
+        }), upstream, properties, registry);
+        client.refresh().block();
+        assertThat(cache.local()).as("前置条件：本地层里有 v5").isPresent()
+                .get().extracting(ConfigSnapshot::version).isEqualTo(5L);
+        assertThat(adminCalls).as("前置条件：恰好一次回源").hasValue(1);
+        clearInvocations(values);
+
+        // 晚到的一条**更旧**的快照（旧实现会无条件覆盖两级缓存）。
+        cache.putLocal(snapshot(3L, 33L));
+        cache.writeRedis(snapshot(3L, 33L));
+
+        assertThat(cache.local()).as("本地层绝不能被更旧的版本覆盖")
+                .get().extracting(ConfigSnapshot::version).isEqualTo(5L);
+        verify(values, never()).set(eq(ConfigCache.REDIS_KEY), eq(ConfigSnapshotCodec.encode(snapshot(3L, 33L))),
+                any(Duration.class));
+
+        // 新版本仍然可以正常写入（守卫只拦倒退，不拦前进）。
+        cache.putLocal(snapshot(6L, 66L));
+        assertThat(cache.local()).as("更新的版本必须照常写入").isPresent()
+                .get().extracting(ConfigSnapshot::version).isEqualTo(6L);
+
+        // 回归方向：后续读到的必须还是更新的那一份，而不是那条晚到的 v3。
+        ConfigSnapshot served = client.current();
+        assertThat(served.version()).as("更旧的快照绝不能赢得后续的服务").isEqualTo(6L);
+        assertThat(served.channels()).extracting(ChannelDescriptor::id).containsExactly(66L);
+    }
+
+    /**
+     * 复审修复 4（次要）：**第四个终态是「取消/超时」**，它也必须释放单飞槽位。
+     *
+     * <p>修复 1 的论证枚举了成功 / 空完成 / 异常三种终态，但 {@code refreshBlocking()} 的
+     * {@code block(5 s)} 超时走的是**取消**：{@code doFinally} 同样会触发，所以名额不会泄漏。
+     * 这条此前没有任何用例覆盖。
+     *
+     * <p>fixture：admin 第一次返回一条**永不终结**的流（挂起的控制面），{@code refreshBlocking()}
+     * 在 5 s 上限处超时并取消；随后让 admin 正常应答，下一次读必须能重新回源。
+     * 若超时不释放名额，第二次读会永远拿到同一条挂起的流（或那条被重放的空信号），
+     * 于是这里读不到 v5/id=55。
+     *
+     * <p>真实等待 5 s 而不是缩短超时：改动 {@code REFRESH_TIMEOUT} 或为测试加宽构造器，
+     * 都会让这条用例钉住的「生产配置」不再是被验证的那一个。
+     *
+     * <p>冷却窗口在这里取 100 ms 并在重试前等待：超时本身也是一次失败的尝试，窗口内按设计不再回源。
+     * 本用例要证明的是**取消释放了单飞名额**，所以必须跨过冷却窗口再读。
+     */
+    @Test
+    void timeoutCancellationReleasesTheSingleflightSlot() throws Exception {
+        when(values.get(anyString())).thenReturn(null);
+        AtomicInteger adminCalls = new AtomicInteger();
+        AtomicInteger replyAfterTheHang = new AtomicInteger(); // 0 = 挂起, 1 = 正常应答
+        GatewayConfigProperties shortCooldown = new GatewayConfigProperties(Duration.ofSeconds(30),
+                Duration.ofMinutes(10), 300, Duration.ofMillis(100));
+        ConfigCache cache = cache(shortCooldown);
+        ConfigClient client = new ConfigClient(cache, adminDeferring(() -> {
+            adminCalls.incrementAndGet();
+            return replyAfterTheHang.get() == 0
+                    // 永不终结：触发 refreshBlocking 的超时。
+                    ? Mono.<Optional<ConfigSnapshot>>never()
+                    : Mono.just(Optional.of(snapshot(5L, 55L)));
+        }), upstream, shortCooldown, registry);
+
+        ConfigSnapshot hung = client.current();
+
+        assertThat(hung.channels()).as("回源超时且手上什么都没有 → 遗留单渠道，绝不抛异常")
+                .extracting(ChannelDescriptor::id).containsExactly(LegacyChannel.ID);
+        assertThat(adminCalls).as("第一次读必须真的试着回源（并在这里超时）").hasValue(1);
+        assertThat(cache.local()).as("超时的回源不得回填任何缓存").isEmpty();
+        assertThat(registry.get(ConfigClient.REFRESH_FAILURES_METRIC).counter().count())
+                .as("超时也是一次失败的尝试，必须计数").isEqualTo(1.0d);
+
+        // 跨过冷却窗口（超时已经耗掉 5 s，这里只是让 100 ms 的测试窗口确定过期）。
+        Thread.sleep(200L);
+
+        // 控制面恢复：这一次读必须能重新回源，说明超时/取消已经把单飞名额释放了。
+        replyAfterTheHang.set(1);
+        ConfigSnapshot recovered = client.current();
+
+        assertThat(recovered.channels()).as("超时后名额必须被释放，否则实例永远卡在那条挂起的回源上")
+                .extracting(ChannelDescriptor::id).containsExactly(55L);
+        assertThat(recovered.version()).isEqualTo(5L);
+        assertThat(adminCalls).as("超时后必须能再回源一次").hasValue(2);
     }
 }
