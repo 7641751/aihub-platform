@@ -4,14 +4,17 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.reactive.AutoConfigureWebTestClient;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.env.YamlPropertySourceLoader;
 import org.springframework.boot.web.context.WebServerApplicationContext;
 import org.springframework.boot.web.embedded.netty.NettyReactiveWebServerFactory;
 import org.springframework.boot.web.embedded.netty.NettyWebServer;
 import org.springframework.boot.web.reactive.server.ReactiveWebServerFactory;
 import org.springframework.context.ApplicationContext;
 import org.springframework.core.env.Environment;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
+import java.io.IOException;
 import java.net.URL;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -71,6 +74,52 @@ class AihubGatewayApplicationTests {
         // 没有它，healthzReturnsUp 会静默依赖一个正在跑的 RabbitMQ（本机恰好有一个时全绿，
         // CI / 别的机器上随机红）。
         assertThat(environment.getProperty("management.health.rabbit.enabled")).isEqualTo("false");
+    }
+
+    /**
+     * <b>生产默认值必须真的是「开」</b>：`aihub.ratelimit.enabled` 是 M3 头条特性（限流）的总开关，
+     * 而它在**测试里**被 {@code src/test/resources/application.properties} 钉成 {@code false}
+     * （理由见上面那条断言）。于是「生产默认是什么」在整套测试里**没有任何断言** ——
+     * 主配置里把键名写错（例如 {@code aihub.ratelimit.enable}）或者把默认值写成 {@code flase}，
+     * 生产环境的限流会被静默关掉，而全量测试照样全绿。本用例就是补上这一条。
+     *
+     * <p>为什么不能直接断言 {@code environment.getProperty(...)}：那是**合并后**的结果，
+     * 测试副本的 {@code false} 优先级更高，永远看不到主配置那一行（这正是缺口存在的原因）。
+     * 所以这里读的是**出厂** {@code src/main/resources/application.yml} 本身
+     * （沿用 {@code UsageCaptureTest} 读同一个文件的口径），并且断言的是那一行的**原文**：
+     * 它必须是 {@code ${AIHUB_RATELIMIT_ENABLED:true}} —— 环境变量的**名字**与**默认值**两者缺一不可。
+     *
+     * <p>为什么刻意连占位符原文一起钉：这条键在 {@code RateLimitFilter} 里读作
+     * {@code @Value("${aihub.ratelimit.enabled:true}")}，它是唯一读它的地方（不是
+     * {@code @ConfigurationProperties}），因此「默认值」与「覆盖用的环境变量名」都只写在
+     * application.yml 这一行上。只断言「不是 false」会漏掉环境变量名写错这类回归 ——
+     * 那正是本用例要防的「一个 typo 就静默关掉限流」。
+     */
+    @Test
+    void theProductionDefaultOfTheRateLimitSwitchIsOn() {
+        Object shipped = shippedRateLimitEnabledValueFromApplicationYml();
+
+        assertThat(shipped)
+                .as("主配置必须显式写出 aihub.ratelimit.enabled —— 它是限流唯一的总开关，"
+                        + "且是环境变量 AIHUB_RATELIMIT_ENABLED 的唯一读取点")
+                .isNotNull();
+        // 断言这一行的**原文**：默认值与环境变量名两者缺一不可。只断言「不是 false」会漏掉
+        // 环境变量名写错这类回归（那等于这个开关再也覆盖不了）。
+        assertThat(String.valueOf(shipped))
+                .as("生产默认必须解析为 true，且覆盖用的环境变量名必须是 AIHUB_RATELIMIT_ENABLED；"
+                        + "否则一个 typo 就能在全绿测试下静默关掉限流")
+                .isEqualTo("${AIHUB_RATELIMIT_ENABLED:true}");
+    }
+
+    /** 直接读**出厂** {@code aihub-gateway/src/main/resources/application.yml} 里那一行（原文，未插值）。 */
+    private static Object shippedRateLimitEnabledValueFromApplicationYml() {
+        try {
+            var shipped = new YamlPropertySourceLoader()
+                    .load("application.yml", new ClassPathResource("application.yml"));
+            return shipped.get(0).getProperty("aihub.ratelimit.enabled");
+        } catch (IOException e) {
+            throw new IllegalStateException("读不到出厂 application.yml", e);
+        }
     }
 
     /**
