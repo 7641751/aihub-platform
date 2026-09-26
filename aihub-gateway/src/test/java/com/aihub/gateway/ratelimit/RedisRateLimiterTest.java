@@ -1,5 +1,6 @@
 package com.aihub.gateway.ratelimit;
 
+import com.aihub.common.ratelimit.RateLimitScript;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -22,6 +23,12 @@ import static org.mockito.Mockito.when;
  *
  * <p>本类的核心契约：Redis 出任何问题（连不上、超时、脚本被 FLUSHALL 掉）都返回 {@code null}
  * 表示「我这边不可用」，由 {@link RateLimiter} 决定降级到本机桶；**绝不抛异常到请求路径上**。
+ *
+ * <p><b>两侧相乘才等于「真容器上 {@code source() == REDIS}」</b>：本类钉住**调用约定**（脚本用的是
+ * 共享常量、结果类型提示是 {@code List.class}、ARGV 向量形状、以及 3 个 {@code Long} 会被映射成
+ * {@code Source.REDIS}）；admin 侧的 {@code RedisTokenBucketIntegrationTest} 钉住**真 Redis 返回值的
+ * 形状**。少了后者的「结果类型提示」这一环，有人把提示改成别的类型时本类仍然全绿，而线上会静默地
+ * 永久降级 —— 见 {@link #asksRedisToDecodeTheScriptReplyAsAList} 的注释。
  */
 @SuppressWarnings("unchecked")
 class RedisRateLimiterTest {
@@ -79,6 +86,38 @@ class RedisRateLimiterTest {
         assertThat(args.get()[2]).isEqualTo(String.valueOf(20));
         assertThat(args.get()[3]).isEqualTo(String.valueOf(LuaTokenBucket.idleTtlMillis(10, 20)));
         verify(redis).execute(any(RedisScript.class), anyList(), any(Object[].class));
+    }
+
+    /**
+     * 结果类型提示是**跨模块契约的另一半**：admin 侧的真 Redis 集成测试
+     * （{@code com.aihub.admin.ratelimit.RedisTokenBucketIntegrationTest}）按 {@code List.class}
+     * （MULTI 解码）断言「真 Redis 的返回值是 size==3、元素为 {@code java.lang.Long} 的 List」，
+     * 从而接力证明 {@code source() == REDIS}。**若这里换成别的类型，那边的证据就不再覆盖线上路径**，
+     * 而本类其余用例（Mockito 只按 {@code any(RedisScript.class)} 打桩）不会变红 —— 于是线上会
+     * 静默地永久降级。
+     *
+     * <p>实测（探针，真容器）：用 {@code Long.class} 提交**同一个脚本**，Redis 静默返回一个 {@code 0}
+     * （既不是 allowed 也不是 remaining）；生产代码把那个 {@code Long} 赋给 {@code List<Long> result}
+     * 时抛 {@code ClassCastException}，被 {@code catch (RuntimeException)} 吞掉 → {@code null} →
+     * 永久降级，日志里只留一条 WARN。
+     */
+    @Test
+    void asksRedisToDecodeTheScriptReplyAsAList() {
+        AtomicReference<RedisScript<?>> captured = new AtomicReference<>();
+        when(redis.execute(any(RedisScript.class), anyList(), any(Object[].class))).thenAnswer(invocation -> {
+            captured.set(invocation.getArgument(0));
+            return List.of(1L, 19L, 0L);
+        });
+
+        limiter.tryConsume("aihub:ratelimit:7:abc", 10, 20);
+
+        assertThat(captured.get()).isNotNull();
+        assertThat(captured.get().getScriptAsString())
+                .as("跑的必须是共享模块里的那份脚本：admin 侧的真容器证据读的就是它")
+                .isEqualTo(RateLimitScript.SCRIPT);
+        assertThat(captured.get().getResultType())
+                .as("MULTI 解码：admin 侧按 List<Long> 验证真返回值的形状")
+                .isEqualTo(List.class);
     }
 
     @Test
