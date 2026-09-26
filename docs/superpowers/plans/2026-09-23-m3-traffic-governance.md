@@ -6,13 +6,13 @@
 
 **Architecture:** 控制面仍然只有一个真相源（admin），网关**不连数据库**（决策 A 延续）：admin 用一把来自环境变量的主密钥把 `channel.api_key_cipher` 加密后，连同 `model_route` / `rate_limit_policy` 一起放在**一个 HMAC 签名的 `GET /internal/config/snapshot`** 里；网关按 §6.3 的**三级读取两级缓存**取它（Caffeine 30s → Redis → admin，带单一飞行与快照 `version` 比对），并把它切成四块纯数据（渠道 / 路由 / 限流策略 / 默认模型）交给四个消费者：`RateLimitFilter`（Lua 令牌桶，`tenant` 维度）、`RouteResolver`（按 `priority` 分组 + 组内按权重随机 + 跳过熔断渠道）、`ChatRelayController` 的失败转移循环、以及本地解密渠道密钥的 `ChannelKeyDecryptor`。**故障转移的合法性由「响应是否已提交」判定**：上游响应体第一个字节写回客户端之前，响应未提交，切换是合法的（客户端什么都没看到）；一旦 `response.isCommitted()`，任何切换都会把半截响应拼成脏数据 —— 那正是设计文档 §9「仅在未输出任何 token 时允许切换」的机器可判定形式。熔断状态放 Redis（30s TTL，跨实例共享），Redis 不可用时退化为**进程内**熔断表（单机近似），**任何降级都不阻断数据面**。
 
-**Tech Stack:** Java 21（编译目标，运行于 JDK 25.0.2）、Spring Boot 3.5.16、WebFlux（Reactor Netty）、Spring Data Redis 7（Lettuce，同步 API）+ Lua、Caffeine、MyBatis-Plus 3.5.17、MySQL 8.4、Flyway、RabbitMQ 3.13、JUnit 5 + AssertJ + Mockito、Testcontainers（仅 admin 侧）、JDK `com.sun.net.httpserver.HttpServer`（网关侧假上游 / 假 admin，**不引 WireMock**）、Maven 3.9.12。
+**Tech Stack:** Java 21（编译目标，运行于 JDK 25.0.2）、Spring Boot 3.5.16、WebFlux（Reactor Netty）、Spring Data Redis 7（Lettuce，同步 API）+ Lua、Caffeine、MyBatis-Plus 3.5.17、MySQL 8.4、Flyway、RabbitMQ 3.13、JUnit 5 + AssertJ + Mockito、Testcontainers（仅 admin 侧）、JDK `com.sun.net.httpserver.HttpServer`（网关侧假上游 / 假 admin，M1/M2 既有夹具，**保留**）、**WireMock `org.wiremock:wiremock:3.9.1`（仅 gateway 的 test 作用域，用于 spec §10 / 里程碑验收要求的多渠道故障注入；进程内起 stub，不需要 Docker）**、Maven 3.9.12。
 
 ## Global Constraints
 
 - 项目根目录：`D:\PycharmProjects\aihub-platform`；本计划在分支 `m3`（由控制器从 `master`（`e4f4103`，含标签 `m0` / `m1` / `m2`）切出，**本计划不负责建分支**）。
 - 编译目标固定 Java 21（`<maven.compiler.release>21</maven.compiler.release>`），本机运行 JVM 为 JDK 25.0.2。不要改。
-- Spring Boot 固定 `3.5.16`；MyBatis-Plus 固定 `3.5.17`。**M3 不新增任何生产依赖**（AES-GCM 用 JDK `javax.crypto`；Lua 用已有的 Spring Data Redis）。**测试作用域也不新增依赖**：故障注入沿用 M1/M2 已建成的 JDK `com.sun.net.httpserver.HttpServer` 夹具（`FakeUpstream` / `FakeAdminServer`），**不引入 WireMock**（见「决策登记」第 11 条）。
+- Spring Boot 固定 `3.5.16`；MyBatis-Plus 固定 `3.5.17`。**M3 不新增任何生产依赖**（AES-GCM 用 JDK `javax.crypto`；Lua 用已有的 Spring Data Redis）。**测试作用域只新增一个依赖**：`aihub-gateway` 的 test 作用域加 `org.wiremock:wiremock:3.9.1`（**只有 gateway、只有 test 作用域**，用于 spec §10 / §12 要求的多渠道故障注入验收；版本必须显式锁死，它不在 Spring Boot BOM 里）。M1/M2 的 JDK `com.sun.net.httpserver.HttpServer` 夹具（`FakeUpstream` / `FakeAdminServer`）**继续保留并继续承担细粒度用例**（见「决策登记」第 11 条：本机已实测 WireMock 可解析且**进程内**可跑通）。
 - 包名前缀：`com.aihub.common` / `com.aihub.dao` / `com.aihub.service` / `com.aihub.mq` / `com.aihub.admin` / `com.aihub.gateway`。
 - 端口不变：admin `8081`、gateway `8080`、MySQL 宿主 `3307`、Redis 宿主 `6380`（容器内 `6379`）、RabbitMQ `5672` / 管理台 `15672`。
 - **`aihub-common` 在 main 作用域必须零依赖**（不许出现 Jackson、Spring、Redis、Lettuce 的任何 import）：它只能出现 JDK 类型。渠道密钥加解密（`javax.crypto` / `java.util.Base64` / `java.security`）因此放在 `aihub-common` —— 它是 **JDK 类型**，不违反零依赖，而且 admin（加密）与 gateway（解密）必须共用**同一份**实现（见「决策登记」第 1 条）。
@@ -22,7 +22,7 @@
 - **禁止读 / 打印 / echo `.env` 或任何密钥文件**；不要执行 `docker compose config` 或任何会把 `.env` 插值打进 stdout 的命令。要判断某个环境变量是否存在，只判断**是否为空**，不要打印它的值。M1 已经因此泄漏过一次真实上游 key。
 - **不得新增 Flyway 迁移脚本**，`V1__init_schema.sql` 已执行过、禁止修改。演示渠道数据用**开发专用的 seeder**（`@ConditionalOnProperty` 默认关闭）写入，理由见「决策登记」第 12 条（`aihub-web` 的 `SchemaMigrationTest.flywayAppliesExactlyOneMigration` 断言恰好 1 条迁移，任何加迁移的做法都必须改这个断言，那是在削弱护栏）。
 - 所有时间字段按 UTC 存储（`datetime(3)`）。令牌桶的时间基准是**调用方传入的毫秒时间戳**（不是 Redis `TIME`），熔断的时间基准是 **Redis TTL** —— 两者的理由分别写在各自类的 javadoc 里。
-- **`aihub-gateway` 的测试永远不允许依赖 Docker，也不允许要求有活 broker 或活 Redis**：Redis 相关的故障降级用例一律用「指向不存在端口 / Mockito 桩」构造（M1/M2 已确立同一手法）。admin 侧的集成测试沿用 `AbstractIntegrationTest`（Testcontainers 单例容器，MySQL + Redis + RabbitMQ 已在基类里）。
+- **`aihub-gateway` 的测试永远不允许依赖 Docker，也不允许要求有活 broker 或活 Redis**：Redis 相关的故障降级用例一律用「指向不存在端口 / Mockito 桩」构造（M1/M2 已确立同一手法）。**WireMock 也必须以进程内（in-process）方式使用**（`@WireMockTest` / `WireMockExtension`，stub 起在同一个 JVM 的随机端口上）—— 这一点在决策 11 里已在本机实测过，因此新增这个测试作用域依赖**不**放松本条约束；**不允许**用 `docker run wiremock/...` 或任何外部容器/远程 stub 服务。admin 侧的集成测试沿用 `AbstractIntegrationTest`（Testcontainers 单例容器，MySQL + Redis + RabbitMQ 已在基类里）。
 - 每个 Task 完成后立即 commit（conventional commits：`feat:` / `fix:` / `test:` / `docs:` / `chore:`），**只 stage 显式路径**，禁止 `git add -A` / `git add .`（工作树里有第二个写入者）。
 - 命令一律在项目根目录执行；不使用 Maven wrapper，用本机 `mvn`。
 - **不修改 `docker-compose.yml` 里 Redis 的宿主端口绑定**（`127.0.0.1:6380:6379` 是用户刻意设的）。
@@ -58,17 +58,17 @@
 | 4 | Redis 快照缓存与本地 Caffeine 载荷共用**同一份**分隔符编解码 `ConfigSnapshotCodec`（不用 JSON）：首行 `#v1\|{version}\|{defaultModel}\|{generatedAtEpochMilli}`，之后是 `C\|…` / `R\|…` / `L\|…` 行，字段内转义 `\` `\|` `\n` `\r`。 | gateway 侧其实**可以**用 Jackson（它自带），但「缓存载荷」与「本地载荷」共用一份编解码只需维护一个转义器，而且 Redis 里的字节可以被测试当作固定向量钉住。行为与 `MeteringEventCodec` / `ApiKeyCacheCodec` 完全一致。**这不是跨服务契约**（admin 不读它，admin 发的是 JSON），因此不像 `MeteringTopology` 那样有「单侧改名不报错」的风险。 | 编解码只出现在 gateway 与 `aihub-common`；`ConfigSnapshotCodecTest` 用固定向量钉字段顺序。 |
 | 5 | 快照 `version` 用**单调时间戳**：`max(channel.updated_at, model_route.updated_at, rate_limit_policy.updated_at)` 折算成 epoch 毫秒；没有任何配置行时用 `0`。**版本只增不减**由「任何配置写入都会推进 `updated_at`」保证（V1 三张表都有 `ON UPDATE CURRENT_TIMESTAMP(3)`）。 | 需要一个「能比较新旧」的标量来支撑 §6.3 的「本地版本落后则丢弃并回源」。计数器（如行数）会漏掉「改字段不改行数」，哈希要读全表两次，时间戳是最便宜且随每次写入必然推进的量。⚠️ **已知缺口（诚实登记）**：M3 没有任何配置写入方（CRUD 在 M4），因此 `version` 的变化路径只有 seeder 与手工 SQL；两行配置在**同一毫秒**内被改会撞车（MySQL `updated_at` 精度是毫秒）—— M4 的控制台串行写入下可接受。 | admin 侧 `ConfigSnapshotService.version()` 有真实 MySQL 用例（改一行 → 版本严格变大）。 |
 | 6 | 快照**取不到时的降级顺序**：本地 Caffeine（命中即用）→ Redis（命中即用，**且用它的 version 刷新本地**）→ admin。admin 不可达时**继续用已有的陈旧快照**（哪怕过期），只有在**完全没有任何快照**时才用「遗留单渠道」兜底（`aihub.upstream.*`，即 M1/M2 的形状）。 | §9 的总原则是「数据面永不因控制面故障而整体不可用」。一个 30 秒前的路由表远比「没有路由表」安全。完全无快照（冷启动 + admin 挂）时，退回 M1 单渠道至少还能服务 —— 比 503 好。 | 三种状态各有用例：`adminFailureKeepsServingTheCachedSnapshot`、`noSnapshotAnywhereFallsBackToTheLegacySingleChannel`、`emptySnapshotFromAdminStillAllowsTheLegacyFallback`。 |
-| 7 | **限流只做 `tenant` 维度**（`rate_limit_policy` 里 `api_key_id IS NULL` 的那一行），`api_key_id` 非空的行 M3 读进来但**不参与判定**。策略解析顺序：该租户的租户级策略 → 都没有则用内置默认 `qps=10, burst=20`（与 V1 的列默认值一致）。非正的 qps/burst 一律回落到默认值。 | 共享的 `ApiKeyView` 在 M3 之前**只有字符串 `keyId`，没有 `api_key` 的数值主键**（M2 决策 8 的同一个缺口），因此无法把「请求」映射到 `rate_limit_policy.api_key_id`。把字符串 `keyId` 塞进数值列、或为它加一次 admin 查询，都是在没有真实需求时改动跨服务契约。M3 顺带把数值主键补进共享契约（决策 14），但**请求 → key 级策略**的映射仍缺一环（请求上下文里只有哈希），因此 key 级策略留到 M4 接。 | 快照里 `RatePolicy` 带 `apiKeyId` 字段（`null` = 租户级），网关侧只按 `tenantId` 取；`RateLimitResolverTest.ignoresKeyLevelPolicies` 专门钉住「key 级策略被忽略」。 |
+| 7 | **限流按 `tenant + api_key` 两个维度选策略**（**2026-09-26 依控制器 pre-flight 评审修订**：原文只做 `tenant` 维度、key 级行「读进来但不参与判定」，是被评审打回的那一版）。选取顺序是确定性的：① 与本次请求 `apiKeyId` 匹配的 ACTIVE key 级行（`api_key_id = 该值`）优先；② 没有则取该租户的租户级行（该租户 `api_key_id IS NULL` 的 ACTIVE 行）；③ 都没有才用内置默认 `qps=10, burst=20`（与 V1 的列默认值一致）。**每一级内部**多条时取列表里的**最后一条**（读取顺序与 tie-break 见决策 17）。非正的 qps/burst 一律回落到内置默认值（**保留**原有的按行校验规则）。**桶 key 不变**，仍是 `aihub:ratelimit:{tenantId}:{sha256(secret)}`（决策 8）—— 每个密钥的**状态**本来就是隔离的，本次修订只让**策略查找**变成两级。 | **为什么原文是错的（诚实登记）**：原文的理由是「共享的 `ApiKeyView` 在 M3 之前只有字符串 `keyId`，没有 `api_key` 的数值主键，因此无法把请求映射到 `rate_limit_policy.api_key_id`」。这条在同一个计划里就被否掉了：决策 14 正好给 `ApiKeyView` 补了可空的数值 `Long apiKeyId`（admin 侧填 `api_key.id`），而 `ApiKeyView` 由 M1/M2 的 `ApiKeyAuthFilter` 放进 exchange 属性 `ATTRIBUTE_KEY_VIEW`，限流过滤器又**排在鉴权之后**（`@Order(HIGHEST_PRECEDENCE + 150)` > 鉴权），因此**认证后的视图连同数值主键在限流器手里本来就已经可得**；真实 DDL 里 `rate_limit_policy.api_key_id` 就是 `BIGINT NULL`，指向 `api_key.id`。设计文档 §8.1 ② 明写维度是 **`tenant + api_key`**（spec 第 284 行）。原文把「M4 才接 key 级」写成结论，实质是把 spec 要求的维度主动降级，故按评审改回两维。 | 快照里 `RatePolicy` 继续带 `apiKeyId`（`null` = 租户级），但**两级都参与判定**：`ConfigSnapshot.keyPolicies(tenantId, apiKeyId)`（Task 2）+ `ConfigSnapshot.tenantPolicies(tenantId)`，由 `RateLimitResolver.resolve(tenantId, apiKeyId)` 依次取（Task 4）。用例换成**真覆盖**：`prefersTheKeyLevelPolicyWhenTheApiKeyIdsMatch`（id 匹配时 key 级赢过租户级）与 `usesTheTenantLevelPolicyWhenThereIsNoKeyLevelRow`（没有 key 级行 → 用租户级行），原 `RateLimitResolverTest.ignoresKeyLevelPolicies` **删除**。**编译顺序**：数值主键在 Task 11 才进 `ApiKeyView`（决策 14），因此 Task 4 的两级解析是即时生效且被测试钉住的，而「请求 → `apiKeyId`」那一行在 Task 9 留显式占位、**Task 11 收口**（与 Task 7 对 `AdminClient.parse` 的处置是同一套手续，见附录第 14 条）。 |
 | 8 | 令牌桶 key 布局：`aihub:ratelimit:{tenantId}:{sha256(secret)}`，类型是 **Hash**（字段 `t` = 令牌毫数、`k` = 上次填充的毫秒时间戳）；**首次创建时设 `PEXPIRE = max(60s, 20 × burst/qps 秒)`**。本机降级桶的 key 前缀是 `local:ratelimit:`（**与 Redis 布局分开**）。 | `tenant + api_key` 是 §8.1 ② 的明文维度。用 Hash 而不是 String，是为了让「令牌数 + 时间戳」在一次 `HMGET` 里原子读出，并让 `PEXPIRE` 与「两个字段一起消失」成为同一个操作。TTL 让长期不活跃的桶自动回收 —— 否则多租户下 Redis 会被键撑满。**不把「请求的 tenant+key」写进指标标签**（高基数），指标只按「结果」与「来源（redis/local）」打标签。 | Task 3 有键布局与 TTL 公式的固定向量测试；Task 14 的真 Redis 用例直接读 `PTTL`。 |
 | 9 | Lua 脚本**只做令牌桶算术**，时间和参数都由调用方传入：`KEYS[1]` = 桶 key，`ARGV = {nowMillis, qps, burst, ttlMillis}`，返回 `{allowed, remaining, retryAfterMillis}`。**不用 Redis 的 `TIME`**。 | 用 `TIME` 会把「网关的处理时刻」与「桶的判定时刻」拆成两个时钟，排查限流问题时无法把一次拒绝对应到网关日志里的时间戳；而且单机开发时 Redis 容器与宿主时钟偶有偏移。代价是时钟回拨会重置桶（放宽而不是收紧），已在脚本与纯算术里写明。**脚本必须是一次往返、服务器端原子**：这正是 §11 深挖清单第 2 题「Redis + Lua 令牌桶的原子性」的落点。 | `RETRYAFTER` 的公式是 `ceil((1000 - tokensMilli) / qps)`，可被纯算术单元测试精确断言，并由 Task 14 的真 Redis 并发用例证明不超发。 |
 | 10 | 熔断状态 key 布局：`aihub:channel:circuit:{channelId}`，值为 `OPEN`，**TTL 30 秒**（spec 写死的数字），写失败只记 WARN。Redis 不可用时退化为**进程内**熔断表（`ConcurrentHashMap<Long, Long>` + 毫秒时钟）。**所有候选都被熔断时，忽略熔断标记照常选最高优先级的那一组**（并打 WARN + 计数器），而不是回 503。熔断的**触发面只有上游 429**；5xx 只做当次切换，不熔断。 | §9 明文「在 Redis 给该渠道打 30s 熔断标记」，Redis TTL 是唯一能同时做到「跨实例共享」和「自动过期」的载体。全候选熔断时返回 503 会制造一个**由我们自己短路出来的**整体不可用，与总原则冲突。「429 熔断、5xx 不熔断」的理由：30 秒熔断一个 429 渠道是 spec 的要求（429 表示该渠道的配额/速率已满，继续打只会持续失败），而 5xx 可能只是一个坏请求触发的单次故障，把整条渠道熔断 30 秒过于激进。 | Task 5 有 9 条用例（含「Redis 写失败仍标记本地」「TTL 30s 的字面量」「本机标记的两个过期边界」）；Task 6 有「全熔断放行」用例。 |
-| 11 | **不引入 WireMock**，网关侧故障注入一律用 JDK `com.sun.net.httpserver.HttpServer`（扩展已有的 `FakeUpstream`）。 | 设计文档 §4.2 把 WireMock 表述为「M3 引入时再锁定版本」，但 M1/M2 已经用 JDK `HttpServer` 建成了**可证伪**的故障夹具（分块 + 手写握手 + 中途扣留 + 原样 Content-Type + 只发状态码 + 连上不回响应头），§10 要验的四件事（429 / 超时 / 中途断流 / usage 缺失）它全都能表达，而且是**零依赖**。引进 WireMock 是多一个测试作用域依赖 + 一套 DSL，收益只是「更像个标准工具」。 | `aihub-gateway/pom.xml` 的 `<dependencies>` 在 M3 结束时**与 M2 逐字节相同**，这是可验证的验收项（Task 15 的 Step 3 附带核对）。 |
+| 11 | **引入 WireMock**（`org.wiremock:wiremock`，**版本锁定 3.9.1**），**只加在 `aihub-gateway` 的 test 作用域**，且**只用于多渠道故障注入的里程碑验收**；M1/M2 已建成的 JDK `com.sun.net.httpserver.HttpServer` 夹具（`FakeUpstream` / `FakeAdminServer`）**全部保留**，细粒度、可证伪的用例继续用它们。 | 设计文档在**三处**点名 WireMock：§4.2 技术栈「WireMock 在 M3 引入时再锁定版本」、§10 测试策略「上游契约 = WireMock 模拟多渠道」、§12 里程碑表 M3 的验收标准「**WireMock 注入 429/超时，能自动切换**」。M3 的正式验收标准就写在这个工具名下，用一个自研夹具等价替代会让验收与 spec 的文字对不上。JDK 夹具确实能表达那四种注入，但它**不是一个「多渠道」抽象**：WireMock 的**命名 stub + 请求日志（`verify(...)`）**才能直接表达「三条渠道各注入一种故障，并证明请求真的打到了哪一条」。**可构建性已实测（2026-09-26）**：`mvn -B dependency:get -Dartifact=org.wiremock:wiremock:3.9.1` 经 `aliyunmaven` 镜像解析成功并落进 `.m2repo`（直连 `repo.maven.apache.org` 被出口阻断，镜像通）；另在**仓库之外**的探针工程里用 `@WireMockTest` **进程内**跑通三种注入（429 stub / `withFixedDelay` 挂住 → 客户端超时 / `Fault.MALFORMED_RESPONSE_CHUNK` 中途断流），`Tests run: 1, Failures: 0, Errors: 0` + `BUILD SUCCESS`，端口是本进程内的随机端口（60380），**无 Docker、无活 broker** —— 因此 M1/M2 那条「网关测试不依赖 Docker / 不要求活 broker」的约束仍然成立。 | `aihub-gateway/pom.xml` 增加一个 **test 作用域**的 `org.wiremock:wiremock:3.9.1`（它**不在** Spring Boot BOM 里，必须显式锁版本）；**生产依赖仍然零新增**，`aihub-common/pom.xml` 不动。新增 `WireMockChannelFaultInjectionTest`（Task 10），它承担 spec 原文的里程碑验收；Task 15 Step 3 的「没有新增依赖」核对改为「**生产**依赖无新增 + WireMock 只出现在 test 作用域」。 |
 | 12 | **`QuotaFilter`（§6.2 预算扣减 / 补扣 / 对账）整体推迟到 M4。** 注册这个决策的理由是**两份文档冲突**：M2 计划的「不做」清单把「配额预扣」划给了 M3，而设计文档 §12 的里程碑表把 `配额` 放在 **M4（业务平台）**那一行。**以里程碑表为准**：配额预扣需要 `quota` 表的控制面（租户额度 CRUD）、`billing_daily` 累加、以及每日 02:00 的对账任务，这三样都在 M4 的范围里；M3 先做它没有可扣的额度来源。**并且必须说清 M3 做的是限流、不是余额记账**：`RateLimitFilter` 管的是「每秒能发几个请求」（QPS/burst，令牌桶，丢弃是暂时的、下一个窗口自动恢复）；配额管的是「这个租户还剩多少 token」（余额，扣减是持久的、用完了要充值）。两者共用 Redis 但语义完全不同，**不要把 429 `rate_limit_exceeded` 和 429 `QUOTA_EXCEEDED` 混为一谈**。 | M3 **不碰** `quota` 表、不做 `POST /internal/quota/reserve`、不写 `billing_daily`。被推迟的还有 §9 的「Redis 不可用时配额降级为放行 + 告警」——没有配额就没有这条降级。README 的「已知边界」必须写下这条移交。 |
 | 13 | **`/v1/**` 的错误体一律保持 OpenAI 形状**，包括 M3 新增的 `rate_limit_exceeded`（429）与 `model_not_found`（404）。设计文档 §9 第 334 行「流开始前失败 → 标准 HTTP 状态码 + 统一错误体 `{"code","message"}`」**与 M1 契约冲突，该行按「已被取代」处理**。 | M1 已经用**官方 OpenAI Python SDK 2.41.1** 验收过 `/v1/**` 的 401 形状（`error.code == "invalid_api_key"`），M2 也在此契约上加了计量。给数据面套 admin 信封等于把协议换成私有协议，所有 SDK 的 `error.message` 取值路径会同时失效 —— 这不是「按 spec 实现」，是回归。 | 新错误码的取值与场景固化进 `docs/CONVENTIONS.md` 第 4 节的表；`GatewayErrors` 的签名不新增重载。 |
 | 14 | 为了让 `request_log.api_key_id` 有值，**给共享的 `ApiKeyView` 加一个可空 `Long apiKeyId` 分量**（放在 `expireAt` 之后）。admin 侧解析回源/铸造时填 `api_key.id`，Redis 载荷加第 6 段，gateway 侧透传。 | M2 决策 8 明确把「`api_key_id` 恒为 NULL」列为 M4 前置项，理由是「补它等于改跨服务契约（admin resolve 响应 + Redis 载荷格式 + 两侧测试）」。M3 正好要动 `channel_id`（多渠道让「哪条渠道服务了这次请求」第一次有了含义），把两个 id 一起补上，成本只是同一批文件的同一个改动，收益是 `request_log` 第一次能按渠道和 key 聚合。**载荷加段是向后不兼容的**：旧 Redis entry 会被新 `decode` 判为畸形并**返回 null（缓存未命中 → 回源 admin → 重写）**，这正是我们要的收敛行为，不需要清库。 | `ApiKeyCacheCodec` 段数 5 → 6；`ApiKeyToolingTest` 的固定向量必须同步更新（那是契约测试，改它是对的）；admin `ApiKeyService` 与 gateway `AdminClient.Http.parse` 各一行。`channelId` 仍由路由结果填，不属于这一条。 |
 | 15 | 客户端传来的 **`model` 只在「进入计量事件」时截断**：超过 128 字符则截到 128（保留前 128 个字符的原文，不加省略号）。**转发给上游的请求体逐字节不变**（仍然原样带上客户端写的 model）。 | `request_log.model` 是 `VARCHAR(128)`，超长会让 INSERT 报「数据过长」→ `DataAccessException` → 重试 3 次 → 进 `aihub.metering.dlq`，而 DLQ 是**任何持合法 API Key 的客户端都能触碰**的入口（M2 已知边界）。**不能**在网关拒掉这个请求：那会把一个纯粹的计量侧问题变成客户端可见的行为变更，而且上游本来能处理长模型名。截断发生在组装事件的地方（计量是派生的，截断只损失精度，不损失真值 —— 真值在上游日志里）。 | Task 11 有用例 `oversizedModelIsTruncatedInTheEventButForwardedVerbatim` 同时断言「事件里是 128 字符」与「上游收到的请求体含原始长 model」。 |
 | 16 | **API Key 吊销 / 停用的生效延迟是显式接受的**：本机 Caffeine `≤30s`、跨实例 Redis `≤5m`。M3 **不加**吊销广播，也**不写** Pub/Sub 监听器。 | M1 的 t4-1 把这个问题挂起来等 M3 定。现在的答案是「接受，并说清楚为什么」：① §6.3 的 Pub/Sub 失效机制只针对**配置快照**，而 API Key 缓存是**鉴权信任源**，它的失效通道需要鉴权保护（否则能发消息的人就能驱逐任意 key 的缓存）；② M3 没有配置写入方，Pub/Sub 连发布端都不存在，为一个不存在的发布端写监听器 = 一条永远不触发的代码路径（在「必须有测试」的纪律下它只能靠直接调用监听方法来「测」，那是自欺）；③ 真正的收敛手段是 M4 的吊销接口 + 显式 `DEL`，比 TTL 更精确。**不接受的做法**：为了「立刻生效」而把 Redis TTL 调到几秒 —— 那会让 Redis 变成每次请求都回源的控制面，与决策 A 的初衷相反。 | 写进 `docs/CONVENTIONS.md` 第 6.6 节（已有 ≤30s/≤5m 的表述，补上「M3 显式接受该窗口，收敛手段是 M4 的显式 DEL」）与 README 已知边界。**代码不改**。 |
-| 17 | `rate_limit_policy` **没有唯一约束**（V1 只有 `KEY idx_rate_limit_tenant (tenant_id)`），M3 **不加**唯一索引。租户级策略的选取规则：组装快照时按 `tenant_id ASC, api_key_id IS NULL DESC, id ASC` 读取，网关侧取**列表里最后一条租户级策略** —— 两者合起来等于「取 `id` 最大的那条 ACTIVE 租户级策略」。同租户出现多条时 admin 侧打一次 WARN。 | 加唯一索引要改 V1（禁止）或加 V2（决策 12 禁止）。语义上「取最后插入的那条」是可预测且无需 DDL 的：M4 的控制台写入应当先停用旧行（`status`），因此 `status='ACTIVE'` + `id DESC` 恰好表达「当前生效的那条」。打 WARN 而不是抛异常：数据脏不能变成数据面不可用。 | Task 6 的 `usesTheLastTenantLevelPolicyWhenSeveralArePresent` 与 Task 13 的 `multipleTenantLevelPoliciesWarnButStillPickTheLast` 各钉一半（读取顺序 + 实际取值）。 |
+| 17 | `rate_limit_policy` **没有唯一约束**（V1 只有 `KEY idx_rate_limit_tenant (tenant_id)`），M3 **不加**唯一索引。策略行的选取规则（**2026-09-26 随决策 7 的修订扩到两个维度，读取顺序本身不变**）：组装快照时按 `tenant_id ASC, api_key_id IS NULL DESC, id ASC` 读取；网关侧**在每一级内部**取列表里**最后一条** —— 租户级取最后一条 `api_key_id IS NULL` 的行，key 级取该 `apiKeyId` 的最后一行。两者合起来等于「**同一租户、同一维度内取 `id` 最大的那条 ACTIVE 策略**」（key 级行按 `id` 升序交错在租户级行之后，按 `apiKeyId` 过滤后仍是 `id` 最大者）。同租户出现多条**同维度** ACTIVE 策略时 admin 侧打一次 WARN（租户级与 key 级各判各的）。 | 加唯一索引要改 V1（禁止）或加 V2（决策 12 禁止）。语义上「取最后插入的那条」是可预测且无需 DDL 的：M4 的控制台写入应当先停用旧行（`status`），因此 `status='ACTIVE'` + `id DESC` 恰好表达「当前生效的那条」。打 WARN 而不是抛异常：数据脏不能变成数据面不可用。 | Task 4 的 `usesTheLastPolicyOfTheMatchingDimensionWhenSeveralArePresent`（并覆盖 key 级同键多条取最后一条）与 Task 13 的 `multipleTenantLevelPoliciesWarnButStillPickTheLast` 各钉一半（读取顺序 + 实际取值）。 |
 | 18 | **不新增 `/actuator/metrics` 暴露**（仍然是 `health,info`）；M3 新增的计数器一律只进 Micrometer registry + 日志。 | 沿用 M2 决策 13：网关只有 `ApiKeyAuthFilter` 守 `/v1/**`，`/metrics` 会变成**无鉴权**的新公网面。可观测性对外暴露属于 M6。 | Task 5 / Task 9 的计数器（`aihub.ratelimit.rejected`、`aihub.ratelimit.degraded`）只被测试通过 registry 读取，不新增端点。 |
 
 ### 本里程碑**不做**的事（写进文档，避免范围蔓延）
@@ -86,7 +86,7 @@
 
 ## File Structure
 
-M3 结束后新增/修改的文件（`改` = 修改既有文件；**没有** `aihub-common` 的 pom 改动，也**没有**新的 Flyway 脚本）：
+M3 结束后新增/修改的文件（`改` = 修改既有文件；**没有** `aihub-common` 的 pom 改动，也**没有**新的 Flyway 脚本。**唯一的依赖变更是** `aihub-gateway/pom.xml` 里一个 test 作用域依赖（WireMock，决策 11）——**生产依赖零新增**）：
 
 | 文件 | 职责 |
 |---|---|
@@ -94,7 +94,7 @@ M3 结束后新增/修改的文件（`改` = 修改既有文件；**没有** `ai
 | `aihub-admin/aihub-common/src/main/java/com/aihub/common/crypto/AesGcmChannelCipher.java` | 新增：AES-GCM 加解密（`v{n}:{b64(nonce‖ct)}` 自描述载荷），JDK-only |
 | `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ChannelDescriptor.java` | 新增：渠道的纯数据视图（含 `apiKeyCipher` 与 `keyVersion`），**admin 与 gateway 共用** |
 | `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ModelRouteDescriptor.java` | 新增：`model → channel` 的候选行（含 route 级 weight/priority） |
-| `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/RatePolicy.java` | 新增：限流策略的纯数据视图（tenantId / apiKeyId / qps / burst） |
+| `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/RatePolicy.java` | 新增：限流策略的纯数据视图（tenantId / apiKeyId / qps / burst）；**两个维度都生效**（决策 7 修订） |
 | `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigSnapshot.java` | 新增：快照聚合（version / defaultModel / generatedAt / channels / routes / ratePolicies） |
 | `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigSnapshotCodec.java` | 新增：快照的分隔符编解码（**Redis 缓存载荷 + 本地缓存载荷**，见决策 4） |
 | `aihub-admin/aihub-common/src/main/java/com/aihub/common/ratelimit/RateLimitScript.java` | 新增：Lua 脚本与令牌桶键布局的**唯一真相**（gateway 跑它，admin 侧的集成测试验它） |
@@ -122,7 +122,7 @@ M3 结束后新增/修改的文件（`改` = 修改既有文件；**没有** `ai
 | `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/LuaTokenBucket.java` | 新增：对 `RateLimitScript` 的**纯委托** |
 | `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/RedisRateLimiter.java` | 新增：Redis + Lua 实现（失败返回 null = 「我这级不可用」） |
 | `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/LocalRateLimiter.java` | 新增：Redis 不可用时的**本机令牌桶**（Caffeine 有界） |
-| `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/RateLimitResolver.java` | 新增：`tenantId` → `RatePolicy`（含内置默认与决策 7/17） |
+| `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/RateLimitResolver.java` | 新增：`(tenantId, apiKeyId)` → `RatePolicy`（key 级优先、租户级回落、内置默认；决策 7/17） |
 | `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/RateLimiter.java` | 新增：**唯一被过滤器依赖的门面**（先 Redis、失败降级本机、绝不抛异常） |
 | `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/RateLimitFilter.java` | 新增：`/v1/**` 的限流过滤器（`@Order(HIGHEST_PRECEDENCE + 150)`），超限回 OpenAI 形状 429 |
 | `aihub-gateway/src/main/java/com/aihub/gateway/route/CircuitState.java` | 新增：熔断状态 record（open / source） |
@@ -141,6 +141,7 @@ M3 结束后新增/修改的文件（`改` = 修改既有文件；**没有** `ai
 | `aihub-gateway/src/main/java/com/aihub/gateway/error/GatewayErrors.java` | **不改**：新增错误码只用到既有的 `write(...)` 签名 |
 | `aihub-gateway/src/main/resources/application.yml` | **改**：`aihub.channel.master-key`、`aihub.config.*`、`aihub.ratelimit.enabled` |
 | `aihub-gateway/src/test/resources/application.properties` | **改**：`aihub.ratelimit.enabled=false`（理由同 `aihub.metering.enabled=false`） |
+| `aihub-gateway/pom.xml` | **改**：test 作用域加 `org.wiremock:wiremock:3.9.1`（**锁死版本**，不在 Spring Boot BOM 里）。**生产依赖零新增**；`aihub-common/pom.xml` 不动（决策 11） |
 | `docker-compose.yml` | **改**：admin 与 gateway 都加 `AIHUB_CHANNEL_MASTER_KEY`；admin 加 `AIHUB_DEMO_SEED_ENABLED` |
 | `.env.example` | **改**：`AIHUB_CHANNEL_MASTER_KEY` 的占位符 + **生成方法**，**不放任何真实密钥** |
 | `README.md` / `docs/CONVENTIONS.md` | **改**：M3 进度、限流与错误码、快照与密钥约定、降级与熔断、边界清单、配额移交 M4 |
@@ -156,7 +157,7 @@ M3 结束后新增/修改的文件（`改` = 修改既有文件；**没有** `ai
 | `aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/TokenBucketTest.java` | 纯算术：满桶、补充、封顶、拒绝、retryAfter 公式、时钟回拨 |
 | `aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/LuaTokenBucketTest.java` | 委托后的脚本与键布局与共享常量逐字节一致 |
 | `aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/LocalRateLimiterTest.java` | 本机桶：独立 key、退避、并发不超发（真实线程）、空闲淘汰 |
-| `aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/RateLimitResolverTest.java` | 默认策略、租户级覆盖、取最后一条、key 级被忽略、惰性读快照 |
+| `aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/RateLimitResolverTest.java` | 默认策略、**key 级命中优先**、无 key 级行时回落租户级、其他租户不生效、各级取最后一条（含 key 级同键多条）、惰性读快照 |
 | `aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/RedisRateLimiterTest.java` | 脚本调用约定（1 key + 4 argv）、异常→null、返回三元素 |
 | `aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/RateLimitFilterTest.java` | 放行、429 形状与头、维度、降级仍拒绝、fail-open、`@Order` |
 | `aihub-gateway/src/test/java/com/aihub/gateway/route/ChannelCircuitBreakerTest.java` | 30s 字面量、Redis 故障退化本机、本机过期边界、清除、不抛 |
@@ -165,7 +166,8 @@ M3 结束后新增/修改的文件（`改` = 修改既有文件；**没有** `ai
 | `aihub-gateway/src/test/java/com/aihub/gateway/relay/RelayAttemptsTest.java` | 可切换判据、密钥过滤、model 截断 |
 | `aihub-gateway/src/test/java/com/aihub/gateway/relay/ChannelKeyDecryptorTest.java` | 解密、遗留渠道、解不开→空、不泄漏明文 |
 | `aihub-gateway/src/test/java/com/aihub/gateway/upstream/UpstreamClientFactoryTest.java` | 遗留客户端带 Bearer、渠道客户端不带、流式无响应超时、缓存键 |
-| `aihub-gateway/src/test/java/com/aihub/gateway/relay/FailoverRelayTest.java` | **M3 的核心验收**：429 立即切换并熔断、5xx 切换、超时切换、400 不切换、全挂透传最后一个失败、未知模型 404、每渠道密钥注入 |
+| `aihub-gateway/src/test/java/com/aihub/gateway/relay/FailoverRelayTest.java` | **M3 的核心验收**：429 立即切换并熔断、5xx 切换、超时切换、400 不切换、全挂透传最后一个失败、未知模型 404、每渠道密钥注入（JDK `HttpServer` 夹具） |
+| `aihub-gateway/src/test/java/com/aihub/gateway/relay/WireMockChannelFaultInjectionTest.java` | **spec §10 / 里程碑验收的字面落点**：WireMock 命名 stub 扮三条渠道（429 / 挂住超时 / 中途断流）→ 自动切换、提交后不切换、请求日志证明打到了哪条（**进程内**，不需要 Docker） |
 | `aihub-gateway/src/test/java/com/aihub/gateway/relay/ChatRelayControllerTest.java` | **改**：补 `retry-after-ms` / IETF `RateLimit-*` 透传与「精确名」回归 |
 | `aihub-gateway/src/test/java/com/aihub/gateway/relay/RelayMeteringFlowTest.java` | **改**：`channel_id` / `api_key_id` 有值、超长 model 截断、既有契约回归 |
 | `aihub-gateway/src/test/java/com/aihub/gateway/relay/ModelsControllerTest.java` | **改**：模型列表 = 快照 ∪ 遗留默认 |
@@ -176,7 +178,7 @@ M3 结束后新增/修改的文件（`改` = 修改既有文件；**没有** `ai
 | `aihub-web/src/test/java/com/aihub/admin/ratelimit/RedisTokenBucketIntegrationTest.java` | **真 Redis**：Lua 的补充/封顶/拒绝/TTL + 并发 20×20 恰好放行 burst（原子性证据） |
 
 **本计划的预期测试总数**（Task 15 会要求实测并写进 README；**以实测为准**，这里的数字只是给实施者一个「跑偏了没有」的参照）：
-`aihub-common` 基线 21 → 约 **46**；`aihub-gateway` 基线 132 → 约 **244**；`aihub-web` 基线 47 → 约 **71**。
+`aihub-common` 基线 21 → 约 **46**；`aihub-gateway` 基线 132 → 约 **249**（含 WireMock 多渠道故障注入验收的 5 条）；`aihub-web` 基线 47 → 约 **71**。
 
 ---
 
@@ -722,7 +724,7 @@ git commit -m "feat: add the shared aes-gcm channel key cipher with dual-version
   - `record ChannelDescriptor(long id, String name, String baseUrl, String apiKeyCipher, int keyVersion, int timeoutMs, String status, int weight, int priority)`，常量 `STATUS_ACTIVE = "ACTIVE"`，`boolean usable()`（`status` ACTIVE 且 `baseUrl` 非空且 `timeoutMs > 0`）。
   - `record ModelRouteDescriptor(String modelName, long channelId, int weight, int priority, String status)`，常量 `STATUS_ACTIVE`，`boolean usable()`。
   - `record RatePolicy(Long tenantId, Long apiKeyId, int qps, int burst)`，`boolean tenantLevel()`（`apiKeyId == null`），常量 `DEFAULT_QPS = 10` / `DEFAULT_BURST = 20`，静态 `RatePolicy defaultFor(long tenantId)`。
-  - `record ConfigSnapshot(long version, long generatedAtEpochMilli, List<ChannelDescriptor> channels, List<ModelRouteDescriptor> routes, List<RatePolicy> ratePolicies, String defaultModel)`：静态 `ConfigSnapshot empty()`；`Optional<ChannelDescriptor> channel(long id)`；`List<ChannelDescriptor> channelsSupporting(String model)`；`List<ModelRouteDescriptor> routesFor(String model)`；`List<RatePolicy> tenantPolicies(long tenantId)`；`Set<String> modelNames()`（排序去重）。
+  - `record ConfigSnapshot(long version, long generatedAtEpochMilli, List<ChannelDescriptor> channels, List<ModelRouteDescriptor> routes, List<RatePolicy> ratePolicies, String defaultModel)`：静态 `ConfigSnapshot empty()`；`Optional<ChannelDescriptor> channel(long id)`；`List<ChannelDescriptor> channelsSupporting(String model)`；`List<ModelRouteDescriptor> routesFor(String model)`；`List<RatePolicy> tenantPolicies(long tenantId)`；`List<RatePolicy> keyPolicies(long tenantId, long apiKeyId)`；`Set<String> modelNames()`（排序去重）。**决策 7 修订后两个维度都要有各自的取值入口**：`keyPolicies` 是 key 级（`apiKeyId` 相等）、`tenantPolicies` 是租户级（`apiKeyId == null`）。
   - `ConfigSnapshotCodec`：`static String encode(ConfigSnapshot)`、`static ConfigSnapshot decode(String)`（畸形返回 `null`）、常量 `FORMAT_VERSION = 1`。
   - **重要**：`channelsSupporting(model)` 返回的是**渠道**列表（顺序 = `routes` 的顺序），`weight` / `priority` **以 `model_route` 的值为准**，因此 `RouteResolver`（Task 6）必须用 `routesFor(model)` 拿 route 级权重、再用 `channel(id)` 联表。两者都在同一个 record 上，避免两侧各拼一份。
 
@@ -739,7 +741,7 @@ git commit -m "feat: add the shared aes-gcm channel key cipher with dual-version
 | `usableRequiresActiveStatusBaseUrlAndPositiveTimeout` | `ChannelDescriptor.usable()` 的三个条件 |
 | `channelsSupportingIgnoresInactiveRoutesAndChannels` | `status != ACTIVE` 的路由/渠道都被排除；同一渠道不重复 |
 | `routesForReturnsOnlyActiveRoutesOfThatModel` | route 级 weight/priority 的来源 |
-| `tenantPoliciesFiltersToTenantLevelOfThatTenant` | 决策 7：key 级策略不在结果里 |
+| `tenantPoliciesFiltersToTenantLevelOfThatTenantAndKeyPoliciesToThatKey` | 决策 7（修订）：`tenantPolicies` 只给租户级、`keyPolicies` 只给该 `apiKeyId`，两个维度互不串味 |
 | `modelNamesIsTheSortedDistinctUnionOfActiveRoutes` | `GET /v1/models` 的数据源 |
 | `emptySnapshotHasNoChannelsAndNoModels` | 空快照的行为 |
 
@@ -883,12 +885,22 @@ class ConfigSnapshotCodecTest {
     }
 
     @Test
-    void tenantPoliciesFiltersToTenantLevelOfThatTenant() {
+    void tenantPoliciesFiltersToTenantLevelOfThatTenantAndKeyPoliciesToThatKey() {
+        // 决策 7（已按控制器 pre-flight 评审修订）：两个维度都参与判定，因此两个入口都必须
+        // 只返回自己那一维的行 —— key 级行不得混进 tenantPolicies（否则「租户级回落」会拿到 key 级策略），
+        // 租户级行也不得混进 keyPolicies（否则「key 级优先」会命中不属于这个 key 的策略）。
         assertThat(populated().tenantPolicies(7L))
-                .as("key 级策略（apiKeyId=42）不得出现在结果里（决策 7）")
+                .as("key 级策略（apiKeyId=42）不得出现在租户级结果里")
                 .hasSize(1);
         assertThat(populated().tenantPolicies(7L).get(0).qps()).isEqualTo(20);
         assertThat(populated().tenantPolicies(8L)).isEmpty();
+
+        assertThat(populated().keyPolicies(7L, 42L))
+                .as("只应命中该租户该 key 的那一行")
+                .hasSize(1);
+        assertThat(populated().keyPolicies(7L, 42L).get(0).qps()).isEqualTo(100);
+        assertThat(populated().keyPolicies(7L, 43L)).as("别的 key 不得命中").isEmpty();
+        assertThat(populated().keyPolicies(8L, 42L)).as("别的租户不得命中").isEmpty();
     }
 
     @Test
@@ -984,10 +996,11 @@ package com.aihub.common.config;
 /**
  * 限流策略的纯数据视图（对应 {@code rate_limit_policy}）。
  *
- * <p><b>M3 只使用 {@code apiKeyId == null} 的租户级策略</b>：请求上下文里只有密钥哈希、
- * 没有 {@code api_key} 的数值主键，因此请求无法映射到 key 级策略（计划决策 7）。
- * key 级策略照样会被组装进快照 —— 这样 M4 补上映射后只是「多查一个维度」，
- * 而不是「改快照格式」。
+ * <p><b>两个维度 ({@code tenantId} / {@code apiKeyId}) 都参与判定</b>（决策 7，2026-09-26 依控制器
+ * pre-flight 评审修订）：{@code apiKeyId == null} 是**租户级**策略（该租户所有 key 的兜底），
+ * 非空是**key 级**策略（只作用于该 {@code api_key.id}）。{@link ConfigSnapshot} 上两个维度各有
+ * 一个取值入口，由 gateway 的 {@code RateLimitResolver} 按「key 级优先 → 租户级回落 → 内置默认」
+ * 的顺序取（Task 4）。
  */
 public record RatePolicy(Long tenantId, Long apiKeyId, int qps, int burst) {
 
@@ -1077,11 +1090,34 @@ public record ConfigSnapshot(long version, long generatedAtEpochMilli,
         return candidates;
     }
 
-    /** 该租户的**租户级**策略（决策 7）；顺序 = 组装顺序（admin 已按 id 升序）。 */
+    /**
+     * 该租户的**租户级**策略（{@code apiKeyId == null}，决策 7 的第二级）；
+     * 顺序 = 组装顺序（admin 已按 id 升序），因此「取最后一条」= 「取 id 最大的那条」。
+     */
     public List<RatePolicy> tenantPolicies(long tenantId) {
         List<RatePolicy> matched = new ArrayList<>();
         for (RatePolicy policy : ratePolicies) {
             if (policy.tenantLevel() && policy.tenantId() != null && policy.tenantId() == tenantId) {
+                matched.add(policy);
+            }
+        }
+        return matched;
+    }
+
+    /**
+     * 该租户、该 key 的 **key 级**策略（{@code apiKeyId} 非空且相等 —— 决策 7 的第一级）。
+     * 顺序同上，因此「取最后一条」同样等于「取 id 最大的那条」。
+     *
+     * <p>它是 {@code RateLimitResolver} 的**第一优先**来源：这一维**只要有一行**就由它收口
+     * （值非法则回落到内置默认，**不**再去看租户级那一维 —— 一条写坏的 key 级行不该变成
+     * 「额度比不写还大」）。**这里不做值校验**（非正的 qps/burst 由 resolver 判定），
+     * 本方法只负责「哪些行属于这个 (租户, key)」。
+     */
+    public List<RatePolicy> keyPolicies(long tenantId, long apiKeyId) {
+        List<RatePolicy> matched = new ArrayList<>();
+        for (RatePolicy policy : ratePolicies) {
+            if (!policy.tenantLevel() && policy.tenantId() != null && policy.tenantId() == tenantId
+                    && policy.apiKeyId() == apiKeyId) {
                 matched.add(policy);
             }
         }
@@ -1342,7 +1378,7 @@ git commit -m "feat: add the shared config snapshot contract and its delimiter c
 1. 四个 record 与 V1 的列一一对应；`ChannelDescriptor.usable()` 是「渠道能不能用」的唯一判据。
 2. `routesFor(model)` 只返回该模型且 ACTIVE 的路由（**route 级 weight/priority 的来源**）；`channelsSupporting(model)` 的候选只来自「路由 + 可用渠道」的联表，同一渠道不重复，`status != ACTIVE` 的行全部被排除。
 3. 编解码严格互逆（含字段里出现 `|` / `\` / `\n` / `\r`），载荷不含裸的 `\r`；畸形载荷（含未知格式版本、字段数不对）返回 `null`，未知**段字母**只跳过该段。
-4. `tenantPolicies(tenantId)` 只返回租户级策略（决策 7）。
+4. `tenantPolicies(tenantId)` 只返回租户级策略、`keyPolicies(tenantId, apiKeyId)` 只返回该 key 的 key 级策略（决策 7 修订后两个维度都生效，各自有取值入口且互不串味）。
 5. main 作用域仍然零第三方依赖。
 
 **必须运行的命令与期望输出**
@@ -2201,14 +2237,14 @@ git commit -m "feat: add the token bucket lua script, its pure arithmetic and th
 - Consumes：Task 3（`TokenBucket` / `LuaTokenBucket` / `LocalRateLimiter` / `RateLimitDecision`）、Task 2（`ConfigSnapshot` / `RatePolicy`）。
 - Produces：
   - `RedisRateLimiter`：构造器 `RedisRateLimiter(StringRedisTemplate redis)`；`RateLimitDecision tryConsume(String bucketKey, int qps, int burst)`（**返回 `null` = 「Redis 这一级不可用」**，由 `RateLimiter` 决定降级；永不抛异常）。
-  - `RateLimitResolver`：构造器 `RateLimitResolver(Supplier<ConfigSnapshot> snapshotSupplier)`；`RatePolicy resolve(long tenantId)`（决策 7/17：取列表里**最后一条**租户级策略；无策略或非正值时回落到 `qps=10 / burst=20`）。
-  - `RateLimiter`：构造器 `RateLimiter(RedisRateLimiter redis, LocalRateLimiter local, RateLimitResolver resolver)`；`RateLimitDecision acquire(long tenantId, String keyHash)`（生产唯一入口）；`boolean redisDegraded()`。
+  - `RateLimitResolver`：构造器 `RateLimitResolver(Supplier<ConfigSnapshot> snapshotSupplier)`；`RatePolicy resolve(long tenantId, Long apiKeyId)`（决策 7/17：**key 级优先** —— `apiKeyId != null` 时先取 `keyPolicies(tenantId, apiKeyId)` 的最后一条；没有有效的 key 级行则取 `tenantPolicies(tenantId)` 的最后一条；都没有或 qps/burst 非正则回落到 `qps=10 / burst=20`）。
+  - `RateLimiter`：构造器 `RateLimiter(RedisRateLimiter redis, LocalRateLimiter local, RateLimitResolver resolver)`；`RateLimitDecision acquire(long tenantId, Long apiKeyId, String keyHash)`（生产唯一入口）；`boolean redisDegraded()`。
 
 **测试用例清单**（`RateLimitResolverTest` 7 + `RedisRateLimiterTest` 7 = 14 条）：
 
 | 类 | 用例 | 钉住什么 |
 |---|---|---|
-| `RateLimitResolverTest`（7） | `usesTheBuiltInDefaultWhenNoPolicyExists` / `usesTheTenantLevelPolicyWhenPresent` / `ignoresKeyLevelPolicies` / `ignoresPoliciesOfOtherTenants` / `usesTheLastTenantLevelPolicyWhenSeveralArePresent` / `treatsNonPositiveQpsAsTheDefault` / `readsTheSnapshotLazilyPerCall` | 决策 7/17 的全部语义 |
+| `RateLimitResolverTest`（7） | `usesTheBuiltInDefaultWhenNoPolicyExists` / `prefersTheKeyLevelPolicyWhenTheApiKeyIdsMatch` / `usesTheTenantLevelPolicyWhenThereIsNoKeyLevelRow` / `ignoresPoliciesOfOtherTenants` / `usesTheLastPolicyOfTheMatchingDimensionWhenSeveralArePresent` / `treatsNonPositiveQpsAsTheDefault` / `readsTheSnapshotLazilyPerCall` | 决策 7/17 的全部语义（**两个维度都生效**） |
 | `RedisRateLimiterTest`（7） | `returnsNullWhenRedisThrows` / `returnsNullWhenTheScriptResultIsNotAThreeElementList` / `passesThePinnedKeyAndArgumentsToTheScript` / `mapsTheScriptResultToADecision` / `deniedDecisionCarriesRetryAfter` / `blankKeyIsRejectedLocallyWithoutCallingRedis` / `unavailableRedisIsSignalledAsNullSoTheCallerCanDegrade` | 脚本调用约定 + 失败语义 |
 
 - [ ] **Step 1: 写 `RateLimitResolverTest` 与 `RateLimitResolver`**
@@ -2228,9 +2264,10 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 策略解析是「限流到底按什么数字执行」的唯一来源。M3 **只认租户级策略**（决策 7）：
- * 请求上下文里只有密钥哈希、没有 {@code api_key} 的数值主键，请求无法映射到 key 级策略。
- * 这条用例把「key 级被忽略」显式钉住，免得将来有人「顺手」把它接上却不知道自己在改契约。
+ * 策略解析是「限流到底按什么数字执行」的唯一来源。**两个维度都生效**（决策 7，2026-09-26 依控制器
+ * pre-flight 评审修订）：先按 {@code (tenantId, apiKeyId)} 找 key 级策略，没有有效的才回落到该租户的
+ * 租户级策略，最后才是内置默认。原文那条「key 级被忽略」的用例是**错的**（数值主键由决策 14 随
+ * {@code ApiKeyView} 下发、限流过滤器排在鉴权之后即可拿到），已被下面两条替换。
  */
 class RateLimitResolverTest {
 
@@ -2246,7 +2283,7 @@ class RateLimitResolverTest {
 
     @Test
     void usesTheBuiltInDefaultWhenNoPolicyExists() {
-        RatePolicy policy = resolverOf(ConfigSnapshot.empty()).resolve(7L);
+        RatePolicy policy = resolverOf(ConfigSnapshot.empty()).resolve(7L, null);
 
         assertThat(policy.qps()).isEqualTo(RatePolicy.DEFAULT_QPS);
         assertThat(policy.burst()).isEqualTo(RatePolicy.DEFAULT_BURST);
@@ -2254,53 +2291,80 @@ class RateLimitResolverTest {
         assertThat(policy.tenantLevel()).isTrue();
     }
 
+    /** 决策 7 的第一级：`apiKeyId` 命中时，key 级策略**赢过**同一租户的租户级策略。 */
     @Test
-    void usesTheTenantLevelPolicyWhenPresent() {
-        RatePolicy policy = resolverOf(SNAPSHOT).resolve(7L);
+    void prefersTheKeyLevelPolicyWhenTheApiKeyIdsMatch() {
+        RatePolicy policy = resolverOf(SNAPSHOT).resolve(7L, 42L);
 
-        assertThat(policy.qps()).isEqualTo(20);
-        assertThat(policy.burst()).isEqualTo(40);
+        assertThat(policy.qps()).as("key 级的 100/200 必须生效").isEqualTo(100);
+        assertThat(policy.burst()).isEqualTo(200);
+        assertThat(policy.apiKeyId()).isEqualTo(42L);
+        assertThat(policy.tenantLevel()).isFalse();
     }
 
-    /** 决策 7：key 级策略存在也不生效（请求没有可映射的数值 key 主键）。 */
+    /**
+     * 决策 7 的第二级（**回落**）：这个 (租户, key) 没有 key 级行时用该租户的租户级行。
+     * 两种形态都要覆盖：① 该 key 根本没有策略（99L）；② 鉴权关闭、请求上下文里没有数值主键
+     * （{@code null}）—— 后者是匿名桶的正常路径，绝不能因为 `apiKeyId` 为空就丢掉租户级策略。
+     */
     @Test
-    void ignoresKeyLevelPolicies() {
-        RatePolicy policy = resolverOf(SNAPSHOT).resolve(7L);
+    void usesTheTenantLevelPolicyWhenThereIsNoKeyLevelRow() {
+        RatePolicy otherKey = resolverOf(SNAPSHOT).resolve(7L, 99L);
+        assertThat(otherKey.qps()).isEqualTo(20);
+        assertThat(otherKey.burst()).isEqualTo(40);
+        assertThat(otherKey.tenantLevel()).isTrue();
 
-        assertThat(policy.qps()).as("key 级的 100/200 不得生效").isEqualTo(20);
-        assertThat(policy.apiKeyId()).isNull();
+        RatePolicy anonymous = resolverOf(SNAPSHOT).resolve(7L, null);
+        assertThat(anonymous.qps()).as("apiKeyId 为 null 时只能走租户级").isEqualTo(20);
+        assertThat(anonymous.apiKeyId()).isNull();
     }
 
     @Test
     void ignoresPoliciesOfOtherTenants() {
-        assertThat(resolverOf(SNAPSHOT).resolve(8L).qps()).isEqualTo(5);
-        assertThat(resolverOf(SNAPSHOT).resolve(9L).qps()).isEqualTo(RatePolicy.DEFAULT_QPS);
+        assertThat(resolverOf(SNAPSHOT).resolve(8L, null).qps()).isEqualTo(5);
+        assertThat(resolverOf(SNAPSHOT).resolve(8L, 42L).qps())
+                .as("租户 8 没有 42 号 key 的 key 级策略 → 回落租户级").isEqualTo(5);
+        assertThat(resolverOf(SNAPSHOT).resolve(9L, null).qps()).isEqualTo(RatePolicy.DEFAULT_QPS);
     }
 
     /**
-     * 同租户出现多条租户级 ACTIVE 策略时（V1 没有唯一约束，决策 17）：**取最后一条**。
+     * 同维度出现多行时（V1 没有唯一约束，决策 17）：**在各自的维度内取最后一条**。
      * admin 侧组装快照时已经按 {@code id} 升序排好，因此「最后一条」就是「最后插入的那条」。
      */
     @Test
-    void usesTheLastTenantLevelPolicyWhenSeveralArePresent() {
+    void usesTheLastPolicyOfTheMatchingDimensionWhenSeveralArePresent() {
         ConfigSnapshot duplicated = new ConfigSnapshot(1L, 2L, List.of(), List.of(), List.of(
                 new RatePolicy(7L, null, 20, 40),
-                new RatePolicy(7L, null, 60, 80)), null);
+                new RatePolicy(7L, null, 60, 80),
+                new RatePolicy(7L, 42L, 100, 200),
+                new RatePolicy(7L, 42L, 300, 400)), null);
 
-        assertThat(resolverOf(duplicated).resolve(7L).qps()).isEqualTo(60);
+        assertThat(resolverOf(duplicated).resolve(7L, null).qps())
+                .as("租户级多条取最后一条").isEqualTo(60);
+        assertThat(resolverOf(duplicated).resolve(7L, 42L).qps())
+                .as("key 级同键多条同样取最后一条").isEqualTo(300);
     }
 
     @Test
     void treatsNonPositiveQpsAsTheDefault() {
         // qps=0 会让桶永不补充（只允许 burst 次），这几乎必然是配置事故而不是意图：
-        // 把 0/负数当成「没有配置」处理，回落到默认值。
+        // 把 0/负数当成「没有配置」处理，回落到内置默认值。**两级都按这条规则处理**（保留原有的
+        // 按行校验语义：非正值的行不生效，且不因此降级到另一维的行）。
         ConfigSnapshot zero = new ConfigSnapshot(1L, 2L, List.of(), List.of(),
                 List.of(new RatePolicy(7L, null, 0, 0)), null);
+        ConfigSnapshot zeroKeyLevel = new ConfigSnapshot(1L, 2L, List.of(), List.of(),
+                List.of(new RatePolicy(7L, null, 20, 40), new RatePolicy(7L, 42L, 0, 0)), null);
 
-        RatePolicy policy = resolverOf(zero).resolve(7L);
+        RatePolicy policy = resolverOf(zero).resolve(7L, null);
 
         assertThat(policy.qps()).isEqualTo(RatePolicy.DEFAULT_QPS);
         assertThat(policy.burst()).isEqualTo(RatePolicy.DEFAULT_BURST);
+
+        RatePolicy invalidKeyLevel = resolverOf(zeroKeyLevel).resolve(7L, 42L);
+
+        assertThat(invalidKeyLevel.qps()).as("非正的 key 级行同样回落到内置默认")
+                .isEqualTo(RatePolicy.DEFAULT_QPS);
+        assertThat(invalidKeyLevel.burst()).isEqualTo(RatePolicy.DEFAULT_BURST);
     }
 
     @Test
@@ -2308,11 +2372,11 @@ class RateLimitResolverTest {
         AtomicReference<ConfigSnapshot> current = new AtomicReference<>(ConfigSnapshot.empty());
         RateLimitResolver resolver = new RateLimitResolver(current::get);
 
-        assertThat(resolver.resolve(7L).qps()).isEqualTo(RatePolicy.DEFAULT_QPS);
+        assertThat(resolver.resolve(7L, 42L).qps()).isEqualTo(RatePolicy.DEFAULT_QPS);
 
         current.set(SNAPSHOT);
 
-        assertThat(resolver.resolve(7L).qps()).as("策略必须随快照刷新而生效").isEqualTo(20);
+        assertThat(resolver.resolve(7L, 42L).qps()).as("策略必须随快照刷新而生效").isEqualTo(100);
     }
 }
 ```
@@ -2329,15 +2393,25 @@ import java.util.List;
 import java.util.function.Supplier;
 
 /**
- * {@code tenantId → RatePolicy}。策略来自配置快照（三级缓存），因此**每次调用都惰性读快照**，
- * 快照刷新后新策略立即生效（不需要重启，也不需要清缓存）。
+ * {@code (tenantId, apiKeyId) → RatePolicy}。策略来自配置快照（三级缓存），因此**每次调用都惰性
+ * 读快照**，快照刷新后新策略立即生效（不需要重启，也不需要清缓存）。
  *
- * <p><b>M3 只认租户级策略</b>（{@link RatePolicy#tenantLevel()}），理由见计划决策 7。
- * 同租户多条时取**列表里的最后一条** —— 组装快照的 admin 侧已经按 {@code id} 升序排好，
+ * <p><b>两个维度都生效</b>（决策 7，2026-09-26 依控制器 pre-flight 评审修订），顺序是确定性的：
+ * <ol>
+ *   <li>该 {@code (tenantId, apiKeyId)} 的 **key 级**策略存在 → **在这一维收口**，取最后一条；</li>
+ *   <li>否则该租户的**租户级**策略存在 → 取最后一条；</li>
+ *   <li>都没有 → 内置默认 `qps=10 / burst=20`。</li>
+ * </ol>
+ * {@code apiKeyId == null}（鉴权关闭 / 匿名桶 / 没有数值主键）时**直接走第二级**：不能因为拿不到
+ * key 主键就把租户级策略也丢掉。
+ *
+ * <p>同维度多条时取**列表里的最后一条** —— 组装快照的 admin 侧已经按 {@code id} 升序排好，
  * 因此「最后一条」就是「最后插入的那条」（决策 17）。
  *
- * <p>非正的 qps/burst 视为配置事故，回落到内置默认值：让一个 qps=0 的策略把租户彻底打死
- * 不是我们想要的运维后果（要走「停用」应该改 {@code status}）。
+ * <p>非正的 qps/burst 是配置事故，回落到内置默认值（让 qps=0 把租户彻底打死不是想要的运维后果；
+ * 要走「停用」应该改 {@code status}）。**这条按行校验规则保留原样，并且不跨维回落**：命中 key 级的
+ * 那一条如果值非法，结果是**内置默认**，而不是悄悄放宽成该租户的租户级额度 —— 一条写坏的 key 级
+ * 行不该变成「额度比不写还大」。
  */
 public class RateLimitResolver {
 
@@ -2347,16 +2421,24 @@ public class RateLimitResolver {
         this.snapshots = snapshots;
     }
 
-    public RatePolicy resolve(long tenantId) {
-        List<RatePolicy> policies = snapshots.get().tenantPolicies(tenantId);
-        if (policies.isEmpty()) {
-            return RatePolicy.defaultFor(tenantId);
+    public RatePolicy resolve(long tenantId, Long apiKeyId) {
+        ConfigSnapshot snapshot = snapshots.get();
+        if (apiKeyId != null) {
+            List<RatePolicy> keyLevel = snapshot.keyPolicies(tenantId, apiKeyId);
+            if (!keyLevel.isEmpty()) {
+                return usableOrDefault(keyLevel.get(keyLevel.size() - 1), tenantId);
+            }
         }
-        RatePolicy candidate = policies.get(policies.size() - 1);
-        if (candidate.qps() <= 0 || candidate.burst() <= 0) {
-            return RatePolicy.defaultFor(tenantId);
+        List<RatePolicy> tenantLevel = snapshot.tenantPolicies(tenantId);
+        if (!tenantLevel.isEmpty()) {
+            return usableOrDefault(tenantLevel.get(tenantLevel.size() - 1), tenantId);
         }
-        return candidate;
+        return RatePolicy.defaultFor(tenantId);
+    }
+
+    /** 非正的行按「配置事故」处理：回落到内置默认（调用方已决定不再看另一维）。 */
+    private static RatePolicy usableOrDefault(RatePolicy candidate, long tenantId) {
+        return candidate.qps() > 0 && candidate.burst() > 0 ? candidate : RatePolicy.defaultFor(tenantId);
     }
 }
 ```
@@ -2608,11 +2690,13 @@ public class RateLimiter {
     }
 
     /**
-     * @param tenantId 租户（维度之一）
-     * @param keyHash  密钥的 SHA-256（维度之二；鉴权过滤器写进 exchange 属性）
+     * @param tenantId 桶维度之一，也是策略的租户维度
+     * @param apiKeyId {@code api_key} 的**数值主键**（策略的 key 维度，决策 7/14）；没有则为 {@code null}
+     *                 （鉴权关闭 / 匿名桶），此时策略解析自动只走租户级
+     * @param keyHash  密钥的 SHA-256（桶维度之二；鉴权过滤器写进 exchange 属性）
      */
-    public RateLimitDecision acquire(long tenantId, String keyHash) {
-        RatePolicy policy = resolver.resolve(tenantId);
+    public RateLimitDecision acquire(long tenantId, Long apiKeyId, String keyHash) {
+        RatePolicy policy = resolver.resolve(tenantId, apiKeyId);
         String bucketKey = LuaTokenBucket.KEY_PREFIX + tenantId + ":" + keyHash;
 
         if (isDegradedNow()) {
@@ -2675,10 +2759,10 @@ git commit -m "feat: add the redis token bucket, policy resolution and the degra
 ```
 
 **验收标准**
-1. 策略只在租户维度生效；无策略或非正数时为 `qps=10 / burst=20`；多条租户级策略取**最后一条**（决策 7/17）。
+1. 策略按 `(tenantId, apiKeyId)` **两个维度**解析（决策 7 修订）：key 级命中即收口，否则回落该租户的租户级，都没有或值非法时为 `qps=10 / burst=20`；每一维内部多条取**最后一条**（决策 17）。桶 key 仍是 `{tenantId}:{sha256(secret)}`，**不因策略维度变化而改变**。
 2. `RedisRateLimiter` 的脚本调用是「1 个 key + 4 个字符串参数（now/qps/burst/ttl）」，返回必须是三元素；任何异常、`null` 或意外返回都变成 `null`（不抛异常、也不伪装成拒绝）。
-3. `RateLimiter.acquire` 在 Redis 不可用时**必定**返回本机桶的判定（`source == LOCAL`），绝不返回「拒绝」来表达故障；降级期间有 ERROR 日志、恢复有 INFO 日志。
-4. 降级是粘性的（1 秒），不会每个请求都重试一次 2 秒超时的 Redis 调用。
+3. `RateLimiter.acquire(tenantId, apiKeyId, keyHash)` 在 Redis 不可用时**必定**返回本机桶的判定（`source == LOCAL`），绝不返回「拒绝」来表达故障；降级期间有 ERROR 日志、恢复有 INFO 日志。
+4. 降级是粘性的（1 秒），不会每个请求都重试一次 2 秒超时的 Redis。
 
 **必须运行的命令与期望输出**
 
@@ -4908,10 +4992,11 @@ git commit -m "feat: decrypt channel keys locally and build per-channel upstream
 - Test: `aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/RateLimitFilterTest.java`
 
 **Interfaces:**
-- Consumes：Task 4（`RateLimiter.acquire(long, String)` / `RateLimitDecision`）、既有 `ApiKeyAuthFilter.ATTRIBUTE_KEY_VIEW`、`GatewayErrors.write(...)`。
+- Consumes：Task 4（`RateLimiter.acquire(long, Long, String)` / `RateLimitDecision`）、既有 `ApiKeyAuthFilter.ATTRIBUTE_KEY_VIEW` / `ATTRIBUTE_KEY_HASH`、`GatewayErrors.write(...)`。
 - Produces：
   - `ApiKeyAuthFilter.ATTRIBUTE_KEY_HASH = "aihub.apiKeyHash"`（鉴权成功时写入）。
   - `RateLimitFilter`：`@Component @Order(Ordered.HIGHEST_PRECEDENCE + 150)`；常量 `LIMIT_HEADER = "ratelimit-limit"` / `REMAINING_HEADER = "ratelimit-remaining"` / `RETRY_AFTER_HEADER = "retry-after"` / `RETRY_AFTER_MS_HEADER = "retry-after-ms"`；构造器 `RateLimitFilter(RateLimiter limiter, boolean enabled, MeterRegistry registry)`。
+  - **策略维度的取值**（决策 7 修订）：租户取 `ApiKeyView.tenantId()`，key 取 `ApiKeyView.apiKeyId()`（**数值主键**，决策 14）；没有 view 时 `tenantId=0` + `apiKeyId=null`（匿名桶只走租户级策略）。**桶 key 不变**：仍是 `(tenantId, sha256(secret))`。
   - **响应头**（放行与拒绝**都**加）：`RateLimit-Limit: "{limit}, {burst}"`、`RateLimit-Remaining`。拒绝时再加 `Retry-After`（秒，向上取整 ≥1）与 `Retry-After-MS`（毫秒）。
   - **429 错误体**：`GatewayErrors.write(response, HttpStatus.TOO_MANY_REQUESTS, "rate_limit_error", "rate_limit_exceeded", msg)`。
   - **降级语义**：`decision.source() == LOCAL` 时**照常执行判定**（拒绝仍是 429），打一条**每分钟最多一次**的 WARN，并让 `aihub.ratelimit.degraded` 计数 +1。**绝不因为 Redis 故障而放行全部请求**（那是「无限流」，会把上游打挂），也绝不因为 Redis 故障而拒绝全部请求。
@@ -4924,7 +5009,7 @@ git commit -m "feat: decrypt channel keys locally and build per-channel upstream
 | `allowsWhenUnderTheLimitAndAddsTheRateLimitHeaders` | 放行 + `RateLimit-Limit` / `RateLimit-Remaining` |
 | `rejectsWith429AndTheOpenAiBodyWhenOverTheLimit` | 429 + `error.code == "rate_limit_exceeded"` + `error.type == "rate_limit_error"` + `param: null` |
 | `rejectionCarriesRetryAfterInSecondsAndMilliseconds` | 250ms → `Retry-After: 1` 与 `Retry-After-MS: 250`，`RateLimit-Remaining: 0` |
-| `usesTheTenantAndTheKeyHashAsTheBucketDimension` | 传进 `RateLimiter` 的是 `tenantId` 与鉴权过滤器写下的哈希 |
+| `usesTheTenantAndTheKeyHashAsTheBucketDimension` | 传进 `RateLimiter` 的是 `tenantId` 与鉴权过滤器写下的哈希（**数值 `apiKeyId` 的转发由 Task 11 在同一条用例上补断言** —— 该分量 Task 11 才进 `ApiKeyView`） |
 | `skipsWhenDisabled` | `enabled=false` 时完全不管（`acquire` 一次都没被调用） |
 | `skipsNonV1Paths` | `/healthz` 不受限流影响 |
 | `usesTheAnonymousBucketWhenThereIsNoApiKeyView` | 鉴权关闭时用 `tenantId=0` 且**仍然限流** |
@@ -5196,6 +5281,7 @@ class RateLimitFilterTest {
         private final RateLimitDecision decision;
         int calls;
         long tenantId = -1L;
+        Long apiKeyId = -1L;
         String keyHash;
         RuntimeException failWith;
 
@@ -5205,9 +5291,10 @@ class RateLimitFilterTest {
         }
 
         @Override
-        public RateLimitDecision acquire(long tenantId, String keyHash) {
+        public RateLimitDecision acquire(long tenantId, Long apiKeyId, String keyHash) {
             calls++;
             this.tenantId = tenantId;
+            this.apiKeyId = apiKeyId;
             this.keyHash = keyHash;
             if (failWith != null) {
                 throw failWith;
@@ -5218,8 +5305,14 @@ class RateLimitFilterTest {
 }
 ```
 
-> **注意**：`new ApiKeyView("ak_demo", 7L, "demo", ApiKeyView.STATUS_ACTIVE, null)` 是 5 个分量
-> （决策 14 在 Task 11 落地）。**Task 11 会回来给这一行补第 6 个参数**（`null`）。
+> **注意 1**：`new ApiKeyView("ak_demo", 7L, "demo", ApiKeyView.STATUS_ACTIVE, null)` 是 5 个分量
+> （决策 14 在 Task 11 落地）。**Task 11 会回来给这一行补第 6 个参数**（数值主键 `42L`），并在
+> `usesTheTenantAndTheKeyHashAsTheBucketDimension` 里补一条 `assertThat(limiter.apiKeyId).isEqualTo(42L)`
+> 的断言 —— 那条断言就是「请求 → key 级策略」这一环的机器证据（决策 7 修订）。
+>
+> **注意 2**：本任务里 `RateLimitFilter` 传的 `apiKeyId` 是**显式占位 `null`**，不是「M3 不做 key 级」的
+> 决定 —— 数值主键此刻在共享契约里还不存在（Task 11 才加），而**策略解析本身在 Task 4 就已经
+> 是两级的、并有真用例钉住**。Task 11 收口后，key 级策略在端到端路径上即可生效。
 
 - [ ] **Step 3: 写 `RateLimitFilter`**
 
@@ -5249,8 +5342,9 @@ import reactor.core.publisher.Mono;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 数据面限流（设计文档 §8.1 ②）。守 {@code /v1/**}，**排在鉴权之后**：限流的维度是
- * {@code tenant + api_key}，两个值都来自 {@link ApiKeyAuthFilter} 的解析结果。
+ * 数据面限流（设计文档 §8.1 ②）。守 {@code /v1/**}，**排在鉴权之后**：限流的策略维度是
+ * {@code tenant + api_key}（决策 7 修订），桶维度是 {@code tenant + sha256(secret)}，
+ * 这些值都来自 {@link ApiKeyAuthFilter} 的解析结果。
  *
  * <p>超限回 **429 + OpenAI 形状错误体**（决策 13：数据面不套 admin 信封），并带上
  * IETF 风格的 {@code RateLimit-*} 与 {@code Retry-After}。
@@ -5307,10 +5401,16 @@ public class RateLimitFilter implements WebFilter {
         Object keyHash = exchange.getAttributes().get(ApiKeyAuthFilter.ATTRIBUTE_KEY_HASH);
         long tenantId = view == null ? 0L : view.tenantId();
         String hash = keyHash == null ? ANONYMOUS_KEY_HASH : keyHash.toString();
+        // 决策 7（修订）+ 决策 14：key 级策略的映射键是 api_key 的**数值主键**，它随
+        // ApiKeyView 一起下发。该分量在 Task 11 才进 ApiKeyView（本任务时 ApiKeyView 还是
+        // 5 个分量，写 view.apiKeyId() 会编译失败），因此这里先显式传 null，
+        // **Task 11 把这一行换成 `view == null ? null : view.apiKeyId()` 并在
+        // RateLimitFilterTest 上补断言** —— 与 Task 7 对 AdminClient.parse 的处置同一套手续。
+        Long apiKeyId = null;
 
         RateLimitDecision decision;
         try {
-            decision = limiter.acquire(tenantId, hash);
+            decision = limiter.acquire(tenantId, apiKeyId, hash);
         } catch (RuntimeException e) {
             log.error("限流器自身异常，本次请求放行（fail-open）: {}", e.toString());
             return chain.filter(exchange);
@@ -5392,7 +5492,7 @@ git commit -m "feat: enforce the tenant rate limit in a gateway filter with an o
 
 **验收标准**
 1. 超限 → 429 + OpenAI 错误体（`code=rate_limit_exceeded`、`type=rate_limit_error`、`param=null`），并带 `Retry-After`（秒，向上取整 ≥1）、`Retry-After-MS`（毫秒）、`RateLimit-Remaining: 0`；放行时也带 `RateLimit-Limit` / `RateLimit-Remaining`。
-2. 桶的维度是 `tenantId + sha256(secret)`；`ATTRIBUTE_KEY_HASH` 由 `ApiKeyAuthFilter` 在鉴权成功时写入（限流器拿不到 secret）。
+2. 桶的维度是 `tenantId + sha256(secret)`（策略维度是 `tenantId + apiKeyId`，两者**不要混**）；`ATTRIBUTE_KEY_HASH` 由 `ApiKeyAuthFilter` 在鉴权成功时写入（限流器拿不到 secret）。本任务传的 `apiKeyId` 是占位 `null`，**Task 11 收口**（见该任务 Step 1b）。
 3. `aihub.ratelimit.enabled=false` 完全不管；非 `/v1` 路径不管；没有 view（鉴权关闭）时用 `tenant=0` + `anonymous` 桶**继续限流**。
 4. Redis 降级（`source == LOCAL`）时**照常执行判定**（拒绝仍回 429），并有节流的 WARN + `aihub.ratelimit.degraded` 计数。
 5. 限流器自身抛异常时请求被放行（fail-open）。
@@ -5413,8 +5513,10 @@ git commit -m "feat: enforce the tenant rate limit in a gateway filter with an o
 - Modify: `aihub-gateway/src/main/java/com/aihub/gateway/relay/ChatRelayController.java`
 - Modify: `aihub-gateway/src/main/java/com/aihub/gateway/meter/RelayMetering.java`（`channelId` 填充）
 - Modify: `aihub-gateway/src/test/java/com/aihub/gateway/testsupport/FakeUpstream.java`（加两个故障注入方法）
+- Modify: `aihub-gateway/pom.xml`（**test 作用域**加 `org.wiremock:wiremock:3.9.1`，决策 11；生产依赖不动）
 - Test: `aihub-gateway/src/test/java/com/aihub/gateway/relay/RelayAttemptsTest.java`
 - Test: `aihub-gateway/src/test/java/com/aihub/gateway/relay/FailoverRelayTest.java`
+- Test: `aihub-gateway/src/test/java/com/aihub/gateway/relay/WireMockChannelFaultInjectionTest.java`（spec §10 / 里程碑验收）
 
 **Interfaces:**
 - Consumes：Task 2 / 5 / 6 / 7 / 8 的全部产出，以及既有 `RelayRequestBody` / `RelayMetering` / `MeteringPublisher` / `RequestIdFilter` / `GatewayErrors`。
@@ -5750,7 +5852,7 @@ mvn -B -pl aihub-gateway test -am "-Dtest=RelayAttemptsTest"
     }
 ```
 
-- [ ] **Step 5: 写 `FailoverRelayTest`**
+- [ ] **Step 5: 写 `FailoverRelayTest`（JDK 夹具）与 `WireMockChannelFaultInjectionTest`（WireMock 多渠道验收）**
 
 创建 `aihub-gateway/src/test/java/com/aihub/gateway/relay/FailoverRelayTest.java`：
 
@@ -6031,6 +6133,338 @@ class FailoverRelayTest {
 > 2. `SNAPSHOT_VERSION` 每次 `configSnapshot()` 调用都 +1：让 `ConfigClient` 的版本比对始终认为
 >    「拿到的是更新的快照」，避免本地缓存让不同用例互相影响（30 秒 TTL 内会复用同一个 Spring 上下文）。
 
+**本 Step 的第二部分：加 WireMock 依赖（test 作用域），并写 spec §10 要求的多渠道故障注入验收**
+
+设计文档 §10 的「上游契约」一行写的是「**WireMock 模拟多渠道**」，§12 的 M3 验收标准是「**WireMock 注入 429/超时，能自动切换**」。上面那个类用的是 M1/M2 的 JDK `HttpServer` 夹具（**保留**，它更适合细粒度、可证伪的用例），但它不是一个「多渠道」抽象。本步按决策 11 引入 WireMock，**只加在 `aihub-gateway` 的 test 作用域**：
+
+在 `aihub-gateway/pom.xml` 的 `<dependencies>` 里加（**必须显式锁版本：WireMock 不在 Spring Boot BOM 里**）：
+
+```xml
+        <!-- 仅测试作用域（决策 11）：spec §10「上游契约 = WireMock 模拟多渠道」与 §12 的 M3
+             验收标准「WireMock 注入 429/超时，能自动切换」的字面落点。
+             版本锁 3.9.1：本机 .m2repo 已实测可解析（经 aliyunmaven 镜像；直连 Maven Central 被阻断），
+             并在仓库外的探针工程里以 @WireMockTest 进程内跑通（无 Docker、无活 broker）。
+             生产依赖零新增；aihub-common 的 pom 不动。 -->
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock</artifactId>
+            <version>3.9.1</version>
+            <scope>test</scope>
+        </dependency>
+```
+
+然后创建 `aihub-gateway/src/test/java/com/aihub/gateway/relay/WireMockChannelFaultInjectionTest.java`。
+
+> **脚手架复用**：`masterKey()` / `cipherText()` / `post(body)` / `awaitEvent(response)` / `sha256Hex(...)` /
+> `FakeAdmin` / `@DynamicPropertySource` 与 `FailoverRelayTest` **逐字同款**（同一个假 admin、同一个
+> `RecordingMeteringTransport`、Redis 同样指向不存在的端口），本类只列出**不同的部分**；实施者照抄
+> `FailoverRelayTest` 的那几段即可。**不要**为它抽公共基类（会掩盖两个类各自要钉的东西）。
+
+```java
+package com.aihub.gateway.relay;
+
+import com.aihub.common.apikey.ApiKeyView;
+import com.aihub.common.config.ChannelDescriptor;
+import com.aihub.common.config.ConfigSnapshot;
+import com.aihub.common.config.ModelRouteDescriptor;
+import com.aihub.common.crypto.AesGcmChannelCipher;
+import com.aihub.common.crypto.ChannelKeyRegistry;
+import com.aihub.common.meter.MeteringEvent;
+import com.aihub.gateway.admin.AdminClient;
+import com.aihub.gateway.config.ConfigClient;
+import com.aihub.gateway.testsupport.FakeUpstream;
+import com.aihub.gateway.testsupport.MeteringTestConfig;
+import com.aihub.gateway.testsupport.RecordingMeteringTransport;
+import com.github.tomakehurst.wiremock.client.WireMock;
+import com.github.tomakehurst.wiremock.http.Fault;
+import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import reactor.core.publisher.Mono;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+// 统一用类名限定调用 WireMock（`WireMock.post(...)` / `WireMock.aResponse()` / `WireMock.getRequestedFor(...)`），
+// **不要**静态导入 `post`：本类照抄了 FailoverRelayTest 的 `post(String body)` 私有助手，
+// 同名的单静态导入会被类内成员遮蔽（JLS 6.4.1），`post(urlPathEqualTo(...))` 会编译失败。
+import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * **spec §10 / §12 的字面验收**：用 WireMock 的**命名 stub** 扮多条渠道（本类用了四条），
+ * 分别注入 429 / 挂住超时 / 中途断流，验证网关**自动切换**、以及「已开始回写就不再切换」。
+ *
+ * <p><b>进程内</b>（决策 11 已实测）：`@RegisterExtension static WireMockExtension` +
+ * `options().dynamicPort()` —— stub 起在**本测试 JVM**里，**不需要 Docker、不需要活 broker**，
+ * 因此 M1/M2 对网关测试的约束继续成立。**不要**换成 `docker run wiremock/...`。
+ *
+ * <p>它与 {@code FailoverRelayTest} 的分工：那个类用 JDK `HttpServer` 夹具钉**每一类状态码的
+ * 分支**（含 400 不切换、每渠道密钥注入等细粒度断言）；本类钉**多渠道矩阵**与 spec 的验收措辞
+ * ——「哪几条渠道被打了、按什么顺序、第几次请求命中谁」，用 WireMock 的请求日志（`verify`）说话。
+ */
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = {"aihub.auth.enabled=true", "aihub.metering.enabled=true",
+                "aihub.ratelimit.enabled=false", "aihub.internal.secret=test-internal-secret"})
+@Import({MeteringTestConfig.class, WireMockChannelFaultInjectionTest.FakeAdmin.class})
+class WireMockChannelFaultInjectionTest {
+
+    /** 四条「渠道」= 同一个进程内 WireMock 上的四个路径前缀（命名 stub 扮多渠道）。 */
+    private static final String CHAT = "/v1/chat/completions";
+    private static final String RATE_LIMITED = "/channel-rate-limited";
+    private static final String HANGING = "/channel-hanging";
+    private static final String BROKEN_STREAM = "/channel-broken-stream";
+    private static final String HEALTHY = "/channel-healthy";
+
+    private static final String SECRET = "wiremock-fault-secret";
+    private static final String VALID_HASH = sha256Hex(SECRET);
+    private static final String CHANNEL_KEY_PLAINTEXT = "sk-channel-plaintext-synthetic";
+    private static final AtomicInteger SNAPSHOT_VERSION = new AtomicInteger(1);
+
+    /** 渠道 id → 它在进程内 WireMock 上的路径前缀（四个 id 扮四条「命名渠道」）。 */
+    private static final Map<Long, String> PREFIX_OF = Map.of(
+            11L, RATE_LIMITED, 12L, HANGING, 13L, BROKEN_STREAM, 14L, HEALTHY);
+
+    /**
+     * **本用例声明快照里出现哪几条候选**（顺序 = priority 升序，因此「下一个候选是谁」是确定的）。
+     * 逐个用例显式声明，而不是把四条都放进去 —— 否则「没被 stub 的那条恰好返回 404」这种外部巧合
+     * 会参与判定（404 是 4xx：`RelayAttempts` 规定**不切换**，会把用例变成假绿/假红）。
+     */
+    private static final AtomicReference<List<Long>> CANDIDATES =
+            new AtomicReference<>(List.of(11L, 12L, 13L, 14L));
+
+    @RegisterExtension
+    static final WireMockExtension UPSTREAM =
+            WireMockExtension.newInstance().options(options().dynamicPort()).build();
+
+    @LocalServerPort
+    private int gatewayPort;
+
+    @Autowired
+    private RecordingMeteringTransport recorder;
+
+    @Autowired
+    private ConfigClient configClient;
+
+    @BeforeEach
+    void reset() {
+        recorder.reset();
+        UPSTREAM.resetAll();
+        CANDIDATES.set(List.of(11L, 12L, 13L, 14L));
+        // **必须**清掉配置的一级缓存：同一个类的用例之间 Spring 上下文是复用的，而每个用例的快照
+        // 内容不同（CANDIDATES），本地 TTL 30 秒会让第二个用例拿到上一个用例的快照而「莫名其妙地绿/红」。
+        // FailoverRelayTest 不需要这一步（它的快照在所有用例里都一样）。
+        configClient.invalidate();
+    }
+
+    @DynamicPropertySource
+    static void properties(DynamicPropertyRegistry registry) {
+        // 遗留单渠道兜底指向死端口：本类要验的是**快照里的多候选渠道**，不许静默走兜底。
+        registry.add("aihub.upstream.base-url", () -> "http://127.0.0.1:1");
+        registry.add("aihub.upstream.default-model", () -> "wiremock-model");
+        registry.add("aihub.channel.master-key", WireMockChannelFaultInjectionTest::masterKey);
+        registry.add("spring.data.redis.port", () -> "1");
+    }
+
+    @TestConfiguration
+    static class FakeAdmin {
+        @Bean
+        @Primary
+        AdminClient adminClient() {
+            return new AdminClient() {
+                @Override
+                public Mono<Optional<ApiKeyView>> resolve(String keyHash) {
+                    return keyHash.equals(VALID_HASH)
+                            ? Mono.just(Optional.of(new ApiKeyView("ak_wiremock", 7L, "demo",
+                                    ApiKeyView.STATUS_ACTIVE, null)))
+                            : Mono.just(Optional.empty());
+                }
+
+                @Override
+                public Mono<Optional<ConfigSnapshot>> configSnapshot() {
+                    return Mono.just(Optional.of(snapshot()));
+                }
+            };
+        }
+    }
+
+    /**
+     * 只把**本用例声明的那几条**候选放进快照（`CANDIDATES` 的顺序就是 priority 升序）。
+     * 每条渠道的 base-url 都指向同一个进程内 WireMock，只用路径前缀区分 —— 这就是
+     * §10 说的「WireMock 模拟多渠道」：一个 stub 服务器上挂多个命名 stub。
+     */
+    private static ConfigSnapshot snapshot() {
+        String base = UPSTREAM.baseUrl();
+        List<Long> ids = CANDIDATES.get();
+        List<ChannelDescriptor> channels = new ArrayList<>(ids.size());
+        List<ModelRouteDescriptor> routes = new ArrayList<>(ids.size());
+        for (int i = 0; i < ids.size(); i++) {
+            long id = ids.get(i);
+            String prefix = PREFIX_OF.get(id);
+            channels.add(new ChannelDescriptor(id, prefix.substring(1), base + prefix, cipherText(), 1, 1_000,
+                    ChannelDescriptor.STATUS_ACTIVE, 100, i));
+            routes.add(new ModelRouteDescriptor("wiremock-model", id, 100, i, "ACTIVE"));
+        }
+        return new ConfigSnapshot(SNAPSHOT_VERSION.incrementAndGet(), System.currentTimeMillis(),
+                channels, routes, List.of(), "wiremock-model");
+    }
+
+    /** 429 / 超时 / 中途断流三种注入，再加一条健康渠道（用类名限定 WireMock，理由见上面的 import 注释）。 */
+    private static void stubRateLimited() {
+        UPSTREAM.stubFor(WireMock.post(WireMock.urlPathEqualTo(RATE_LIMITED + CHAT))
+                .willReturn(WireMock.aResponse()
+                        .withStatus(429).withHeader("Content-Type", "application/json")
+                        .withHeader("Retry-After", "1")
+                        .withBody("{\"error\":{\"message\":\"rate limited by stub\"}}")));
+    }
+
+    private static void stubHanging(long delayMillis) {
+        UPSTREAM.stubFor(WireMock.post(WireMock.urlPathEqualTo(HANGING + CHAT))
+                .willReturn(WireMock.aResponse()
+                        .withStatus(200).withHeader("Content-Type", "application/json")
+                        .withFixedDelay((int) delayMillis).withBody(FakeUpstream.completionJson())));
+    }
+
+    private static void stubBrokenStream() {
+        // 状态行与响应头先出去、body 中途炸掉：这正是「流已经开始回写」的形态。
+        UPSTREAM.stubFor(WireMock.post(WireMock.urlPathEqualTo(BROKEN_STREAM + CHAT))
+                .willReturn(WireMock.aResponse()
+                        .withStatus(200).withHeader("Content-Type", "text/event-stream")
+                        .withFault(Fault.MALFORMED_RESPONSE_CHUNK)));
+    }
+
+    private static void stubHealthy() {
+        UPSTREAM.stubFor(WireMock.post(WireMock.urlPathEqualTo(HEALTHY + CHAT))
+                .willReturn(WireMock.aResponse()
+                        .withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(FakeUpstream.completionJson())));
+    }
+
+    /** WireMock 的**请求日志**：spec 那句「能自动切换」的可证伪形式 —— 哪条渠道被打了几次。 */
+    private static int requestsTo(String prefix) {
+        return UPSTREAM.findAll(WireMock.getRequestedFor(WireMock.urlPathEqualTo(prefix + CHAT))).size();
+    }
+
+    /** ① spec 的原话「注入 429 → 能自动切换」：第一条候选 429，客户端拿到健康渠道的 200。 */
+    @Test
+    void wireMock429OnTheFirstChannelSwitchesToTheNextCandidate() throws Exception {
+        CANDIDATES.set(List.of(11L, 14L));   // 候选顺序：rate-limited → healthy
+        stubRateLimited();
+        stubHealthy();
+
+        var response = post("{\"model\":\"wiremock-model\",\"stream\":false}");
+
+        assertThat(response.statusCode()).as("429 必须被换掉，而不是透传给客户端").isEqualTo(200);
+        assertThat(response.body()).contains("chatcmpl-1");
+        assertThat(requestsTo(RATE_LIMITED)).as("返回 429 的那条真的被打过一次").isEqualTo(1);
+        assertThat(requestsTo(HEALTHY)).as("切换后的那条被调用").isEqualTo(1);
+    }
+
+    /** ② spec 的原话「注入超时 → 能自动切换」：第一条候选挂住超过 timeoutMs，切到健康渠道。 */
+    @Test
+    void wireMockTimeoutOnTheFirstChannelSwitchesToTheNextCandidate() throws Exception {
+        CANDIDATES.set(List.of(12L, 14L));   // 候选顺序：hanging → healthy
+        stubHanging(3_000L);                 // 远大于渠道 timeoutMs=1000
+        stubHealthy();
+
+        var response = post("{\"model\":\"wiremock-model\",\"stream\":false}");
+
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body()).contains("chatcmpl-1");
+        assertThat(requestsTo(HANGING)).as("挂住的渠道被尝试过（然后超时）").isEqualTo(1);
+        assertThat(requestsTo(HEALTHY)).as("超时后切到了健康渠道").isEqualTo(1);
+    }
+
+    /**
+     * ③ **中途断流不切换**（§9 的「仅在未输出任何 token 时允许切换」）：换渠道的第一步是把
+     * 响应头与 body 原样写回客户端，一旦开始写就不能再换 —— 否则会把半截响应拼成脏数据。
+     * 这里用请求日志证明「健康渠道一次都没被打」。
+     */
+    @Test
+    void wireMockMidStreamBreakIsNotSwitchedBecauseTheStreamAlreadyStarted() throws Exception {
+        CANDIDATES.set(List.of(13L, 14L));   // 候选顺序：broken-stream → healthy
+        stubBrokenStream();
+        stubHealthy();
+
+        var response = post("{\"model\":\"wiremock-model\",\"stream\":true}");
+
+        assertThat(response.body()).as("不得变成另一条渠道的完整响应").doesNotContain("chatcmpl-1");
+        assertThat(requestsTo(BROKEN_STREAM)).isEqualTo(1);
+        assertThat(requestsTo(HEALTHY)).as("已经开始回写 → 不得再换渠道").isZero();
+    }
+
+    /** ④ 打到了哪一条、以及计量记的是**实际服务**的那条（WireMock 请求日志 + 计量事件双向对账）。 */
+    @Test
+    void wireMockRequestJournalAndMeteringAgreeOnTheChannelThatServed() throws Exception {
+        CANDIDATES.set(List.of(11L, 14L));
+        stubRateLimited();
+        stubHealthy();
+
+        var response = post("{\"model\":\"wiremock-model\",\"stream\":false}");
+        MeteringEvent event = awaitEvent(response);
+
+        assertThat(requestsTo(RATE_LIMITED)).isEqualTo(1);
+        assertThat(requestsTo(HEALTHY)).isEqualTo(1);
+        assertThat(event).isNotNull();
+        assertThat(event.channelId()).as("计量记的是实际服务的那条渠道（14），不是首选的那条（11）")
+                .isEqualTo(14L);
+    }
+
+    /** ⑤ 所有候选都挂 → 客户端拿到**最后一个失败的本来面目**（原样状态码），不伪造、不吞掉。 */
+    @Test
+    void everyWireMockChannelFailingYieldsTheLastRealFailure() throws Exception {
+        CANDIDATES.set(List.of(11L, 12L, 13L, 14L));
+        stubRateLimited();
+        UPSTREAM.stubFor(WireMock.post(WireMock.urlPathEqualTo(HANGING + CHAT))
+                .willReturn(WireMock.aResponse().withStatus(503)));
+        UPSTREAM.stubFor(WireMock.post(WireMock.urlPathEqualTo(BROKEN_STREAM + CHAT))
+                .willReturn(WireMock.aResponse().withStatus(502)));
+        UPSTREAM.stubFor(WireMock.post(WireMock.urlPathEqualTo(HEALTHY + CHAT))
+                .willReturn(WireMock.aResponse()
+                        .withStatus(504).withHeader("Content-Type", "application/json")
+                        .withBody("{\"error\":{\"message\":\"last one down\"}}")));
+
+        var response = post("{\"model\":\"wiremock-model\",\"stream\":false}");
+
+        assertThat(response.statusCode()).as("最后一个候选的 504 原样透传").isEqualTo(504);
+        assertThat(response.body()).contains("last one down");
+        assertThat(requestsTo(RATE_LIMITED)).isEqualTo(1);
+        assertThat(requestsTo(HANGING)).isEqualTo(1);
+        assertThat(requestsTo(BROKEN_STREAM)).isEqualTo(1);
+        assertThat(requestsTo(HEALTHY)).isEqualTo(1);
+    }
+
+    // --- 与 FailoverRelayTest 逐字同款的脚手架（照抄那个类） -----------------
+    // masterKey() / cipherText() / post(String) / awaitEvent(HttpResponse) / sha256Hex(String)
+}
+```
+
+> **注意 1**：本类的 `ApiKeyView` 也是 5 个分量，**Task 11 会回来补第 6 个参数**（与
+> `FailoverRelayTest` 同一批改动）。
+>
+> **注意 2（启动顺序陷阱，实测过同类问题）**：`@RegisterExtension static WireMockExtension` 的
+> `beforeAll` **未必**早于 `SpringExtension` 的上下文加载，因此 `@DynamicPropertySource` 里
+> **不要**读 `UPSTREAM.baseUrl()` —— 那时它可能还没 start（会抛 `IllegalStateException`，而且表现为
+> 「admin 取快照失败 → 走遗留兜底」的假故障）。本类的做法：`aihub.upstream.base-url` 指向死端口，
+> **真正的渠道 base-url 在 `FakeAdmin` 响应快照时（请求期）才从 `UPSTREAM.baseUrl()` 取**。
+>
+> **注意 3**：WireMock 的 stub 与 `CANDIDATES` 都是**每个用例**重置的（`@BeforeEach`），因此用例之间
+> 不会互相污染；配置的一级缓存也必须用 `configClient.invalidate()` 清掉（见 `reset()` 里的注释）。
+
 - [ ] **Step 6: 运行 `FailoverRelayTest`（这一步会红，因为控制器还没改）**
 
 ```powershell
@@ -6248,13 +6682,13 @@ import java.util.Optional;
 > 若实施者觉得构造该异常太绕，可以（**允许**）改成一个自定义异常并在控制器顶层加一条 `onErrorResume`，
 > 但**不要**改成返回 `Mono.empty()`（那会让客户端拿到一个没有状态码的空响应）。
 
-- [ ] **Step 8: 运行 `FailoverRelayTest`，确认全绿**
+- [ ] **Step 8: 运行 `FailoverRelayTest` 与 `WireMockChannelFaultInjectionTest`，确认全绿**
 
 ```powershell
-mvn -B -pl aihub-gateway test -am "-Dtest=FailoverRelayTest"
+mvn -B -pl aihub-gateway test -am "-Dtest=FailoverRelayTest,WireMockChannelFaultInjectionTest"
 ```
 
-预期：`Tests run: 7, Failures: 0, Errors: 0` + `BUILD SUCCESS`。
+预期：`Tests run: 12, Failures: 0, Errors: 0` + `BUILD SUCCESS`（JDK 夹具 7 + WireMock 验收 5）。
 常见红法与诊断：
 - `upstream429SwitchesImmediatelyAndMarksTheChannel` 红且 `standby.lastRequest()` 为 null → 429 没进 `shouldFailoverBeforeCommit` 分支；
 - `upstreamTimeoutSwitchesToTheNextCandidate` 红 → 检查 `enqueueStall` 的 holdMillis（8000）是否大于 `channel.timeoutMs`（5000）；
@@ -6267,7 +6701,7 @@ mvn -B -pl aihub-gateway test -am "-Dtest=FailoverRelayTest"
 mvn -B -pl aihub-gateway test
 ```
 
-预期：`Tests run: 237, Failures: 0, Errors: 0`（Task 9 的 223 + 7 + 7）。
+预期：`Tests run: 242, Failures: 0, Errors: 0`（Task 9 的 223 + JDK 夹具 7 + 7 + WireMock 验收 5）。
 
 **重点确认这几条仍然绿**（它们就是铁律的防线）：
 - `ChatRelayControllerTest` 的「请求体逐字节不变」与 SSE / JSON 透传用例；
@@ -6281,7 +6715,7 @@ mvn -B -pl aihub-gateway test
 - [ ] **Step 10: 提交**
 
 ```powershell
-git add aihub-gateway/src/main/java/com/aihub/gateway/relay/ChatRelayController.java aihub-gateway/src/main/java/com/aihub/gateway/relay/RelayAttempts.java aihub-gateway/src/main/java/com/aihub/gateway/meter/RelayMetering.java aihub-gateway/src/test/java/com/aihub/gateway/relay/RelayAttemptsTest.java aihub-gateway/src/test/java/com/aihub/gateway/relay/FailoverRelayTest.java aihub-gateway/src/test/java/com/aihub/gateway/testsupport/FakeUpstream.java
+git add aihub-gateway/src/main/java/com/aihub/gateway/relay/ChatRelayController.java aihub-gateway/src/main/java/com/aihub/gateway/relay/RelayAttempts.java aihub-gateway/src/main/java/com/aihub/gateway/meter/RelayMetering.java aihub-gateway/src/test/java/com/aihub/gateway/relay/RelayAttemptsTest.java aihub-gateway/src/test/java/com/aihub/gateway/relay/FailoverRelayTest.java aihub-gateway/src/test/java/com/aihub/gateway/relay/WireMockChannelFaultInjectionTest.java aihub-gateway/src/test/java/com/aihub/gateway/testsupport/FakeUpstream.java aihub-gateway/pom.xml
 git commit -m "feat: fail over across channel candidates with a pre-commit switch window"
 ```
 
@@ -6293,14 +6727,15 @@ git commit -m "feat: fail over across channel candidates with a pre-commit switc
 5. 每个渠道的上游请求带的是**该渠道解密出来的密钥**（覆盖客户端带来的 `Authorization`）。
 6. 计量事件的 `channel_id` = **实际服务**的那个渠道（不是首选的那个，也不是 NULL）。
 7. M1 的字节透传用例全部保持绿色。
+8. **spec §10 / §12 的里程碑验收由 `WireMockChannelFaultInjectionTest` 承担**：WireMock 的命名 stub 扮多条渠道，分别注入 429 / 挂住超时 / 中途断流，网关自动切换；中途断流（已开始回写）时**不**切换，且请求日志能证明「哪几条渠道被打过、各打了几次」。该依赖**只**是 `aihub-gateway` 的 test 作用域，且**进程内**运行（不引入 Docker / 活 broker 依赖）。
 
 **必须运行的命令与期望输出**
 
 | 命令 | 期望 |
 |---|---|
 | `mvn -B -pl aihub-gateway test -am "-Dtest=RelayAttemptsTest"` | `Tests run: 7, Failures: 0, Errors: 0` |
-| `mvn -B -pl aihub-gateway test -am "-Dtest=FailoverRelayTest"` | `Tests run: 7, Failures: 0, Errors: 0` |
-| `mvn -B -pl aihub-gateway test` | `Tests run: 237, Failures: 0, Errors: 0` + `BUILD SUCCESS` |
+| `mvn -B -pl aihub-gateway test -am "-Dtest=FailoverRelayTest,WireMockChannelFaultInjectionTest"` | `Tests run: 12, Failures: 0, Errors: 0` |
+| `mvn -B -pl aihub-gateway test` | `Tests run: 242, Failures: 0, Errors: 0` + `BUILD SUCCESS` |
 
 ---
 
@@ -6313,6 +6748,7 @@ git commit -m "feat: fail over across channel candidates with a pre-commit switc
 - Modify: `aihub-admin/aihub-service/src/main/java/com/aihub/service/apikey/ApiKeyService.java`
 - Modify: `aihub-gateway/src/main/java/com/aihub/gateway/meter/RelayMetering.java`（model 截断 + `apiKeyId`）
 - Modify: `aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java`（`parse` 补 `apiKeyId`）
+- Modify: `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/RateLimitFilter.java`（Step 1b：把 Task 9 留的 `apiKeyId` 占位换成 `view.apiKeyId()`，收口决策 7 修订）
 - Modify: `aihub-gateway/src/main/java/com/aihub/gateway/relay/ModelsController.java`（快照 ∪ 遗留默认）
 - Modify: `aihub-gateway/src/test/java/com/aihub/gateway/relay/ModelsControllerTest.java`
 - Modify: `aihub-gateway/src/test/java/com/aihub/gateway/relay/RelayMeteringFlowTest.java`
@@ -6367,6 +6803,42 @@ mvn -B -q test-compile -DskipTests
 
 > **不要**用「加一个 5 参数的便捷构造器」来减少改动：那会让「谁填了 apiKeyId」变得不可追踪，
 > 而这条决策的全部价值就是让它**必须**被显式填一次。
+
+- [ ] **Step 1b: 收口限流的 key 维度（决策 7 修订的最后一环）**
+
+数值主键进 `ApiKeyView` 之后，Task 9 在 `RateLimitFilter` 里留的那一行占位就可以换成真值了。
+
+在 `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/RateLimitFilter.java` 里：
+
+```java
+        // 决策 7（修订）+ 决策 14：key 级策略的映射键是 api_key 的**数值主键**，它随 ApiKeyView 下发。
+        Long apiKeyId = view == null ? null : view.apiKeyId();
+```
+
+并在 `RateLimitFilterTest` 里给 view 补上数值主键（`VIEW` 的第 6 个参数用 `42L`），然后在
+**既有**用例 `usesTheTenantAndTheKeyHashAsTheBucketDimension` 末尾补一条断言（**不新增用例**，
+总数不变）：
+
+```java
+        assertThat(limiter.tenantId).isEqualTo(7L);
+        assertThat(limiter.keyHash).isEqualTo("hash-of-secret");
+        // 决策 7（修订）：策略的 key 维度必须真的从认证视图里传下去 —— 这正是原文
+        // 「请求无法映射到 api_key_id」那句不成立的机器证据。
+        assertThat(limiter.apiKeyId).isEqualTo(42L);
+```
+
+同时把 `usesTheAnonymousBucketWhenThereIsNoApiKeyView` 补一条 `assertThat(limiter.apiKeyId).isNull();`
+（没有 view 时没有数值主键 → 策略解析只走租户级，那是决策 7 的第二级，不是「不限流」）。
+
+```powershell
+mvn -B -pl aihub-gateway test -am "-Dtest=RateLimitFilterTest,RateLimitResolverTest"
+```
+
+预期：`Tests run: 18, Failures: 0, Errors: 0` + `BUILD SUCCESS`。
+
+> **为什么这一步在 Task 11 而不在 Task 9**：`ApiKeyView` 的数值分量是决策 14 的产物、在本任务 Step 1
+> 才存在；在 Task 9 写 `view.apiKeyId()` 会编译失败。**策略解析本身（Task 4）早已是两级的**，
+> 本步只是把请求侧的最后一个字段接上 —— 与 Task 7 对 `AdminClient.parse` 的处置同一套手续。
 
 - [ ] **Step 2: 改 `ApiKeyCacheCodec`（5 段 → 6 段）**
 
@@ -6655,7 +7127,7 @@ mvn -B -pl aihub-admin/aihub-common test
 mvn -B -pl aihub-gateway test
 ```
 
-预期：`aihub-common 47`（Task 3 的 46 + 本任务 2 - 1 条被改写的既有用例的净增）；`aihub-gateway 241`（Task 10 的 237 + 2 条新增 e2e + 1 条白名单用例 + ModelsController 净增 1）。
+预期：`aihub-common 47`（Task 3 的 46 + 本任务 2 - 1 条被改写的既有用例的净增）；`aihub-gateway 246`（Task 10 的 242 + 2 条新增 e2e + 1 条白名单用例 + ModelsController 净增 1）。
 
 - [ ] **Step 11: 跑 admin 全量（确认 `ApiKeyView` 的改动没打破 admin 的 47 项）**
 
@@ -6668,7 +7140,7 @@ $env:DOCKER_HOST='tcp://127.0.0.1:2375'; mvn -B -pl aihub-admin/aihub-web -am te
 - [ ] **Step 12: 提交**
 
 ```powershell
-git add aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey aihub-admin/aihub-common/src/test/java/com/aihub/common/apikey aihub-admin/aihub-service/src/main/java/com/aihub/service/apikey/ApiKeyService.java aihub-gateway/src/main/java/com/aihub/gateway/meter/RelayMetering.java aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java aihub-gateway/src/main/java/com/aihub/gateway/relay/ModelsController.java aihub-gateway/src/test/java/com/aihub/gateway/relay aihub-gateway/src/test/java/com/aihub/gateway/auth/ApiKeyFilterContractTest.java aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/RateLimitFilterTest.java
+git add aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey aihub-admin/aihub-common/src/test/java/com/aihub/common/apikey aihub-admin/aihub-service/src/main/java/com/aihub/service/apikey/ApiKeyService.java aihub-gateway/src/main/java/com/aihub/gateway/meter/RelayMetering.java aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java aihub-gateway/src/main/java/com/aihub/gateway/relay/ModelsController.java aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/RateLimitFilter.java aihub-gateway/src/test/java/com/aihub/gateway/relay aihub-gateway/src/test/java/com/aihub/gateway/auth/ApiKeyFilterContractTest.java aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/RateLimitFilterTest.java
 git commit -m "feat: carry the numeric api key id into metering and relay the rate limit header family"
 ```
 
@@ -6679,13 +7151,14 @@ git commit -m "feat: carry the numeric api key id into metering and relay the ra
 4. 超长 `model`：事件里被截到 128；上游收到的是**原始**长模型名。
 5. 透传白名单新增 `retry-after-ms` 与 `ratelimit-limit/remaining/reset`，仍然是**精确名**。
 6. `GET /v1/models` = 快照模型名 ∪ 遗留默认模型；无快照时仍然返回遗留默认模型。
+7. **决策 7 修订收口**：`RateLimitFilter` 把认证视图里的数值 `apiKeyId` 传给 `RateLimiter`（用例断言 `42L`），因此 `rate_limit_policy` 的 **key 级**策略在端到端路径上生效；没有 view（鉴权关闭）时为 `null`，策略解析走租户级。
 
 **必须运行的命令与期望输出**
 
 | 命令 | 期望 |
 |---|---|
 | `mvn -B -pl aihub-admin/aihub-common test` | `Tests run: 47, Failures: 0, Errors: 0` |
-| `mvn -B -pl aihub-gateway test` | `Tests run: 241, Failures: 0, Errors: 0` |
+| `mvn -B -pl aihub-gateway test` | `Tests run: 246, Failures: 0, Errors: 0` |
 | `$env:DOCKER_HOST='tcp://127.0.0.1:2375'; mvn -B -pl aihub-admin/aihub-web -am test` | `Tests run: 47, Failures: 0, Errors: 0` |
 
 ---
@@ -6932,7 +7405,9 @@ import com.baomidou.mybatisplus.annotation.TableName;
 
 /**
  * 对应 Flyway V1 的 {@code rate_limit_policy} 表。
- * <p>{@code apiKeyId} 可空：为空表示**租户级**策略（M3 唯一生效的那种，决策 7）；非空表示 key 级
+ * <p>{@code apiKeyId} 可空：为空表示**租户级**策略（该租户所有 key 的兜底）；非空表示 **key 级**策略
+ * （只作用于该 {@code api_key.id}）。**两个维度在 M3 都生效**（决策 7，2026-09-26 依控制器 pre-flight
+ * 评审修订）：网关侧先找 key 级、再回落租户级。字段与 V1 的列一一对应，两侧不需要各自定义 DTO。
  * （M3 组装进快照但不生效，等 M4 把数值主键接进请求上下文）。
  */
 @TableName("rate_limit_policy")
@@ -7248,17 +7723,17 @@ git commit -m "feat: add the channel, route and rate limit dao plus the admin si
 - Produces：
   - `ConfigSnapshotService`：`ConfigSnapshot snapshot()`；`long currentVersion()`；`@Transactional(readOnly = true)`。
     - **version（决策 5）**：`max(channel.updated_at, model_route.updated_at, rate_limit_policy.updated_at)` 的 epoch 毫秒；三张表都空时 `0`（用 `select max(updated_at)` 而不是「读全表再在内存里 max」）。
-    - **限流策略排序（决策 17）**：`order by tenant_id asc, api_key_id is null desc, id asc` —— 于是 gateway 侧「取列表里最后一条租户级策略」等价于「取 id 最大的那条租户级策略」。同租户多条租户级 ACTIVE 策略时打**一次** WARN。
+    - **限流策略排序（决策 17）**：`order by tenant_id asc, api_key_id is null desc, id asc` —— 于是 gateway 侧「**在每一维内部**取列表里最后一条」等价于「取该维 `id` 最大的那条」（租户级取最后一条租户级行，key 级取该 `apiKeyId` 的最后一行；决策 7 修订后**两维都参与判定**）。同租户多条**同维度** ACTIVE 策略时打**一次** WARN（租户级与 key 级各判各的）。
     - 渠道与路由：**全部行都组装**（含 `DISABLED`），由 gateway 侧过滤。
     - `defaultModel`：取自 `@Value("${aihub.upstream.default-model:}")`（与 M1/M2 同一个来源）。
-  - `DemoChannelSeeder`：`@Component @ConditionalOnProperty(name = "aihub.demo-seed.enabled", havingValue = "true")`，`implements ApplicationRunner`；幂等（按名字判断存在则跳过）；写 2 条渠道 + 2 条路由 + 1 条租户级策略；**未配主密钥时启动失败并给出配置指引**。
+  - `DemoChannelSeeder`：`@Component @ConditionalOnProperty(name = "aihub.demo-seed.enabled", havingValue = "true")`，`implements ApplicationRunner`；幂等（按名字判断存在则跳过）；写 2 条渠道 + 2 条路由 + **1 条租户级策略 + 1 条 key 级策略**（决策 7 修订后 key 维必须能被端到端演示：key 级是覆盖、租户级是兜底）；**未配主密钥时启动失败并给出配置指引**。
   - `InternalConfigController`：`@RestController @RequestMapping("/internal/config")`，`@GetMapping("/snapshot")` 返回 `ApiResponse<ConfigSnapshot>`（**直接返回共享类型**，与 `InternalKeyController` 返回 `ApiKeyView` 同款）。
 
 **测试用例清单**（`ConfigSnapshotServiceTest` 6 + `InternalConfigSnapshotIntegrationTest` 5 = 11 条，都需要 Testcontainers）：
 
 | 类 | 用例 | 钉住什么 |
 |---|---|---|
-| `ConfigSnapshotServiceTest`（6） | `emptyDatabaseYieldsAnEmptySnapshotWithVersionZero` / `versionIsTheMaxUpdatedAtAcrossAllThreeTables` / `channelCipherAndKeyVersionAreExposedVerbatim` / `disabledRowsAreStillPresentInTheSnapshot` / `tenantLevelPolicyComesBeforeKeyLevelForTheSameTenant` / `multipleTenantLevelPoliciesWarnButStillPickTheLast` | 组装、版本单调、决策 17 |
+| `ConfigSnapshotServiceTest`（6） | `emptyDatabaseYieldsAnEmptySnapshotWithVersionZero` / `versionIsTheMaxUpdatedAtAcrossAllThreeTables` / `channelCipherAndKeyVersionAreExposedVerbatim` / `disabledRowsAreStillPresentInTheSnapshot` / `tenantLevelPoliciesComeBeforeKeyLevelOnesAndBothAreQueryable` / `multipleTenantLevelPoliciesWarnButStillPickTheLast` | 组装、版本单调、决策 17（**两个维度都可取**） |
 | `InternalConfigSnapshotIntegrationTest`（5） | `signedRequestReturnsTheSnapshotInTheAdminEnvelope` / `unsignedRequestIsUnauthorized` / `wrongSignatureIsUnauthorized` / `responseCarriesTheSnapshotSections` / `snapshotEndpointIsNotReachableWithAForeignSecret` | 内部接口契约（复用 M1 Task 3 建立的签名手法） |
 
 - [ ] **Step 1: 写 `ConfigSnapshotService` 与它的测试**
@@ -7298,7 +7773,10 @@ import java.util.List;
  * {@code ON UPDATE CURRENT_TIMESTAMP(3)}，因此任何一次配置写入都会推进它。空库返回 {@code 0}。
  *
  * <p><b>限流策略的排序是契约的一部分</b>（决策 17）：同一租户的租户级策略必须按 {@code id} 升序、
- * 且排在 key 级策略之前 —— 这样 gateway 侧「取最后一条租户级策略」就等价于「取 id 最大的那条」。
+ * 且排在 key 级策略之前 —— 这样 gateway 侧「在每一维内部取最后一条」（租户级取最后一条租户级行、
+ * key 级取该 {@code apiKeyId} 的最后一行）就等价于「取该维 {@code id} 最大的那条」。
+ * **两维都参与判定**（决策 7，2026-09-26 依控制器 pre-flight 评审修订），因此本查询把
+ * {@code api_key_id} 非空的行也一样组装进快照。
  *
  * <p>所有行（含 {@code DISABLED}）都会被组装：过滤是 gateway 的事（这样「停用一条渠道」不需要
  * 改变快照的语义，运维也能从快照里看到全貌）。**本查询不返回任何明文密钥**，只有密文。
@@ -7435,7 +7913,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 快照组装：真实 MySQL（Testcontainers）。**必须真起容器**，因为它要验证的是
- * 「{@code max(updated_at)} 真的随写入推进」与「租户级策略真的排在前面」这两件 SQL 层面的事实。
+ * 「{@code max(updated_at)} 真的随写入推进」与「两维策略各自都能取到、且租户级排在前面」这两件
+ * SQL 层面的事实。
  */
 class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
 
@@ -7499,16 +7978,26 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
     }
 
     @Test
-    void tenantLevelPolicyComesBeforeKeyLevelForTheSameTenant() {
+    void tenantLevelPoliciesComeBeforeKeyLevelOnesAndBothAreQueryable() {
         Long tenantId = insertTenant("acme");
         insertPolicy(tenantId, 42L, 100, 200);
         insertPolicy(tenantId, null, 20, 40);
 
-        List<RatePolicy> policies = service.snapshot().tenantPolicies(tenantId);
+        ConfigSnapshot snapshot = service.snapshot();
+        List<RatePolicy> tenantLevel = snapshot.tenantPolicies(tenantId);
 
-        assertThat(policies).as("租户级必须能取到，且是列表里的最后一条").hasSize(1);
-        assertThat(policies.get(policies.size() - 1).qps()).isEqualTo(20);
-        assertThat(policies.get(policies.size() - 1).tenantLevel()).isTrue();
+        assertThat(tenantLevel).as("租户级必须能取到，且是列表里的最后一条").hasSize(1);
+        assertThat(tenantLevel.get(tenantLevel.size() - 1).qps()).isEqualTo(20);
+        assertThat(tenantLevel.get(tenantLevel.size() - 1).tenantLevel()).isTrue();
+
+        // 决策 7（修订）：key 级行**也**要能在快照里按 (租户, key) 取到 —— 它现在参与判定，
+        // 不再是「读进来但不用」。
+        List<RatePolicy> keyLevel = snapshot.keyPolicies(tenantId, 42L);
+
+        assertThat(keyLevel).as("key 级必须能按数值主键取到").hasSize(1);
+        assertThat(keyLevel.get(0).qps()).isEqualTo(100);
+        assertThat(keyLevel.get(0).tenantLevel()).isFalse();
+        assertThat(snapshot.keyPolicies(tenantId, 43L)).as("别的 key 取不到").isEmpty();
     }
 
     @Test
@@ -7573,10 +8062,12 @@ package com.aihub.service.channel;
 
 import com.aihub.common.config.ChannelDescriptor;
 import com.aihub.common.config.ModelRouteDescriptor;
+import com.aihub.dao.entity.ApiKeyEntity;
 import com.aihub.dao.entity.ChannelEntity;
 import com.aihub.dao.entity.ModelRouteEntity;
 import com.aihub.dao.entity.RateLimitPolicyEntity;
 import com.aihub.dao.entity.TenantEntity;
+import com.aihub.dao.mapper.ApiKeyMapper;
 import com.aihub.dao.mapper.ChannelMapper;
 import com.aihub.dao.mapper.ModelRouteMapper;
 import com.aihub.dao.mapper.RateLimitPolicyMapper;
@@ -7591,8 +8082,8 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
- * **开发专用**的演示数据（两条同模型渠道 + 一条租户级限流策略），用来做 M3 的验收
- * （多渠道 + 权重 + 故障转移 + 熔断）。
+ * **开发专用**的演示数据（两条同模型渠道 + 一条租户级限流策略 + 一条 key 级限流策略），用来做 M3 的验收
+ * （多渠道 + 权重 + 故障转移 + 熔断 + **两维限流**）。
  *
  * <p><b>默认关闭</b>（{@code aihub.demo-seed.enabled=false}）。理由：它是一个**写入路径**，
  * 不应该在生产启动时自动改数据；而且真渠道的密钥只能由运维提供，不该有默认值。
@@ -7616,6 +8107,7 @@ public class DemoChannelSeeder implements ApplicationRunner {
     private final ModelRouteMapper modelRouteMapper;
     private final RateLimitPolicyMapper rateLimitPolicyMapper;
     private final TenantMapper tenantMapper;
+    private final ApiKeyMapper apiKeyMapper;
     private final ChannelKeyService keyService;
 
     private final String model;
@@ -7626,10 +8118,12 @@ public class DemoChannelSeeder implements ApplicationRunner {
     private final String standbyApiKey;
     private final int qps;
     private final int burst;
+    private final int keyQps;
+    private final int keyBurst;
 
     public DemoChannelSeeder(ChannelMapper channelMapper, ModelRouteMapper modelRouteMapper,
                              RateLimitPolicyMapper rateLimitPolicyMapper, TenantMapper tenantMapper,
-                             ChannelKeyService keyService,
+                             ApiKeyMapper apiKeyMapper, ChannelKeyService keyService,
                              @Value("${aihub.demo-seed.model:demo-model}") String model,
                              @Value("${aihub.demo-seed.tenant:demo}") String tenantName,
                              @Value("${aihub.demo-seed.primary-base-url:http://host.docker.internal:11434}")
@@ -7641,11 +8135,14 @@ public class DemoChannelSeeder implements ApplicationRunner {
                              @Value("${aihub.demo-seed.standby-api-key:sk-channel-plaintext-synthetic-standby}")
                              String standbyApiKey,
                              @Value("${aihub.demo-seed.qps:20}") int qps,
-                             @Value("${aihub.demo-seed.burst:40}") int burst) {
+                             @Value("${aihub.demo-seed.burst:40}") int burst,
+                             @Value("${aihub.demo-seed.key-qps:5}") int keyQps,
+                             @Value("${aihub.demo-seed.key-burst:10}") int keyBurst) {
         this.channelMapper = channelMapper;
         this.modelRouteMapper = modelRouteMapper;
         this.rateLimitPolicyMapper = rateLimitPolicyMapper;
         this.tenantMapper = tenantMapper;
+        this.apiKeyMapper = apiKeyMapper;
         this.keyService = keyService;
         this.model = model;
         this.tenantName = tenantName;
@@ -7655,6 +8152,8 @@ public class DemoChannelSeeder implements ApplicationRunner {
         this.standbyApiKey = standbyApiKey;
         this.qps = qps;
         this.burst = burst;
+        this.keyQps = keyQps;
+        this.keyBurst = keyBurst;
     }
 
     @Override
@@ -7669,8 +8168,12 @@ public class DemoChannelSeeder implements ApplicationRunner {
         ensureRoute(model, primary, 100, 0);
         ensureRoute(model, standby, 1, 0);
         ensureTenantPolicy(tenantName, qps, burst);
+        // 决策 7（修订）：**key 级策略也要能被端到端演示** —— 它比租户级更严格（5/10 vs 20/40），
+        // 因此「换了 key 以后限流数字变了」这件事在演示里是可观察的，而不是只能靠单元测试相信。
+        ensureKeyLevelPolicy(tenantName, keyQps, keyBurst);
         log.info("演示数据就绪：模型 {} 有两条候选渠道（primary weight=100 / standby weight=1），"
-                + "租户 {} 限流 {}qps burst={}", model, tenantName, qps, burst);
+                + "租户 {} 限流 {}qps burst={}，该租户的第一把 key 覆盖为 {}qps burst={}",
+                model, tenantName, qps, burst, keyQps, keyBurst);
     }
 
     private Long ensureChannel(String name, String baseUrl, String plaintextKey, int weight) {
@@ -7732,6 +8235,45 @@ public class DemoChannelSeeder implements ApplicationRunner {
         rateLimitPolicyMapper.insert(entity);
         log.info("已写入演示限流策略：租户 {} {}qps burst={}", name, tenantQps, tenantBurst);
     }
+
+    /**
+     * **key 级**限流策略（决策 7 修订）：作用于该租户的**第一把** API Key（`api_key.id` 最小的那条，
+     * 与 V1 的建表顺序一致，因此演示时「先铸的那把 key」就是被覆盖的那把）。
+     *
+     * <p>找不到租户或该租户还没有 API Key 时**只 WARN 并跳过**（与 {@link #ensureTenantPolicy} 同款）：
+     * 演示数据不全不能让 admin 启动失败；先铸一把 key 再重启即可。
+     */
+    private void ensureKeyLevelPolicy(String name, int keyQps, int keyBurst) {
+        TenantEntity tenant = tenantMapper.selectOne(new LambdaQueryWrapper<TenantEntity>()
+                .eq(TenantEntity::getName, name));
+        if (tenant == null) {
+            log.warn("演示租户 {} 不存在（先铸一把 API Key 会自动创建它），跳过 key 级限流策略", name);
+            return;
+        }
+        ApiKeyEntity apiKey = apiKeyMapper.selectOne(new LambdaQueryWrapper<ApiKeyEntity>()
+                .eq(ApiKeyEntity::getTenantId, tenant.getId())
+                .orderByAsc(ApiKeyEntity::getId)
+                .last("limit 1"));
+        if (apiKey == null) {
+            log.warn("演示租户 {} 还没有 API Key，跳过 key 级限流策略（铸一把 key 后重启即可写入）", name);
+            return;
+        }
+        Long existing = rateLimitPolicyMapper.selectCount(new LambdaQueryWrapper<RateLimitPolicyEntity>()
+                .eq(RateLimitPolicyEntity::getTenantId, tenant.getId())
+                .eq(RateLimitPolicyEntity::getApiKeyId, apiKey.getId()));
+        if (existing != null && existing > 0) {
+            return;
+        }
+        RateLimitPolicyEntity entity = new RateLimitPolicyEntity();
+        entity.setTenantId(tenant.getId());
+        entity.setApiKeyId(apiKey.getId());
+        entity.setQps(keyQps);
+        entity.setBurst(keyBurst);
+        entity.setStatus("ACTIVE");
+        rateLimitPolicyMapper.insert(entity);
+        log.info("已写入演示 key 级限流策略：租户 {} 的 api_key_id={} 覆盖为 {}qps burst={}",
+                name, apiKey.getId(), keyQps, keyBurst);
+    }
 }
 ```
 
@@ -7782,7 +8324,7 @@ public class InternalConfigController {
 在 `aihub-admin/aihub-web/src/main/resources/application.yml` 的 `aihub:` 块里加：
 
 ```yaml
-  # 开发专用演示数据（两条同模型渠道 + 一条租户级限流策略）。默认关闭：它是写入路径，
+  # 开发专用演示数据（两条同模型渠道 + 一条租户级限流策略 + 一条 key 级限流策略）。默认关闭：它是写入路径，
   # 不该在生产启动时自动改数据；真渠道的 base-url / 密钥必须由运维提供。
   demo-seed:
     enabled: ${AIHUB_DEMO_SEED_ENABLED:false}
@@ -7792,6 +8334,9 @@ public class InternalConfigController {
     standby-base-url: ${AIHUB_DEMO_SEED_STANDBY_BASE_URL:http://host.docker.internal:11434}
     qps: 20
     burst: 40
+    # 决策 7（修订）：key 级策略（覆盖租户级）也要能被端到端演示，因此比租户级更严格。
+    key-qps: 5
+    key-burst: 10
 ```
 
 - [ ] **Step 5: 写 `InternalConfigSnapshotIntegrationTest`**
@@ -7938,8 +8483,8 @@ git commit -m "feat: expose the hmac signed config snapshot endpoint and a dev-o
 1. `GET /internal/config/snapshot` 带合法 HMAC（`GET` + 应用内路径 + 时间戳）时返回 `{"code":"OK","data":{version,generatedAtEpochMilli,defaultModel,channels[],routes[],ratePolicies[]}}`；未签名 / 错签名 / 用别的密钥签名一律 **401 + admin 信封**。
 2. 响应里**只有密文**（`apiKeyCipher` 形如 `v{n}:…`）与 `keyVersion`，没有任何明文密钥。
 3. `version` = 三张表 `updated_at` 的最大值，随任何一次配置写入推进；空库为 0。
-4. 同一租户的租户级策略按 `id` 升序、且排在 key 级之前；多条时有 WARN。
-5. `DemoChannelSeeder` 默认关闭；打开且配了主密钥时写入 2 条渠道 + 2 条路由 + 1 条租户级策略，幂等；未配主密钥时**启动失败并给出配置指引**。
+4. 同一租户的策略按 `id` 升序、且租户级排在 key 级之前；**两个维度都能从快照里取到**（决策 7 修订：key 级参与判定，不再「读进来但不用」）；同维度多条时有 WARN。
+5. `DemoChannelSeeder` 默认关闭；打开且配了主密钥时写入 2 条渠道 + 2 条路由 + **1 条租户级策略 + 1 条 key 级策略**（key 级作用于该租户第一把 API Key，因此「两维限流」可以被端到端演示），幂等；未配主密钥时**启动失败并给出配置指引**。
 6. `docker-compose.yml` 的 `redis` 端口绑定**未改**；`.env.example` 只有占位符与生成命令。
 
 **必须运行的命令与期望输出**
@@ -8189,7 +8734,7 @@ git commit -m "test: prove the token bucket lua script is atomic against a real 
 | `$env:DOCKER_HOST='tcp://127.0.0.1:2375'; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=RedisTokenBucketIntegrationTest"` | `Tests run: 7, Failures: 0, Errors: 0` |
 | `mvn -B -pl aihub-admin/aihub-common test` | `Tests run: 47, Failures: 0, Errors: 0` |
 | `$env:DOCKER_HOST='tcp://127.0.0.1:2375'; mvn -B -pl aihub-admin/aihub-web -am test` | `Tests run: 71, Failures: 0, Errors: 0` |
-| `mvn -B -pl aihub-gateway test` | `Tests run: 241, Failures: 0, Errors: 0` |
+| `mvn -B -pl aihub-gateway test` | `Tests run: 246, Failures: 0, Errors: 0` |
 
 ---
 
@@ -8248,10 +8793,12 @@ git commit -m "test: prove the token bucket lua script is atomic against a real 
   再切换就会把半截响应拼成脏数据 —— 这就是「仅在未输出任何 token 时允许切换」的机器形式。
 - **熔断只由 429 触发**（Redis key `aihub:channel:circuit:{id}`，TTL **30 秒**，跨实例共享）；
   5xx 只触发**当次**切换。Redis 不可用时退化为**本机**熔断表（单机近似）。
-- **限流只按租户维度**（M3）：`rate_limit_policy` 里 `api_key_id IS NULL` 的那一行生效；key 级策略会
-  被组装进快照但**不生效**（请求上下文里没有 `api_key` 数值主键的映射）。没有策略或策略值非法时用内置
-  默认 `qps=10 / burst=20`。同一租户多条租户级策略时取 **`id` 最大的那条**（表上没有唯一约束，
-  M4 的控制台会强制单条生效）。
+- **限流按 `tenant + api_key` 两个维度选策略**（与设计文档 §8.1 ② 的维度一致）：先取与本次请求
+  `apiKeyId` 匹配的 key 级行（`rate_limit_policy.api_key_id = api_key.id`），没有才用该租户的租户级行
+  （`api_key_id IS NULL`），都没有则用内置默认 `qps=10 / burst=20`。**每一维内部**多条 ACTIVE 时取
+  `id` 最大的那条（表上没有唯一约束，M4 的控制台会强制单条生效）。非正的 qps/burst 一律回落到默认值。
+  **桶的状态维度**是 `aihub:ratelimit:{tenantId}:{sha256(secret)}`（与策略维度是两件事，别混）。
+  鉴权关闭时没有数值主键 → `apiKeyId` 为 `null`，此时只按租户级判定（不是「不限流」）。
 - **降级链（数据面永不因控制面故障整体不可用）**：Redis 不可用 → 限流退化为**本机令牌桶**
   （单机近似；多实例下实际放行量约为「策略 × 实例数」）**且照常拒绝**；熔断退化为**本机**熔断表；
   admin 不可达 → 继续用**陈旧快照**（Redis 或本地），完全没有快照时才回落到 `aihub.upstream.*`
@@ -8277,13 +8824,14 @@ git commit -m "test: prove the token bucket lua script is atomic against a real 
 
 - [ ] **Step 2: 更新 `README.md`**
 
-- 「当前进度」把 M3 勾上，并加一段「M3 到底做了什么」：Redis + Lua 令牌桶限流（`tenant + api_key` 维度，
-  Redis 挂了降级本机桶且**照常拒绝**）、多渠道路由（`priority` 分组 + 权重随机 + 跳过熔断）、
+- 「当前进度」把 M3 勾上，并加一段「M3 到底做了什么」：Redis + Lua 令牌桶限流（**策略按 `tenant + api_key` 两维选取**：key 级覆盖 → 租户级回落 → 内置默认；Redis 挂了降级本机桶且**照常拒绝**）、多渠道路由（`priority` 分组 + 权重随机 + 跳过熔断）、
   故障转移（429/5xx/超时换下一候选，**仅在尚未向客户端转发任何字节时**；4xx 不换）、
   跨实例熔断（Redis 30s TTL）、渠道密钥 AES-GCM（admin 加密 / 网关本地解密 / 双版本轮换）、
   HMAC 签名的配置快照 + 三级读取两级缓存（Caffeine 30s → Redis → admin，singleflight + 版本比对），
   以及 M2 的三处遗留（白名单补 `retry-after-ms` / IETF `RateLimit-*`、超长 `model` 截断、
   `api_key_id`/`channel_id` 落库）。
+  **多渠道故障注入的验收**用 WireMock（test 作用域、进程内）在 `WireMockChannelFaultInjectionTest` 里做
+  —— 那是设计文档 §10 / §12 的原文口径。
 - 「网关不做限流 / 多渠道」那两条**已知边界要删掉**（已实现），换成新的边界：
   - **配额（预扣 / 校正 / 对账）整体属 M4**，M3 做的是**限流**（QPS/burst，丢弃是暂时的）而不是
     **余额记账**（token 余额，扣减是持久的）。429 `rate_limit_exceeded` 与未来的 `QUOTA_EXCEEDED`
@@ -8301,7 +8849,10 @@ git commit -m "test: prove the token bucket lua script is atomic against a real 
   - **`api_key_id` / `channel_id` 的语义**：走兜底路径时 `channel_id` 是 `Long.MIN_VALUE` 哨兵；
     `api_key_id` 在鉴权关闭时为 `NULL`。
 - 「测试」一节的实测数字改成**你跑出来的数字**（M3 结束的预期见下，**以实测为准**）。
-- 「技术栈」一行不变（M3 没有新增任何依赖）。
+- 「技术栈」一行**要改一处**：网关测试新增 `org.wiremock:wiremock:3.9.1`（**仅 test 作用域、仅
+  `aihub-gateway`**，进程内起 stub，不需要 Docker；生产依赖零新增）。这是设计文档 §4.2
+  「WireMock 在 M3 引入时再锁定版本」那一句的落点，**必须写进 README**（否则下一轮评审还会问
+  「为什么多了一个依赖」）。
 
 - [ ] **Step 3: 全量回归**
 
@@ -8313,14 +8864,22 @@ $env:DOCKER_HOST='tcp://127.0.0.1:2375'; mvn -B clean test
 **Maven 的退出码不可信**（本机见过 `BUILD SUCCESS` + `[exit code: 1]`）：以各模块的 surefire 汇总行与
 `BUILD SUCCESS` 为准。把三个数字抄进 README。
 
-顺手核对「没有新增依赖」（决策 11 的验收项）：
+顺手核对依赖（决策 11 的验收项）：**生产依赖零新增**，唯一变更是 `aihub-gateway` 的
+**test 作用域** WireMock。
 
 ```powershell
-git diff m2 -- aihub-gateway/pom.xml aihub-admin/aihub-common/pom.xml
+git diff m2 -- aihub-admin/aihub-common/pom.xml
+git diff m2 -- aihub-gateway/pom.xml
+mvn -B -pl aihub-gateway dependency:tree "-Dincludes=org.wiremock:wiremock"
 ```
 
-预期：**无输出**（两个 pom 在 M2 之后逐字节未变；若 `m2` 标签不在解析范围内，用
-`git diff $(git rev-list -n1 m2) HEAD -- aihub-gateway/pom.xml`）。
+预期：
+1. `aihub-common/pom.xml` **无输出**（M2 之后逐字节未变）；若 `m2` 标签不在解析范围内，用
+   `git diff $(git rev-list -n1 m2) HEAD -- ...`。
+2. `aihub-gateway/pom.xml` 的 diff **只有**一段 `org.wiremock:wiremock:3.9.1` + `<scope>test</scope>`
+   与它的注释（**没有别的依赖、没有版本号被顺手升级**）。
+3. `dependency:tree` 输出里 `org.wiremock:wiremock:jar:3.9.1:test`（**`:test` 结尾**，不是 `:compile`）。
+   若它出现在 `compile`/`runtime`，说明 scope 写错了 —— 那是必须修的（会把测试依赖带进生产镜像）。
 
 - [ ] **Step 4: compose 全栈冒烟 + 多渠道验收（由控制器执行）**
 
@@ -8336,8 +8895,15 @@ RabbitMQ 管理台能看到 `aihub.metering.queue` 与 `aihub.metering.dlq`。
 
 - [ ] **Step 5: 里程碑验收（多渠道故障转移 + 限流）——由控制器执行**
 
-**这是 M3 的验收标准**：`WireMock 注入 429/超时，能自动切换`。本机用 JDK `HttpServer` 夹具等价地做
-（决策 11），并且**必须在发布的 compose 全栈上做**（不是只在测试里）：
+**这是 M3 的验收标准**：`WireMock 注入 429/超时，能自动切换`。它由**两层**证据共同满足，两层都要如实报告：
+
+1. **进程内的 spec 原文口径**（必做、无外部依赖）：`WireMockChannelFaultInjectionTest`（Task 10）用
+   WireMock 的命名 stub 扮多条渠道，分别注入 429 / 挂住超时 / 中途断流，并验证自动切换与「已开始回写
+   就不切换」。跑 `mvn -B -pl aihub-gateway test -am "-Dtest=WireMockChannelFaultInjectionTest"`，
+   把 `Tests run: 5, ...` 的汇总行抄进验收记录 —— 这就是 spec §12 那句话在**测试层**的落点，
+   **不需要 Docker**（WireMock 与网关在同一个 JVM 里）。
+2. **compose 全栈上的数据面验收**（下面 1–7 步，由控制器执行）：证明同一套语义在**真实部署形态**
+   （admin + gateway + MySQL + Redis + RabbitMQ）下也成立。**必须在发布的 compose 全栈上做**（不是只在测试里）：
 
 1. 起一个「坏上游」夹具（只回 429 的小 HTTP 服务）与一个「好上游」（本机 Ollama，或另一个只回正常 JSON
    的小服务）。**不要**把任何真实密钥写进文件；用环境变量传。
@@ -8356,8 +8922,13 @@ docker -H tcp://127.0.0.1:2375 compose exec -T mysql sh -c 'mysql -uroot -p"$MYS
      与 `... redis-cli keys 'aihub:ratelimit:*'` —— 前者应能看到被熔断的渠道 id（30 秒后消失），
      后者应能看到限流桶 Hash（`hgetall` 可看 `t`/`k` 两个字段）。
    - 查 `request_log`：两次的 `channel_id` 都应是**好渠道**的 id（证明计量记的是实际服务的那条）。
-4. **限流验收**：把策略临时改成 `qps=1 / burst=2`（或直接用默认的 20/40 连发 50 次），应看到 `429` +
-   `{"error":{"code":"rate_limit_exceeded",...}}` + `RateLimit-Remaining`/`Retry-After`/`Retry-After-MS` 头。
+4. **限流验收（两维）**：把该租户的策略临时改成 `qps=1 / burst=2`（或直接用 seeder 写的 20/40 连发
+   50 次），应看到 `429` + `{"error":{"code":"rate_limit_exceeded",...}}` +
+   `RateLimit-Remaining`/`Retry-After`/`Retry-After-MS` 头。**并且做一次 key 级覆盖的对照**（决策 7 修订）：
+   seeder 给该租户的**第一把 key** 写的是更严格的 `key-qps=5 / key-burst=10`，因此
+   `docker ... compose exec -T mysql sh -c '... select tenant_id,api_key_id,qps,burst,status from rate_limit_policy ...'`
+   应能看到两行（一行 `api_key_id IS NULL`，一行指向那把 key），且用**那把 key** 发请求时日志/响应头里的
+   `RateLimit-Limit` 是 **`5, 10`**（key 级生效），换一把新铸的 key 则是 **`20, 40`**（回落租户级）。
 5. **限流降级验收**：`docker compose stop redis` 后继续发请求 —— **必须继续被限流**（不是 503、也不是
    无限放行），网关日志里出现「已降级为本地令牌桶」。`docker compose start redis` 后恢复共享桶。
 6. **admin 挂掉验收**：`docker compose stop admin` 后发请求 —— 网关**继续按缓存的快照路由**（不 503）；
@@ -8365,8 +8936,9 @@ docker -H tcp://127.0.0.1:2375 compose exec -T mysql sh -c 'mysql -uroot -p"$MYS
 7. 把上述命令与真实输出（**删掉 token 明文**）写进 `.superpowers/sdd/m3-acceptance.md`。
 
 若控制器无法提供「坏上游」夹具（例如本机没有任何上游），**报告 BLOCKED 并说明缺什么**，不要伪造结果。
-`FailoverRelayTest`（Task 10）已经用 JDK 夹具在测试层给过等价证据，进程内验收可以以它为准，
-但**必须如实说明**「compose 全栈上的多渠道切换本轮未做」，并写进 README 的已知边界。
+此时进程内的 `WireMockChannelFaultInjectionTest`（spec 原文的 WireMock 口径）与 `FailoverRelayTest`
+（JDK 夹具的细粒度口径）仍然给过等价证据，可以以它们为准，但**必须如实说明**
+「compose 全栈上的多渠道切换本轮未做」，并写进 README 的已知边界。
 
 - [ ] **Step 6: 打标签（仅控制器，验收通过后）**
 
@@ -8406,20 +8978,42 @@ git tag -a m3 -m "M3 流量治理完成：Redis+Lua 令牌桶限流（含本机�
    `write` / `edit` 工具处理。
 6. **JDK 的 `com.sun.net.httpserver.HttpServer` 足以构造 M3 需要的全部上游故障**
    （429/5xx 用 `enqueueError`，连上不回响应头用 `enqueueStall`，中途断流用 M2 已有的握手夹具），
-   因此**不需要 WireMock**（决策 11）。
-7. **AES-GCM 的 JDK 实现**：`AES/GCM/NoPadding` + 12 字节 nonce + 128 位 tag；`javax.crypto` 是 JDK 的一部分，
+   因此它**继续承担细粒度用例**；但 spec §10 / §12 的验收口径写的是 **WireMock 模拟多渠道**，
+   所以**多渠道矩阵**那一层改用 WireMock 承担（决策 11）—— 两者并存，不是替代关系。
+7. **WireMock 3.9.1 在本机可解析、可构建、可**进程内**运行（2026-09-26 实测，实施者不必重试）**：
+   - 直连 `https://repo.maven.apache.org/...` **不通**（`Invoke-WebRequest` 报「基础连接已经关闭」），
+     但 `mvn -B dependency:get "-Dartifact=org.wiremock:wiremock:3.9.1"` **成功** —— 全局
+     `settings.xml` 里配了 `aliyunmaven` 镜像（`mirrorOf=*`），产物落进 `.m2repo`（`_remote.repositories`
+     里记的是 `aliyunmaven`）。**因此在这一台机器上，能不能拿到新依赖要看阿里云镜像，不是 Maven Central。**
+   - 在**仓库之外**的探针工程里用 `@WireMockTest` + `junit-jupiter 5.12.2` + `surefire 3.5.6` 跑通
+     429 stub / `withFixedDelay` 挂住（客户端超时）/ `Fault.MALFORMED_RESPONSE_CHUNK` 中途断流，
+     `Tests run: 1, Failures: 0, Errors: 0` + `BUILD SUCCESS`；stub 起在本进程的随机端口（60380），
+     **无 Docker、无活 broker**。
+   - 探针**不要放进本仓库**（它是临时工程）；把它当成「依赖可用性已证」的记录即可。
+   - 注意：探针那次 `mvn` 进程退出码是 `1`，而日志里是 `BUILD SUCCESS` —— 又一次印证第 2 条。
+8. **AES-GCM 的 JDK 实现**：`AES/GCM/NoPadding` + 12 字节 nonce + 128 位 tag；`javax.crypto` 是 JDK 的一部分，
    `aihub-common` 的零依赖规则不受影响（`InternalHmac` 已经先用过 `javax.crypto`）。
-8. **Spring Data Redis 3.5.13 的 `RedisScript.of(String, Class)`** 存在（本机 `.m2repo` 已确认）；
+9. **Spring Data Redis 3.5.13 的 `RedisScript.of(String, Class)`** 存在（本机 `.m2repo` 已确认）；
    返回类型必须是 `List`（脚本返回数组），写成 `Long.class` 会在运行时得到 `null`/转换异常。
-9. **`StringRedisTemplate` 是阻塞 API**：Redis 不可达时一次调用会被按住 `spring.data.redis.timeout`
-   （2 秒）。M3 的缓解手段是 `RateLimiter` 的**粘性降级**（1 秒内不再重试），而不是每请求撞一次超时。
-10. **`ApiKeyCacheCodec` 段数从 5 → 6 是刻意的不兼容**：旧 Redis entry 会被新 `decode` 判为畸形并返回
+10. **`StringRedisTemplate` 是阻塞 API**：Redis 不可达时一次调用会被按住 `spring.data.redis.timeout`
+    （2 秒）。M3 的缓解手段是 `RateLimiter` 的**粘性降级**（1 秒内不再重试），而不是每请求撞一次超时。
+11. **`ApiKeyCacheCodec` 段数从 5 → 6 是刻意的不兼容**：旧 Redis entry 会被新 `decode` 判为畸形并返回
     `null`（缓存未命中 → 回源 → 重写）。这是**收敛行为**，不需要清 Redis，但 `ApiKeyToolingTest`
     的固定向量必须同步（那是契约测试，改它是正确的）。
-11. **`docker compose config` 会把 `.env` 插值打进 stdout**（M1 泄漏过一次真实上游 key）：
+12. **`docker compose config` 会把 `.env` 插值打进 stdout**（M1 泄漏过一次真实上游 key）：
     **永远不要执行它**，也不要 `cat` / `type` / `Get-Content` `.env`。
-12. **本机 `git push` 不可能成功**（hosts 黑洞 + 出口阻断）：只做本地提交，控制器会在里程碑末尾
+13. **本机 `git push` 不可能成功**（hosts 黑洞 + 出口阻断）：只做本地提交，控制器会在里程碑末尾
     通过 GitHub Git Data API 重放提交。
-13. **`ApiKeyView` 从 5 个分量变 6 个是编译期可见的破坏**：所有既有 `new ApiKeyView(...)` 都会被编译器
-    点出来（这是好事）。Task 7 与 Task 9/10 的代码里刻意用了 5 个分量，Task 11 统一补齐 —— 若实施者
+14. **`ApiKeyView` 从 5 个分量变 6 个是编译期可见的破坏**：所有既有 `new ApiKeyView(...)` 都会被编译器
+    点出来（这是好事）。Task 7 / 9 / 10 的代码里刻意用了 5 个分量，Task 11 统一补齐 —— 若实施者
     在 Task 7 就补了第 6 个参数，会编译失败；反过来 Task 11 忘记补，也会编译失败。**按任务顺序做，不要跳。**
+    **同理**：Task 9 的 `RateLimitFilter` 把限流的 `apiKeyId` 显式写成占位 `null`（那时 `ApiKeyView`
+    还没有该分量），**Task 11 Step 1b 把它换成 `view.apiKeyId()` 并补断言**。那不是「M3 不做 key 级
+    限流」——策略解析在 Task 4 就已经是两级的、并有真用例钉住；这里只是最后一个字段的编译顺序。
+15. **本计划的两处修订（2026-09-26，控制器 pre-flight 评审）**，实施者按修订后的正文执行即可，
+    但要知道**哪两处被改过**，以免照旧印象做事：
+    - **决策 7**：限流策略从「只做 `tenant` 维度」改为 **`tenant + api_key` 两维**（key 级优先 →
+      租户级回落 → 内置默认）。原文的 blocker（「拿不到数值 `api_key` 主键」）不成立，因为决策 14
+      正好给 `ApiKeyView` 补了 `apiKeyId`，而限流过滤器排在鉴权之后。
+    - **决策 11**：从不引入 WireMock 改为 **引入 `org.wiremock:wiremock:3.9.1`（仅 `aihub-gateway`
+      的 test 作用域）**，用于 spec §10 / §12 要求的多渠道故障注入验收；JDK `HttpServer` 夹具**保留**。
