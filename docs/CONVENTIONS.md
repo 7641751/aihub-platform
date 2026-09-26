@@ -57,16 +57,17 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 | `rate_limit_exceeded` | `429` | `rate_limit_error` | 租户 / API Key 超过限流策略（`rate_limit_policy` 的 qps/burst）。**降级到本机令牌桶时同样回 429**（降级 ≠ 放行） | `RateLimitFilter` |
 | `model_not_found` | `404` | `invalid_request_error` | 请求的 `model` 在配置快照的 `model_route` 里没有任何可用候选（且没有遗留单渠道可回落） | `ChatRelayController` |
 | `upstream_unreachable` | `502` | `api_error` | 连不上上游（`WebClientRequestException`）；上游的**业务**错误状态码不走这里 | `ChatRelayController` |
-| `internal_error` | `500` | `api_error` | 兜底：连错误体本身都序列化失败时（`GatewayErrors.serialize` 的 catch 分支） | `GatewayErrors` |
+| ~~`internal_error`~~ | ~~`500`~~ | — | **这一行在当前实现里不可达，保留仅为说明设计意图。** `GatewayErrors.serialize` 的 catch 分支确实会吐出这个码，但 `GatewayErrors.write` 是先 `response.setStatusCode(status)`、再 `serialize(...)`，所以那条兜底体**只会以调用方原本要写出去的状态码**（`401` / `404` / `429` / `502`）出现，永远不会是 `500`。见下面「容易踩的规则」。 | `GatewayErrors` |
 
 几条容易踩的规则：
 
 - **上游状态码与响应体原样透传**：上游返回 `401` / `429` / `502` 时，客户端看到的就是上游的状态码与 body，网关不重写、不折叠成 `500`；只有「根本没连上上游」才是 `502 upstream_unreachable`。同理上游的 `Content-Type` 也原样拷贝（不解析），上游没发就不补默认值。
 - **畸形请求头按 401 处理**，不按 400：密钥格式错误不是参数校验问题，回 400 会让客户端以为换个 body 就能通过。
-- **`/v1/**` 目前没有全局 500 处理器**：网关自身未预期的异常（不是上面这三个码）落到 Spring WebFlux 的默认错误响应，形状由 `Accept` 决定（JSON 或 HTML 错误页），**不保证**是上面的 OpenAI 体。新增数据面错误码时请走 `GatewayErrors.write`，不要依赖默认处理。
+- **`/v1/**` 目前没有全局 500 处理器**：网关自身未预期的异常落到 Spring WebFlux 的默认错误响应，形状由 `Accept` 决定（JSON 或 HTML 错误页），**不保证**是上面的 OpenAI 体。新增数据面错误码时请走 `GatewayErrors.write`，不要依赖默认处理。
+- **上表的 `internal_error` 行不可达**：`GatewayErrors.write` 先设置调用方给的状态码、再调用 `serialize`，因此 `serialize` 的 catch 分支（它才写 `internal_error`）**只会复用调用方原本的状态码**。结果是一个 `429`/`502`/`401` 状态码配一具 `{"code":"internal_error"}` 的兜底体 —— 「500 + internal_error」这个组合在代码里没有任何路径能产生。它不是待修的行为（兜底体的意义是「连错误体都编不出来时仍然给客户端一个合法 JSON」），但**不要**再把它当成一个可触发的错误码来写文档或告警规则。
 - admin 的 `{code,message,data}` 信封只属于 admin 自己的接口（含 `/internal/**` 的 401）。数据面不套用，admin 也不套用 OpenAI 形状。
 - **设计文档 §9 的「流开始前失败 → 统一错误体 `{"code","message"}`」已被取代**：`/v1/**` 的错误体**一律**是上面的 OpenAI 形状。M1 用官方 OpenAI Python SDK 验收过这条契约，给数据面套 admin 信封会让所有 SDK 的 `error.message` 取值路径同时失效 —— 那不是「按 spec 实现」，是回归。admin 与 `/internal/**` 仍然是 `{"code","message","data"}`。
-- **`429` 是限流用户唯一该看的信号**：`rate_limit_exceeded` 附带 `Retry-After`（秒）、`Retry-After-MS`（毫秒，Azure 风格）与 IETF 的 `RateLimit-Limit` / `RateLimit-Remaining` / `RateLimit-Reset` 三个头（`limit, burst` 形状，见 6.6 节）。客户端退避请读 `Retry-After`，不要自己猜窗口。这些头**只在网关自己拒绝时**出现；上游返回的 `Retry-After` / `x-ratelimit-*` 属于透传白名单（第 3 节），两者语义相同、来源不同。
+- **`429` 是限流用户唯一该看的信号**：`rate_limit_exceeded` 附带 `Retry-After`（秒）、`Retry-After-MS`（毫秒，Azure 风格）与 IETF 的 `RateLimit-Limit` / `RateLimit-Remaining` 两类头（`limit, burst` 形状，见 6.6 节）。客户端退避请读 `Retry-After`，不要自己猜窗口。这些头**由网关自己的限流判定写入，不是「只在网关拒绝时」才出现**：放行响应同样带 `RateLimit-Limit` / `RateLimit-Remaining`（`RateLimitFilter.writeDecisionHeaders` 对放行与拒绝都写这两条），只有 `Retry-After` / `Retry-After-MS` 是拒绝专有。**网关不写 `RateLimit-Reset`** —— 令牌桶是惰性补充的，没有可上报的重置时刻；`ratelimit-reset` 在网关里只是透传白名单里的一个**上游**头名。上游返回的 `Retry-After` / `x-ratelimit-*` 属于透传白名单（第 3 节），两者语义相同、来源不同。
 
 ## 5. 内部接口约定（`/internal/**`）
 
@@ -88,7 +89,7 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - 铸造走 `ApiKeyMintRunner`（本地 CLI 路径，默认关闭）：`--aihub.mint-key.enabled=true`（容器里是 `AIHUB_MINT_KEY_ENABLED=true`）配合 `--aihub.mint-key.tenant-name` / `--aihub.mint-key.name` / `--aihub.mint-key.valid-days`。**它不是 HTTP 接口** —— 公网上不存在造密钥的入口。
 - gateway 侧的解析顺序是 Caffeine（本地，30s）→ Redis（5m，key 用 `ApiKeyCacheCodec.CACHE_KEY_PREFIX`）→ admin 内部接口；任何一级故障都降级到下一级，**绝不能因为缓存故障而拒绝请求**。「是否可用」的判据只有一处：`ApiKeyView.usable()`。
 - **Redis 是鉴权的信任源，不只是缓存**：gateway 把 Redis 的命中当作**权威结果**，命中即放行、不再回查 MySQL；因此任何能写 `aihub:apikey:<sha256(secret)>` 的对端都能伪造出一把可用的 API Key。Redis 必须与控制面同等级隔离保护（网络、凭据、访问审计）。同样的原因，密钥的**吊销 / 停用不会立刻生效**，要等缓存过期：本机 Caffeine ≤30s、集群 Redis ≤5m。
-- `docker-compose.yml` 里的 Redis 是**本地开发**配置：无密码，宿主映射为 `127.0.0.1:6380:6379`（只有本机能连；容器之间仍走 `redis:6379`）。生产加固 —— `requirepass` 并把它接进两个服务的配置、以及网络隔离 —— 列为 **M3** 项，M1 只做最小收敛。
+- `docker-compose.yml` 里的 Redis 是**本地开发**配置：无密码，宿主映射为 `127.0.0.1:6380:6379`（只有本机能连；容器之间仍走 `redis:6379`）。生产加固 —— `requirepass` 并把它接进两个服务的配置、以及网络隔离 —— **没有在 M3 做**（M3 已收口），与 README「已知边界」里那条同属**未来里程碑**的生产部署要求；M1 只做了最小收敛。
 - 不要新增第二套 key 格式或第二个哈希实现；控制台的签发 / 列表 / 吊销接口属于 M4。
 
 ## 6.5 计量事件契约（gateway → admin）
@@ -173,11 +174,19 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
   gateway 是**请求路径**，解不开只返回空（该渠道被跳过），**照常启动**。
 - **快照接口**：`GET /internal/config/snapshot`（HMAC 签名，`GET` + 应用内路径 + 时间戳；契约见第 5 节）。
   一次返回 `{version, generatedAtEpochMilli, defaultModel, channels[], routes[], ratePolicies[]}`。
+  **本接口自己的 `defaultModel` 当前恒为 `null`**：admin 侧没有 `aihub.upstream.default-model`
+  这个属性（`ConfigSnapshotService` 的构造参数默认空串 → 快照里写 `null`），而 gateway 侧虽然
+  解析并保留了它，`ModelsController` 的模型集合用的是网关**自己的** `aihub.upstream.default-model`
+  （`UpstreamProperties`），从来不读快照里的那个分量。因此不要把它当成一条「控制面可下发默认模型」
+  的活链路 —— 它是为将来 M4 的控制台预留的字段，今天两端一个不填、一个不读。
   `version` 是**三张表 `updated_at` 的最大值**（epoch 毫秒），任何配置写入都会推进它。
-  **已知缺口（M4 前无删除接口）**：`max(updated_at)` 会**回退** —— 删掉最新更新的那一行（或删空）
-  之后 version 变小，而网关的比对是严格的 `>`，于是更旧的快照会被 lastGood 记住并继续服务。
-  M3 没有删除 API（只能手写 SQL），所以是潜在缺口而不是现网缺陷；M4 的渠道/策略 CRUD 落地时必须
-  一并解决（高水位持久化，或把比对放宽到 `>=`）。
+  **已知缺口（M4 前无删除接口），且今天没有任何缓解措施**：`max(updated_at)` 会**回退** ——
+  删掉最新更新的那一行（或删空）之后 version 变小，而网关的比对是严格的 `>`
+  （`ConfigClient.rememberGood`、`ConfigCache` 的 Redis 版本比对都是 `>`），于是更旧的快照会被
+  lastGood 记住并继续服务。`ConfigSnapshotService` **只是取最大值**，它**不会**检测、也不会告警
+  版本回退或同一毫秒撞车（全类唯一的 WARN 是「同维度存在多条 ACTIVE 限流策略」，与版本无关）——
+  换句话说这条缺口目前**没有任何观测手段**：M3 没有删除 API（只能手写 SQL），所以是潜在缺口而不是
+  现网缺陷；M4 的渠道/策略 CRUD 落地时必须一并解决（高水位持久化，或把比对放宽到 `>=`）。
 - **路由的候选来自 `model_route`**：`priority` **数字小的组优先**，组内按 `model_route.weight`
   **权重随机**（权重非正数按 1）；`channel.status != ACTIVE` 或渠道不可用的行被排除。
   熔断渠道在组内**排到最后**（不是删除）；所有候选都熔断时仍然放行最高优先级那一组（best-effort + WARN，
@@ -200,8 +209,9 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
   鉴权关闭时没有数值主键 → `apiKeyId` 为 `null`，此时只按租户级判定（不是「不限流」）。
 - **限流的响应契约**：超限回 `429` + 第 4 节的 OpenAI 错误体（`code=rate_limit_exceeded`，
   `type=rate_limit_error`），并带 `Retry-After`（秒）、`Retry-After-MS`（毫秒）、
-  `RateLimit-Limit: {qps}, {burst}`、`RateLimit-Remaining`、`RateLimit-Reset`。
+  `RateLimit-Limit: {qps}, {burst}`、`RateLimit-Remaining`。
   **`RateLimit-Limit` 直接暴露生效的策略值**，因此「key 级覆盖有没有生效」在响应头里就能看见。
+  **网关只写这四个头，没有 `RateLimit-Reset`**（放行响应带前两个，拒绝再加两个退避头）。
 - **降级链（数据面永不因控制面故障整体不可用）**：Redis 不可用 → 限流退化为**本机令牌桶**
   （单机近似；多实例下实际放行量约为「策略 × 实例数」）**且照常拒绝**；熔断退化为**本机**熔断表；
   admin 不可达 → 继续用**陈旧快照**（Redis 或本地），完全没有快照时才回落到 `aihub.upstream.*`
@@ -235,9 +245,12 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
   且关掉时**不创建任何 bean**；打开时还需要 `AIHUB_CHANNEL_MASTER_KEY` 与两个 demo 上游 base-url
   （demo 密钥**没有默认值**，必须在环境里给），否则**在任何写库动作之前**就抛异常。它是本地联调工具，
   **不是**初始化数据的手段。
-- **admin 侧的快照装配是「脏库每轮一个 WARN」**：`max(updated_at)` 版本比对在配置表被手改、
-  版本回退或三表 updated_at 撞车时打 WARN（按 `snapshot()` 调用去重，不是每条请求一次，但**每次网关轮询
-  都会有一条**）。看到它先查是不是有人直接改了库。
+- **admin 的快照装配不做版本回退检测，也不为此告警**（更正：本文件此前在这里承诺过一条不存在的
+  WARN）。`ConfigSnapshotService.currentVersion()` 只是对三张表各取一次 `max(updated_at)` 再取最大值
+  —— 它**没有**「上一次的 version」这个概念，因此既发现不了回退、也发现不了同一毫秒撞车。
+  该类唯一的 WARN 与版本无关：同一 `tenant + api_key` 维度存在**多条 ACTIVE 限流策略**时，
+  按维度各告警一次。因此 6.6 节登记的版本回退缺口今天**没有任何缓解措施**（既无高水位、也无告警），
+  关掉它是 **M4** 的条目。看到上面那条 WARN 时先查是不是有人直接改了库。
 
 ## 7. 数据库约定
 
