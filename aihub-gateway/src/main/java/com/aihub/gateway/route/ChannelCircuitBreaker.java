@@ -96,8 +96,8 @@ public class ChannelCircuitBreaker {
     /** 本机表里当前仍打开的数量（指标与测试用）。 */
     public int localOpenCount() {
         // 先取键快照，再用双参数 remove(id, openedAt)：只在值仍是当时看到的那一笔时才删。
-        // 单参数 remove(id) 会按 key 无条件删，可能淘汰掉并发写方刚刚重打的更晚标记（check-then-act）；
-        // 双参数形式把「值未变才删」写在调用点上，不依赖 JDK 对容器 removeIf 的内部实现。
+        // 双参数形式是刻意的：删除条件落在调用点上，不依赖容器 removeIf 的内部语义，
+        // 也不必假设单参数形式在并发下会怎么做。
         for (Long channelId : localOpen.keySet().toArray(new Long[0])) {
             Long openedAt = localOpen.get(channelId);
             if (openedAt != null && expired(openedAt)) {
