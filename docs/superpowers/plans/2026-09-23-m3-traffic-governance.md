@@ -24,6 +24,7 @@
 - 所有时间字段按 UTC 存储（`datetime(3)`）。令牌桶的时间基准是**调用方传入的毫秒时间戳**（不是 Redis `TIME`），熔断的时间基准是 **Redis TTL** —— 两者的理由分别写在各自类的 javadoc 里。
 - **`aihub-gateway` 的测试永远不允许依赖 Docker，也不允许要求有活 broker 或活 Redis**：Redis 相关的故障降级用例一律用「指向不存在端口 / Mockito 桩」构造（M1/M2 已确立同一手法）。**WireMock 也必须以进程内（in-process）方式使用**（`@WireMockTest` / `WireMockExtension`，stub 起在同一个 JVM 的随机端口上）—— 这一点在决策 11 里已在本机实测过，因此新增这个测试作用域依赖**不**放松本条约束；**不允许**用 `docker run wiremock/...` 或任何外部容器/远程 stub 服务。admin 侧的集成测试沿用 `AbstractIntegrationTest`（Testcontainers 单例容器，MySQL + Redis + RabbitMQ 已在基类里）。
 - 每个 Task 完成后立即 commit（conventional commits：`feat:` / `fix:` / `test:` / `docs:` / `chore:`），**只 stage 显式路径**，禁止 `git add -A` / `git add .`（工作树里有第二个写入者）。
+- **每个任务的提交必须让整个反应堆编译通过，且该任务自述的测试全绿 —— 不允许跨任务占位，也不允许任何任务依赖「后续任务才引入」的生产代码改动。** 共享契约（例如 `ApiKeyView` 的数值主键 `apiKeyId`、`ApiKeyCacheCodec` 的段数）必须在**第一个需要它的任务之前**就位：契约变更与它的生产者/消费者各一行改动放在**同一个提交**里，之后的任务直接读真值，不写「先传 `null`、X 任务再补」这类占位，也不写「此处待 Y 任务收口」这类注释。判定方法：每个任务结束前跑一次全反应堆 `mvn -B -q test-compile -DskipTests`，它必须绿。**本计划曾把 `ApiKeyView`/`ApiKeyCacheCodec` 的契约变更放在 Task 11，导致 Task 9 必须带一个跨任务的 `apiKeyId` 占位 —— 2026-09-26 已把该契约前移到 Task 2 修掉，本节就是那次修正留下的一般规则。**
 - 命令一律在项目根目录执行；不使用 Maven wrapper，用本机 `mvn`。
 - **不修改 `docker-compose.yml` 里 Redis 的宿主端口绑定**（`127.0.0.1:6380:6379` 是用户刻意设的）。
 - **不做的事**（本里程碑明确越界，评审时按此判断）：`QuotaFilter` 的预扣 / 校正 / 对账（§6.2，属 M4，见「决策登记」第 12 条）、Redis Pub/Sub 失效的**发布方与订阅方**、管理台、`/api/channels` CRUD、租户与 API Key 管理、审计、账单、文档流水线。
@@ -58,14 +59,14 @@
 | 4 | Redis 快照缓存与本地 Caffeine 载荷共用**同一份**分隔符编解码 `ConfigSnapshotCodec`（不用 JSON）：首行 `#v1\|{version}\|{defaultModel}\|{generatedAtEpochMilli}`，之后是 `C\|…` / `R\|…` / `L\|…` 行，字段内转义 `\` `\|` `\n` `\r`。 | gateway 侧其实**可以**用 Jackson（它自带），但「缓存载荷」与「本地载荷」共用一份编解码只需维护一个转义器，而且 Redis 里的字节可以被测试当作固定向量钉住。行为与 `MeteringEventCodec` / `ApiKeyCacheCodec` 完全一致。**这不是跨服务契约**（admin 不读它，admin 发的是 JSON），因此不像 `MeteringTopology` 那样有「单侧改名不报错」的风险。 | 编解码只出现在 gateway 与 `aihub-common`；`ConfigSnapshotCodecTest` 用固定向量钉字段顺序。 |
 | 5 | 快照 `version` 用**单调时间戳**：`max(channel.updated_at, model_route.updated_at, rate_limit_policy.updated_at)` 折算成 epoch 毫秒；没有任何配置行时用 `0`。**版本只增不减**由「任何配置写入都会推进 `updated_at`」保证（V1 三张表都有 `ON UPDATE CURRENT_TIMESTAMP(3)`）。 | 需要一个「能比较新旧」的标量来支撑 §6.3 的「本地版本落后则丢弃并回源」。计数器（如行数）会漏掉「改字段不改行数」，哈希要读全表两次，时间戳是最便宜且随每次写入必然推进的量。⚠️ **已知缺口（诚实登记）**：M3 没有任何配置写入方（CRUD 在 M4），因此 `version` 的变化路径只有 seeder 与手工 SQL；两行配置在**同一毫秒**内被改会撞车（MySQL `updated_at` 精度是毫秒）—— M4 的控制台串行写入下可接受。 | admin 侧 `ConfigSnapshotService.version()` 有真实 MySQL 用例（改一行 → 版本严格变大）。 |
 | 6 | 快照**取不到时的降级顺序**：本地 Caffeine（命中即用）→ Redis（命中即用，**且用它的 version 刷新本地**）→ admin。admin 不可达时**继续用已有的陈旧快照**（哪怕过期），只有在**完全没有任何快照**时才用「遗留单渠道」兜底（`aihub.upstream.*`，即 M1/M2 的形状）。 | §9 的总原则是「数据面永不因控制面故障而整体不可用」。一个 30 秒前的路由表远比「没有路由表」安全。完全无快照（冷启动 + admin 挂）时，退回 M1 单渠道至少还能服务 —— 比 503 好。 | 三种状态各有用例：`adminFailureKeepsServingTheCachedSnapshot`、`noSnapshotAnywhereFallsBackToTheLegacySingleChannel`、`emptySnapshotFromAdminStillAllowsTheLegacyFallback`。 |
-| 7 | **限流按 `tenant + api_key` 两个维度选策略**（**2026-09-26 依控制器 pre-flight 评审修订**：原文只做 `tenant` 维度、key 级行「读进来但不参与判定」，是被评审打回的那一版）。选取顺序是确定性的：① 与本次请求 `apiKeyId` 匹配的 ACTIVE key 级行（`api_key_id = 该值`）优先；② 没有则取该租户的租户级行（该租户 `api_key_id IS NULL` 的 ACTIVE 行）；③ 都没有才用内置默认 `qps=10, burst=20`（与 V1 的列默认值一致）。**每一级内部**多条时取列表里的**最后一条**（读取顺序与 tie-break 见决策 17）。非正的 qps/burst 一律回落到内置默认值（**保留**原有的按行校验规则）。**桶 key 不变**，仍是 `aihub:ratelimit:{tenantId}:{sha256(secret)}`（决策 8）—— 每个密钥的**状态**本来就是隔离的，本次修订只让**策略查找**变成两级。 | **为什么原文是错的（诚实登记）**：原文的理由是「共享的 `ApiKeyView` 在 M3 之前只有字符串 `keyId`，没有 `api_key` 的数值主键，因此无法把请求映射到 `rate_limit_policy.api_key_id`」。这条在同一个计划里就被否掉了：决策 14 正好给 `ApiKeyView` 补了可空的数值 `Long apiKeyId`（admin 侧填 `api_key.id`），而 `ApiKeyView` 由 M1/M2 的 `ApiKeyAuthFilter` 放进 exchange 属性 `ATTRIBUTE_KEY_VIEW`，限流过滤器又**排在鉴权之后**（`@Order(HIGHEST_PRECEDENCE + 150)` > 鉴权），因此**认证后的视图连同数值主键在限流器手里本来就已经可得**；真实 DDL 里 `rate_limit_policy.api_key_id` 就是 `BIGINT NULL`，指向 `api_key.id`。设计文档 §8.1 ② 明写维度是 **`tenant + api_key`**（spec 第 284 行）。原文把「M4 才接 key 级」写成结论，实质是把 spec 要求的维度主动降级，故按评审改回两维。 | 快照里 `RatePolicy` 继续带 `apiKeyId`（`null` = 租户级），但**两级都参与判定**：`ConfigSnapshot.keyPolicies(tenantId, apiKeyId)`（Task 2）+ `ConfigSnapshot.tenantPolicies(tenantId)`，由 `RateLimitResolver.resolve(tenantId, apiKeyId)` 依次取（Task 4）。用例换成**真覆盖**：`prefersTheKeyLevelPolicyWhenTheApiKeyIdsMatch`（id 匹配时 key 级赢过租户级）与 `usesTheTenantLevelPolicyWhenThereIsNoKeyLevelRow`（没有 key 级行 → 用租户级行），原 `RateLimitResolverTest.ignoresKeyLevelPolicies` **删除**。**编译顺序**：数值主键在 Task 11 才进 `ApiKeyView`（决策 14），因此 Task 4 的两级解析是即时生效且被测试钉住的，而「请求 → `apiKeyId`」那一行在 Task 9 留显式占位、**Task 11 收口**（与 Task 7 对 `AdminClient.parse` 的处置是同一套手续，见附录第 14 条）。 |
+| 7 | **限流按 `tenant + api_key` 两个维度选策略**（**2026-09-26 依控制器 pre-flight 评审修订**：原文只做 `tenant` 维度、key 级行「读进来但不参与判定」，是被评审打回的那一版）。选取顺序是确定性的：① 与本次请求 `apiKeyId` 匹配的 ACTIVE key 级行（`api_key_id = 该值`）优先；② 没有则取该租户的租户级行（该租户 `api_key_id IS NULL` 的 ACTIVE 行）；③ 都没有才用内置默认 `qps=10, burst=20`（与 V1 的列默认值一致）。**每一级内部**多条时取列表里的**最后一条**（读取顺序与 tie-break 见决策 17）。非正的 qps/burst 一律回落到内置默认值（**保留**原有的按行校验规则）。**桶 key 不变**，仍是 `aihub:ratelimit:{tenantId}:{sha256(secret)}`（决策 8）—— 每个密钥的**状态**本来就是隔离的，本次修订只让**策略查找**变成两级。 | **为什么原文是错的（诚实登记）**：原文的理由是「共享的 `ApiKeyView` 在 M3 之前只有字符串 `keyId`，没有 `api_key` 的数值主键，因此无法把请求映射到 `rate_limit_policy.api_key_id`」。这条在同一个计划里就被否掉了：决策 14 正好给 `ApiKeyView` 补了可空的数值 `Long apiKeyId`（admin 侧填 `api_key.id`），而 `ApiKeyView` 由 M1/M2 的 `ApiKeyAuthFilter` 放进 exchange 属性 `ATTRIBUTE_KEY_VIEW`，限流过滤器又**排在鉴权之后**（`@Order(HIGHEST_PRECEDENCE + 150)` > 鉴权），因此**认证后的视图连同数值主键在限流器手里本来就已经可得**；真实 DDL 里 `rate_limit_policy.api_key_id` 就是 `BIGINT NULL`，指向 `api_key.id`。设计文档 §8.1 ② 明写维度是 **`tenant + api_key`**（spec 第 284 行）。原文把「M4 才接 key 级」写成结论，实质是把 spec 要求的维度主动降级，故按评审改回两维。 | 快照里 `RatePolicy` 继续带 `apiKeyId`（`null` = 租户级），但**两级都参与判定**：`ConfigSnapshot.keyPolicies(tenantId, apiKeyId)`（Task 2）+ `ConfigSnapshot.tenantPolicies(tenantId)`，由 `RateLimitResolver.resolve(tenantId, apiKeyId)` 依次取（Task 4）。用例换成**真覆盖**：`prefersTheKeyLevelPolicyWhenTheApiKeyIdsMatch`（id 匹配时 key 级赢过租户级）与 `usesTheTenantLevelPolicyWhenThereIsNoKeyLevelRow`（没有 key 级行 → 用租户级行），原 `RateLimitResolverTest.ignoresKeyLevelPolicies` **删除**。**契约顺序**：数值主键（决策 14）在 **Task 2** 就随 `ApiKeyView` 与 `ApiKeyCacheCodec` 一起进共享契约（同一个提交里含 admin 侧填充与 gateway `AdminClient.parse` 的透传），因此 Task 4 的两级解析与 Task 9 的「请求 → `apiKeyId`」都**直接读真值**，没有任何跨任务占位、也没有「后续任务收口」这一步（见全局约束与附录第 14 条）。 |
 | 8 | 令牌桶 key 布局：`aihub:ratelimit:{tenantId}:{sha256(secret)}`，类型是 **Hash**（字段 `t` = 令牌毫数、`k` = 上次填充的毫秒时间戳）；**首次创建时设 `PEXPIRE = max(60s, 20 × burst/qps 秒)`**。本机降级桶的 key 前缀是 `local:ratelimit:`（**与 Redis 布局分开**）。 | `tenant + api_key` 是 §8.1 ② 的明文维度。用 Hash 而不是 String，是为了让「令牌数 + 时间戳」在一次 `HMGET` 里原子读出，并让 `PEXPIRE` 与「两个字段一起消失」成为同一个操作。TTL 让长期不活跃的桶自动回收 —— 否则多租户下 Redis 会被键撑满。**不把「请求的 tenant+key」写进指标标签**（高基数），指标只按「结果」与「来源（redis/local）」打标签。 | Task 3 有键布局与 TTL 公式的固定向量测试；Task 14 的真 Redis 用例直接读 `PTTL`。 |
 | 9 | Lua 脚本**只做令牌桶算术**，时间和参数都由调用方传入：`KEYS[1]` = 桶 key，`ARGV = {nowMillis, qps, burst, ttlMillis}`，返回 `{allowed, remaining, retryAfterMillis}`。**不用 Redis 的 `TIME`**。 | 用 `TIME` 会把「网关的处理时刻」与「桶的判定时刻」拆成两个时钟，排查限流问题时无法把一次拒绝对应到网关日志里的时间戳；而且单机开发时 Redis 容器与宿主时钟偶有偏移。代价是时钟回拨会重置桶（放宽而不是收紧），已在脚本与纯算术里写明。**脚本必须是一次往返、服务器端原子**：这正是 §11 深挖清单第 2 题「Redis + Lua 令牌桶的原子性」的落点。 | `RETRYAFTER` 的公式是 `ceil((1000 - tokensMilli) / qps)`，可被纯算术单元测试精确断言，并由 Task 14 的真 Redis 并发用例证明不超发。 |
 | 10 | 熔断状态 key 布局：`aihub:channel:circuit:{channelId}`，值为 `OPEN`，**TTL 30 秒**（spec 写死的数字），写失败只记 WARN。Redis 不可用时退化为**进程内**熔断表（`ConcurrentHashMap<Long, Long>` + 毫秒时钟）。**所有候选都被熔断时，忽略熔断标记照常选最高优先级的那一组**（并打 WARN + 计数器），而不是回 503。熔断的**触发面只有上游 429**；5xx 只做当次切换，不熔断。 | §9 明文「在 Redis 给该渠道打 30s 熔断标记」，Redis TTL 是唯一能同时做到「跨实例共享」和「自动过期」的载体。全候选熔断时返回 503 会制造一个**由我们自己短路出来的**整体不可用，与总原则冲突。「429 熔断、5xx 不熔断」的理由：30 秒熔断一个 429 渠道是 spec 的要求（429 表示该渠道的配额/速率已满，继续打只会持续失败），而 5xx 可能只是一个坏请求触发的单次故障，把整条渠道熔断 30 秒过于激进。 | Task 5 有 9 条用例（含「Redis 写失败仍标记本地」「TTL 30s 的字面量」「本机标记的两个过期边界」）；Task 6 有「全熔断放行」用例。 |
 | 11 | **引入 WireMock**（`org.wiremock:wiremock`，**版本锁定 3.9.1**），**只加在 `aihub-gateway` 的 test 作用域**，且**只用于多渠道故障注入的里程碑验收**；M1/M2 已建成的 JDK `com.sun.net.httpserver.HttpServer` 夹具（`FakeUpstream` / `FakeAdminServer`）**全部保留**，细粒度、可证伪的用例继续用它们。 | 设计文档在**三处**点名 WireMock：§4.2 技术栈「WireMock 在 M3 引入时再锁定版本」、§10 测试策略「上游契约 = WireMock 模拟多渠道」、§12 里程碑表 M3 的验收标准「**WireMock 注入 429/超时，能自动切换**」。M3 的正式验收标准就写在这个工具名下，用一个自研夹具等价替代会让验收与 spec 的文字对不上。JDK 夹具确实能表达那四种注入，但它**不是一个「多渠道」抽象**：WireMock 的**命名 stub + 请求日志（`verify(...)`）**才能直接表达「三条渠道各注入一种故障，并证明请求真的打到了哪一条」。**可构建性已实测（2026-09-26）**：`mvn -B dependency:get -Dartifact=org.wiremock:wiremock:3.9.1` 经 `aliyunmaven` 镜像解析成功并落进 `.m2repo`（直连 `repo.maven.apache.org` 被出口阻断，镜像通）；另在**仓库之外**的探针工程里用 `@WireMockTest` **进程内**跑通三种注入（429 stub / `withFixedDelay` 挂住 → 客户端超时 / `Fault.MALFORMED_RESPONSE_CHUNK` 中途断流），`Tests run: 1, Failures: 0, Errors: 0` + `BUILD SUCCESS`，端口是本进程内的随机端口（60380），**无 Docker、无活 broker** —— 因此 M1/M2 那条「网关测试不依赖 Docker / 不要求活 broker」的约束仍然成立。 | `aihub-gateway/pom.xml` 增加一个 **test 作用域**的 `org.wiremock:wiremock:3.9.1`（它**不在** Spring Boot BOM 里，必须显式锁版本）；**生产依赖仍然零新增**，`aihub-common/pom.xml` 不动。新增 `WireMockChannelFaultInjectionTest`（Task 10），它承担 spec 原文的里程碑验收；Task 15 Step 3 的「没有新增依赖」核对改为「**生产**依赖无新增 + WireMock 只出现在 test 作用域」。 |
 | 12 | **`QuotaFilter`（§6.2 预算扣减 / 补扣 / 对账）整体推迟到 M4。** 注册这个决策的理由是**两份文档冲突**：M2 计划的「不做」清单把「配额预扣」划给了 M3，而设计文档 §12 的里程碑表把 `配额` 放在 **M4（业务平台）**那一行。**以里程碑表为准**：配额预扣需要 `quota` 表的控制面（租户额度 CRUD）、`billing_daily` 累加、以及每日 02:00 的对账任务，这三样都在 M4 的范围里；M3 先做它没有可扣的额度来源。**并且必须说清 M3 做的是限流、不是余额记账**：`RateLimitFilter` 管的是「每秒能发几个请求」（QPS/burst，令牌桶，丢弃是暂时的、下一个窗口自动恢复）；配额管的是「这个租户还剩多少 token」（余额，扣减是持久的、用完了要充值）。两者共用 Redis 但语义完全不同，**不要把 429 `rate_limit_exceeded` 和 429 `QUOTA_EXCEEDED` 混为一谈**。 | M3 **不碰** `quota` 表、不做 `POST /internal/quota/reserve`、不写 `billing_daily`。被推迟的还有 §9 的「Redis 不可用时配额降级为放行 + 告警」——没有配额就没有这条降级。README 的「已知边界」必须写下这条移交。 |
 | 13 | **`/v1/**` 的错误体一律保持 OpenAI 形状**，包括 M3 新增的 `rate_limit_exceeded`（429）与 `model_not_found`（404）。设计文档 §9 第 334 行「流开始前失败 → 标准 HTTP 状态码 + 统一错误体 `{"code","message"}`」**与 M1 契约冲突，该行按「已被取代」处理**。 | M1 已经用**官方 OpenAI Python SDK 2.41.1** 验收过 `/v1/**` 的 401 形状（`error.code == "invalid_api_key"`），M2 也在此契约上加了计量。给数据面套 admin 信封等于把协议换成私有协议，所有 SDK 的 `error.message` 取值路径会同时失效 —— 这不是「按 spec 实现」，是回归。 | 新错误码的取值与场景固化进 `docs/CONVENTIONS.md` 第 4 节的表；`GatewayErrors` 的签名不新增重载。 |
-| 14 | 为了让 `request_log.api_key_id` 有值，**给共享的 `ApiKeyView` 加一个可空 `Long apiKeyId` 分量**（放在 `expireAt` 之后）。admin 侧解析回源/铸造时填 `api_key.id`，Redis 载荷加第 6 段，gateway 侧透传。 | M2 决策 8 明确把「`api_key_id` 恒为 NULL」列为 M4 前置项，理由是「补它等于改跨服务契约（admin resolve 响应 + Redis 载荷格式 + 两侧测试）」。M3 正好要动 `channel_id`（多渠道让「哪条渠道服务了这次请求」第一次有了含义），把两个 id 一起补上，成本只是同一批文件的同一个改动，收益是 `request_log` 第一次能按渠道和 key 聚合。**载荷加段是向后不兼容的**：旧 Redis entry 会被新 `decode` 判为畸形并**返回 null（缓存未命中 → 回源 admin → 重写）**，这正是我们要的收敛行为，不需要清库。 | `ApiKeyCacheCodec` 段数 5 → 6；`ApiKeyToolingTest` 的固定向量必须同步更新（那是契约测试，改它是对的）；admin `ApiKeyService` 与 gateway `AdminClient.Http.parse` 各一行。`channelId` 仍由路由结果填，不属于这一条。 |
+| 14 | 为了让 `request_log.api_key_id` 有值，**给共享的 `ApiKeyView` 加一个可空 `Long apiKeyId` 分量**（放在 `expireAt` 之后）。admin 侧解析回源/铸造时填 `api_key.id`，Redis 载荷加第 6 段，gateway 侧透传。 | M2 决策 8 明确把「`api_key_id` 恒为 NULL」列为 M4 前置项，理由是「补它等于改跨服务契约（admin resolve 响应 + Redis 载荷格式 + 两侧测试）」。M3 正好要动 `channel_id`（多渠道让「哪条渠道服务了这次请求」第一次有了含义），把两个 id 一起补上，成本只是同一批文件的同一个改动，收益是 `request_log` 第一次能按渠道和 key 聚合。**载荷加段是向后不兼容的**：旧 Redis entry 会被新 `decode` 判为畸形并**返回 null（缓存未命中 → 回源 admin → 重写）**，这正是我们要的收敛行为，不需要清库。 | **Task 2 落地**（与共享数据契约同一个提交，见全局约束的「不许跨任务占位」）：`ApiKeyCacheCodec` 段数 5 → 6；`ApiKeyToolingTest` 的固定向量必须同步更新（那是契约测试，改它是对的）；admin `ApiKeyService` 与 gateway `AdminClient.Http.parse` 各一行。Task 9 的 `RateLimitFilter` 因此**直接**读 `view.apiKeyId()`（没有占位、不需要后续任务收口）；计量侧的 `RelayMetering` 填充属 Task 11 —— 那是**计量持久化**的一环，不是契约变更。`channelId` 仍由路由结果填，不属于这一条。 |
 | 15 | 客户端传来的 **`model` 只在「进入计量事件」时截断**：超过 128 字符则截到 128（保留前 128 个字符的原文，不加省略号）。**转发给上游的请求体逐字节不变**（仍然原样带上客户端写的 model）。 | `request_log.model` 是 `VARCHAR(128)`，超长会让 INSERT 报「数据过长」→ `DataAccessException` → 重试 3 次 → 进 `aihub.metering.dlq`，而 DLQ 是**任何持合法 API Key 的客户端都能触碰**的入口（M2 已知边界）。**不能**在网关拒掉这个请求：那会把一个纯粹的计量侧问题变成客户端可见的行为变更，而且上游本来能处理长模型名。截断发生在组装事件的地方（计量是派生的，截断只损失精度，不损失真值 —— 真值在上游日志里）。 | Task 11 有用例 `oversizedModelIsTruncatedInTheEventButForwardedVerbatim` 同时断言「事件里是 128 字符」与「上游收到的请求体含原始长 model」。 |
 | 16 | **API Key 吊销 / 停用的生效延迟是显式接受的**：本机 Caffeine `≤30s`、跨实例 Redis `≤5m`。M3 **不加**吊销广播，也**不写** Pub/Sub 监听器。 | M1 的 t4-1 把这个问题挂起来等 M3 定。现在的答案是「接受，并说清楚为什么」：① §6.3 的 Pub/Sub 失效机制只针对**配置快照**，而 API Key 缓存是**鉴权信任源**，它的失效通道需要鉴权保护（否则能发消息的人就能驱逐任意 key 的缓存）；② M3 没有配置写入方，Pub/Sub 连发布端都不存在，为一个不存在的发布端写监听器 = 一条永远不触发的代码路径（在「必须有测试」的纪律下它只能靠直接调用监听方法来「测」，那是自欺）；③ 真正的收敛手段是 M4 的吊销接口 + 显式 `DEL`，比 TTL 更精确。**不接受的做法**：为了「立刻生效」而把 Redis TTL 调到几秒 —— 那会让 Redis 变成每次请求都回源的控制面，与决策 A 的初衷相反。 | 写进 `docs/CONVENTIONS.md` 第 6.6 节（已有 ≤30s/≤5m 的表述，补上「M3 显式接受该窗口，收敛手段是 M4 的显式 DEL」）与 README 已知边界。**代码不改**。 |
 | 17 | `rate_limit_policy` **没有唯一约束**（V1 只有 `KEY idx_rate_limit_tenant (tenant_id)`），M3 **不加**唯一索引。策略行的选取规则（**2026-09-26 随决策 7 的修订扩到两个维度，读取顺序本身不变**）：组装快照时按 `tenant_id ASC, api_key_id IS NULL DESC, id ASC` 读取；网关侧**在每一级内部**取列表里**最后一条** —— 租户级取最后一条 `api_key_id IS NULL` 的行，key 级取该 `apiKeyId` 的最后一行。两者合起来等于「**同一租户、同一维度内取 `id` 最大的那条 ACTIVE 策略**」（key 级行按 `id` 升序交错在租户级行之后，按 `apiKeyId` 过滤后仍是 `id` 最大者）。同租户出现多条**同维度** ACTIVE 策略时 admin 侧打一次 WARN（租户级与 key 级各判各的）。 | 加唯一索引要改 V1（禁止）或加 V2（决策 12 禁止）。语义上「取最后插入的那条」是可预测且无需 DDL 的：M4 的控制台写入应当先停用旧行（`status`），因此 `status='ACTIVE'` + `id DESC` 恰好表达「当前生效的那条」。打 WARN 而不是抛异常：数据脏不能变成数据面不可用。 | Task 4 的 `usesTheLastPolicyOfTheMatchingDimensionWhenSeveralArePresent`（并覆盖 key 级同键多条取最后一条）与 Task 13 的 `multipleTenantLevelPoliciesWarnButStillPickTheLast` 各钉一半（读取顺序 + 实际取值）。 |
@@ -98,8 +99,8 @@ M3 结束后新增/修改的文件（`改` = 修改既有文件；**没有** `ai
 | `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigSnapshot.java` | 新增：快照聚合（version / defaultModel / generatedAt / channels / routes / ratePolicies） |
 | `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigSnapshotCodec.java` | 新增：快照的分隔符编解码（**Redis 缓存载荷 + 本地缓存载荷**，见决策 4） |
 | `aihub-admin/aihub-common/src/main/java/com/aihub/common/ratelimit/RateLimitScript.java` | 新增：Lua 脚本与令牌桶键布局的**唯一真相**（gateway 跑它，admin 侧的集成测试验它） |
-| `aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey/ApiKeyView.java` | **改**：加可空 `Long apiKeyId` 分量（决策 14） |
-| `aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey/ApiKeyCacheCodec.java` | **改**：载荷 5 段 → 6 段（决策 14） |
+| `aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey/ApiKeyView.java` | **改**：加可空 `Long apiKeyId` 分量（决策 14，**Task 2**） |
+| `aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey/ApiKeyCacheCodec.java` | **改**：载荷 5 段 → 6 段（决策 14，**Task 2**） |
 | `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/ChannelEntity.java` | 新增：`channel` 实体（`apiKeyCipher` / `keyVersion` / `weight` / `priority` / `timeoutMs` / `status`） |
 | `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/ModelRouteEntity.java` | 新增：`model_route` 实体 |
 | `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/RateLimitPolicyEntity.java` | 新增：`rate_limit_policy` 实体（含 `apiKeyId`） |
@@ -116,7 +117,7 @@ M3 结束后新增/修改的文件（`改` = 修改既有文件；**没有** `ai
 | `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigClient.java` | 新增：三级读取 + singleflight + 版本比对（§6.3 的落点），**永不返回 null** |
 | `aihub-gateway/src/main/java/com/aihub/gateway/config/LegacyChannel.java` | 新增：`aihub.upstream.*` 合成的**哨兵渠道**（`id = Long.MIN_VALUE`） |
 | `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigConfig.java` | 新增：`@EnableConfigurationProperties(GatewayConfigProperties.class)` + beans |
-| `aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java` | **改**：加 `CONFIG_SNAPSHOT_PATH` 与 `configSnapshot()`（复用同一个 `Http` 实现与 `InternalHmac`）；`parse` 填 `apiKeyId` |
+| `aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java` | **改**：加 `CONFIG_SNAPSHOT_PATH` 与 `configSnapshot()`（复用同一个 `Http` 实现与 `InternalHmac`）；`parse` 填 `apiKeyId`（决策 14，**Task 2**，Task 7 不再动它） |
 | `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/RateLimitDecision.java` | 新增：判定结果 record（allowed / remaining / retryAfterMs / limit / burst / source） |
 | `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/TokenBucket.java` | 新增：令牌桶的**纯算术**（Redis Lua 与本机降级桶共用） |
 | `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/LuaTokenBucket.java` | 新增：对 `RateLimitScript` 的**纯委托** |
@@ -136,7 +137,7 @@ M3 结束后新增/修改的文件（`改` = 修改既有文件；**没有** `ai
 | `aihub-gateway/src/main/java/com/aihub/gateway/upstream/UpstreamClientConfig.java` | **改**：把构造交给工厂，保留 `upstreamWebClient` bean（= `factory.legacy()`） |
 | `aihub-gateway/src/main/java/com/aihub/gateway/relay/ChatRelayController.java` | **改**：路由选择 + 失败转移循环 + 每渠道密钥注入 + 白名单加 `retry-after-ms` / IETF `RateLimit-*` |
 | `aihub-gateway/src/main/java/com/aihub/gateway/relay/ModelsController.java` | **改**：模型列表 = 快照模型名 ∪ 遗留默认模型 |
-| `aihub-gateway/src/main/java/com/aihub/gateway/meter/RelayMetering.java` | **改**：`channelId` / `apiKeyId` 填充（决策 14）、model 截断 128（决策 15） |
+| `aihub-gateway/src/main/java/com/aihub/gateway/meter/RelayMetering.java` | **改**：`channelId` 填充（Task 10）+ `apiKeyId` 取自 `view.apiKeyId()`（决策 14，**Task 11**）、model 截断 128（决策 15） |
 | `aihub-gateway/src/main/java/com/aihub/gateway/auth/ApiKeyAuthFilter.java` | **改**：把 `sha256(secret)` 写进 exchange 属性供限流用（`ATTRIBUTE_KEY_HASH`） |
 | `aihub-gateway/src/main/java/com/aihub/gateway/error/GatewayErrors.java` | **不改**：新增错误码只用到既有的 `write(...)` 签名 |
 | `aihub-gateway/src/main/resources/application.yml` | **改**：`aihub.channel.master-key`、`aihub.config.*`、`aihub.ratelimit.enabled` |
@@ -153,7 +154,7 @@ M3 结束后新增/修改的文件（`改` = 修改既有文件；**没有** `ai
 | `aihub-common/src/test/java/com/aihub/common/crypto/ChannelKeyCipherTest.java` | 往返、nonce 唯一、篡改必失败、版本自描述、轮换、未知版本、空主密钥、主密钥表解析 |
 | `aihub-common/src/test/java/com/aihub/common/config/ConfigSnapshotCodecTest.java` | 编解码往返、固定向量、字段转义、畸形载荷、四个 record 的语义 |
 | `aihub-common/src/test/java/com/aihub/common/ratelimit/RateLimitScriptTest.java` | 脚本字面量 + 键前缀 + Hash 字段名（跨模块契约） |
-| `aihub-common/src/test/java/com/aihub/common/apikey/ApiKeyToolingTest.java` | **改**：6 段固定向量 + `apiKeyId` 往返 + 旧 5 段载荷被判畸形（决策 14） |
+| `aihub-common/src/test/java/com/aihub/common/apikey/ApiKeyToolingTest.java` | **改**（**Task 2**）：6 段固定向量 + `apiKeyId` 往返 + 旧 5 段载荷被判畸形（决策 14） |
 | `aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/TokenBucketTest.java` | 纯算术：满桶、补充、封顶、拒绝、retryAfter 公式、时钟回拨 |
 | `aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/LuaTokenBucketTest.java` | 委托后的脚本与键布局与共享常量逐字节一致 |
 | `aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/LocalRateLimiterTest.java` | 本机桶：独立 key、退避、并发不超发（真实线程）、空闲淘汰 |
@@ -178,7 +179,7 @@ M3 结束后新增/修改的文件（`改` = 修改既有文件；**没有** `ai
 | `aihub-web/src/test/java/com/aihub/admin/ratelimit/RedisTokenBucketIntegrationTest.java` | **真 Redis**：Lua 的补充/封顶/拒绝/TTL + 并发 20×20 恰好放行 burst（原子性证据） |
 
 **本计划的预期测试总数**（Task 15 会要求实测并写进 README；**以实测为准**，这里的数字只是给实施者一个「跑偏了没有」的参照）：
-`aihub-common` 基线 21 → 约 **46**；`aihub-gateway` 基线 132 → 约 **249**（含 WireMock 多渠道故障注入验收的 5 条）；`aihub-web` 基线 47 → 约 **71**。
+`aihub-common` 基线 21 → 约 **48**；`aihub-gateway` 基线 132 → 约 **246**（含 WireMock 多渠道故障注入验收的 5 条）；`aihub-web` 基线 47 → 约 **71**。
 
 ---
 
@@ -708,7 +709,14 @@ git commit -m "feat: add the shared aes-gcm channel key cipher with dual-version
 
 ---
 
-## Task 2: 快照的共享数据契约与编解码（`aihub-common`）
+## Task 2: 共享数据契约与编解码（`aihub-common`：配置快照 + `ApiKeyView` 的数值主键）
+
+> **本任务承担两个契约**：① 配置快照的四个 record 与 `ConfigSnapshotCodec`（决策 4）；
+> ② 决策 14 的 `ApiKeyView` 第 6 个分量与 `ApiKeyCacheCodec` 的 5 → 6 段。两者都是「后续任务直接使用」的
+> 共享契约，因此都必须**在本任务内一次性落地并让整个反应堆编译通过**（全局约束：不许跨任务占位）。
+> 第 ② 项之所以在这里而不是在 Task 11：Task 4 的 `RateLimitResolver.resolve(tenantId, apiKeyId)` 与
+> Task 9 的限流过滤器都要读这个数值主键，契约晚于使用方就意味着 Task 9 必须带一个占位 —— 那正是
+> 本计划 2026-09-26 修掉的结构问题。
 
 **Files:**
 - Create: `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ChannelDescriptor.java`
@@ -716,7 +724,13 @@ git commit -m "feat: add the shared aes-gcm channel key cipher with dual-version
 - Create: `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/RatePolicy.java`
 - Create: `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigSnapshot.java`
 - Create: `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigSnapshotCodec.java`
+- Modify: `aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey/ApiKeyView.java`（**决策 14**：加可空 `Long apiKeyId`）
+- Modify: `aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey/ApiKeyCacheCodec.java`（**决策 14**：5 段 → 6 段）
+- Modify: `aihub-admin/aihub-service/src/main/java/com/aihub/service/apikey/ApiKeyService.java`（`mint` 与 `loadFromDb` 各一行，填 `api_key.id`）
+- Modify: `aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java`（`parse` 透传 `apiKeyId`，一行）
+- Modify: `aihub-gateway/src/test/java/com/aihub/gateway/auth/ApiKeyAuthFilterTest.java`、`aihub-gateway/src/test/java/com/aihub/gateway/auth/ApiKeyFilterContractTest.java`、`aihub-gateway/src/test/java/com/aihub/gateway/meter/RelayMeteringTest.java`、`aihub-gateway/src/test/java/com/aihub/gateway/relay/RelayMeteringFlowTest.java`（既有 `new ApiKeyView(...)` 补第 6 个参数）
 - Test: `aihub-admin/aihub-common/src/test/java/com/aihub/common/config/ConfigSnapshotCodecTest.java`
+- Test: `aihub-admin/aihub-common/src/test/java/com/aihub/common/apikey/ApiKeyToolingTest.java`（**改**：固定向量同步 + 两条新用例）
 
 **Interfaces:**
 - Consumes: 无（JDK-only）。
@@ -727,8 +741,12 @@ git commit -m "feat: add the shared aes-gcm channel key cipher with dual-version
   - `record ConfigSnapshot(long version, long generatedAtEpochMilli, List<ChannelDescriptor> channels, List<ModelRouteDescriptor> routes, List<RatePolicy> ratePolicies, String defaultModel)`：静态 `ConfigSnapshot empty()`；`Optional<ChannelDescriptor> channel(long id)`；`List<ChannelDescriptor> channelsSupporting(String model)`；`List<ModelRouteDescriptor> routesFor(String model)`；`List<RatePolicy> tenantPolicies(long tenantId)`；`List<RatePolicy> keyPolicies(long tenantId, long apiKeyId)`；`Set<String> modelNames()`（排序去重）。**决策 7 修订后两个维度都要有各自的取值入口**：`keyPolicies` 是 key 级（`apiKeyId` 相等）、`tenantPolicies` 是租户级（`apiKeyId == null`）。
   - `ConfigSnapshotCodec`：`static String encode(ConfigSnapshot)`、`static ConfigSnapshot decode(String)`（畸形返回 `null`）、常量 `FORMAT_VERSION = 1`。
   - **重要**：`channelsSupporting(model)` 返回的是**渠道**列表（顺序 = `routes` 的顺序），`weight` / `priority` **以 `model_route` 的值为准**，因此 `RouteResolver`（Task 6）必须用 `routesFor(model)` 拿 route 级权重、再用 `channel(id)` 联表。两者都在同一个 record 上，避免两侧各拼一份。
+  - **决策 14 的共享契约（本任务第 ② 项，Task 4 / 9 / 11 直接使用，不再有占位）**：
+    - `record ApiKeyView(String keyId, long tenantId, String tenantName, String status, Instant expireAt, Long apiKeyId)`（**新参数在最后**；`apiKeyId` 可空，`UNUSABLE` 补 `null`）。
+    - `ApiKeyCacheCodec` 载荷变为 **6 段**：`{keyId}|{tenantId}|{tenantName}|{status}|{expireAtEpochSecond}|{apiKeyId}`（第 6 段空串表示 `null`）；**旧 5 段载荷被 `decode` 判为畸形并返回 `null`**（缓存未命中 → 回源 admin → 重写，这是收敛行为而不是故障）。
+    - 生产者/消费者各一行：admin `ApiKeyService` 的 `mint(...)` / `loadFromDb(...)` 填 `api_key.id`；gateway `AdminClient.Http.parse` 把响应里的 `apiKeyId` 读进视图。
 
-**测试用例清单**（`ConfigSnapshotCodecTest`，12 条）：
+**测试用例清单**（`ConfigSnapshotCodecTest`，12 条；**决策 14 的契约测试另加在 `ApiKeyToolingTest`**，见 Step 9）：
 
 | 用例 | 钉住什么 |
 |---|---|
@@ -1367,11 +1385,211 @@ mvn -B -pl aihub-admin/aihub-common test
 
 预期：`Tests run: 45, Failures: 0, Errors: 0`（Task 1 的 33 + 本任务 12）。报告实测数字。
 
-- [ ] **Step 7: 提交**
+- [ ] **Step 7: 改 `ApiKeyView`（决策 14：加可空 `Long apiKeyId`）**
+
+> **从这里开始的第 ② 项契约与前面的快照契约在**同一个提交**里落地**（全局约束：契约变更必须与它的
+> 生产者/消费者同一个提交，否则后续任务就得带占位）。第 ② 项是决策 14，它被 Task 4（策略解析）、
+> Task 9（限流过滤器读数值主键）、Task 11（计量落库）直接使用 —— 因此必须在本任务内完成，
+> 让整个反应堆编译通过。
+
+把 `aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey/ApiKeyView.java` 的 record 头与 `UNUSABLE` 改为：
+
+```java
+public record ApiKeyView(String keyId, long tenantId, String tenantName, String status, Instant expireAt,
+                         Long apiKeyId) {
+```
+
+```java
+    public static final ApiKeyView UNUSABLE = new ApiKeyView("", 0L, "", "MISSING", null, null);
+```
+
+并在类 javadoc 里补一段：
+
+```java
+ * <p>{@code apiKeyId} 是 {@code api_key} 表的**数值主键**，M3 起随密钥视图一起下发：
+ * M2 时它恒为 {@code null}（共享类型里没有它），导致 {@code request_log.api_key_id} 无法填充、
+ * 用量无法按 API Key 聚合，也导致限流无法把请求映射到 {@code rate_limit_policy.api_key_id}
+ * （决策 7 的两维策略需要一个数值键）。补齐它需要同时改三处 —— 本 record、{@code ApiKeyCacheCodec}
+ * 的载荷段数、两侧的解析（admin 的 {@code ApiKeyService} 与 gateway 的 {@code AdminClient.Http.parse}）
+ * （计划决策 14）。{@code UNUSABLE} 与「查不到」的哨兵仍然带 {@code null}：**匿名桶没有数值主键，
+ * 那是正常路径而不是错误**。
+```
+
+> 第 6 个参数放在**最后**（`expireAt` 之后）：所有既有构造点都会变成编译错误，编译器会把它们
+> 一一点出来 —— 这是好事（见 Step 11），而不是要绕开的麻烦。
+
+- [ ] **Step 8: 改 `ApiKeyCacheCodec`（5 段 → 6 段）**
+
+在 `aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey/ApiKeyCacheCodec.java` 里把 `FIELD_COUNT` 改为 `6`，`encode` 末尾追加一段，`decode` 解析第 6 段：
+
+```java
+    /**
+     * 载荷段数。M3 起是 6（新增 {@code apiKeyId}）；旧载荷会被 {@link #decode} 判为畸形
+     * → 缓存未命中 → 回源重写。这是**收敛行为**，不是故障，因此不需要清 Redis。
+     */
+    private static final int FIELD_COUNT = 6;
+```
+
+```java
+    public static String encode(ApiKeyView view) {
+        return escape(view.keyId()) + DELIMITER
+                + view.tenantId() + DELIMITER
+                + escape(view.tenantName()) + DELIMITER
+                + escape(view.status()) + DELIMITER
+                + (view.expireAt() == null ? "" : String.valueOf(view.expireAt().getEpochSecond())) + DELIMITER
+                + (view.apiKeyId() == null ? "" : String.valueOf(view.apiKeyId()));
+    }
+```
+
+`decode` 里把第 5、6 段一起取出再构造：
+
+```java
+        try {
+            String expireAt = parts.get(4);
+            String apiKeyId = parts.get(5);
+            return new ApiKeyView(parts.get(0), Long.parseLong(parts.get(1)), parts.get(2), parts.get(3),
+                    expireAt.isEmpty() ? null : Instant.ofEpochSecond(Long.parseLong(expireAt)),
+                    apiKeyId.isEmpty() ? null : Long.valueOf(apiKeyId));
+        } catch (RuntimeException e) {
+            return null;
+        }
+```
+
+并在类 javadoc（现在是 `{@code keyId|tenantId|tenantName|status|expireAtEpochSecond}` 那句）里改成 6 段并补一句：
+
+```java
+ * <p>载荷：{@code keyId|tenantId|tenantName|status|expireAtEpochSecond|apiKeyId}（第 6 段空串表示 null）。
+ *
+ * <p><b>段数是跨服务契约</b>：gateway 读 admin 写的载荷，任何一侧改了段数都会让另一侧
+ * {@code decode} 返回 {@code null}（缓存未命中 → 回源 → 重写）。这**不是**故障，是收敛行为，
+ * 因此不需要清 Redis；但改段数时必须同步 {@code ApiKeyToolingTest} 的固定向量。
+```
+
+- [ ] **Step 9: 同步契约测试 `ApiKeyToolingTest`（固定向量 + 两条新用例）**
+
+在 `aihub-admin/aihub-common/src/test/java/com/aihub/common/apikey/ApiKeyToolingTest.java` 里：
+
+（a）所有既有的 `new ApiKeyView(...)` 补第 6 个参数 —— `cacheCodecRoundTripsANormalView`、
+`cacheCodecRoundTripsANullExpireAt`、`cacheCodecRoundTripsNamesContainingDelimiterAndBackslash` 用数值主键 `42L`
+（它们钉的是编解码互逆）；`viewIsUsableOnlyWhenActiveAndUnexpired` 的四处构造用 `null`（它们只钉 `usable()`）。
+
+（b）把段数契约的那条用例改成 6 段下的形态（**这不是「削弱」，而是把契约从 5 段换成 6 段**：
+4 段仍然畸形、7 段仍然畸形，第 6 段的数字解析失败也必须畸形）：
+
+```java
+    @Test
+    void cacheCodecReturnsNullForMalformedPayloads() {
+        assertThat(ApiKeyCacheCodec.decode(null)).isNull();
+        assertThat(ApiKeyCacheCodec.decode("")).isNull();
+        assertThat(ApiKeyCacheCodec.decode("not-a-key-view")).isNull();
+        assertThat(ApiKeyCacheCodec.decode("ak_x|42|acme|ACTIVE")).isNull();               // 只有 4 段
+        assertThat(ApiKeyCacheCodec.decode("ak_x|42|acme|ACTIVE|1|42|extra")).isNull();    // 有 7 段
+        assertThat(ApiKeyCacheCodec.decode("ak_x|not-a-long|acme|ACTIVE||")).isNull();
+        assertThat(ApiKeyCacheCodec.decode("ak_x|42|acme|ACTIVE|not-an-epoch|")).isNull();
+        assertThat(ApiKeyCacheCodec.decode("ak_x|42|acme|ACTIVE||not-a-long")).isNull();
+    }
+```
+
+（c）新增两条用例（契约测试本身）：
+
+```java
+    /** 第 6 段是数值主键：非空时必须严格往返，且载荷的字面量形态被钉死。 */
+    @Test
+    void cacheCodecRoundTripsTheNumericApiKeyId() {
+        ApiKeyView view = new ApiKeyView("ak_abc", 7L, "demo", ApiKeyView.STATUS_ACTIVE, null, 42L);
+
+        assertThat(ApiKeyCacheCodec.encode(view)).isEqualTo("ak_abc|7|demo|ACTIVE||42");
+        assertThat(ApiKeyCacheCodec.decode(ApiKeyCacheCodec.encode(view))).isEqualTo(view);
+    }
+
+    /**
+     * 旧载荷（5 段）必须被判为畸形 → 缓存未命中 → 回源 admin → 重写，而不是解出一个
+     * {@code apiKeyId = null} 的「半成品」—— 后者会让限流静默丢掉 key 级策略（决策 7 修订的那一维）。
+     */
+    @Test
+    void legacyFiveFieldPayloadsAreRejectedSoTheCacheConverges() {
+        assertThat(ApiKeyCacheCodec.decode("ak_abc|7|demo|ACTIVE|1800000000")).isNull();
+    }
+```
 
 ```powershell
-git add aihub-admin/aihub-common/src/main/java/com/aihub/common/config aihub-admin/aihub-common/src/test/java/com/aihub/common/config
-git commit -m "feat: add the shared config snapshot contract and its delimiter codec"
+mvn -B -pl aihub-admin/aihub-common test "-Dtest=ApiKeyToolingTest"
+```
+
+预期：`Tests run: 15, Failures: 0, Errors: 0` + `BUILD SUCCESS`（既有 13 + 新增 2）。
+
+- [ ] **Step 10: 生产者与消费者各一行（同一个提交里必须一起改）**
+
+（a）在 `aihub-admin/aihub-service/src/main/java/com/aihub/service/apikey/ApiKeyService.java` 的 `loadFromDb` 返回里补第 6 个参数：
+
+```java
+        return Optional.of(new ApiKeyView(entity.getKeyId(), entity.getTenantId(), tenantName,
+                entity.getStatus(), entity.getExpireAt(), entity.getId()));
+```
+
+`mint(...)` 里的 `cache(keyHash, new ApiKeyView(...))` 也补 `entity.getId()`（MyBatis-Plus 在 insert 后会回填自增主键）：
+
+```java
+        cache(keyHash, new ApiKeyView(keyId, tenant.getId(), tenantName, ApiKeyView.STATUS_ACTIVE, expireAt,
+                entity.getId()));
+```
+
+（b）在 `aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java` 的 `Http.parse(int status, String body)` 里把构造 `ApiKeyView` 的那一行改成：
+
+```java
+                return Optional.of(new ApiKeyView(
+                        data.path("keyId").asText(),
+                        data.path("tenantId").asLong(),
+                        data.path("tenantName").asText(),
+                        data.path("status").asText(),
+                        expireAt.isNull() || expireAt.isMissingNode() ? null : Instant.parse(expireAt.asText()),
+                        data.path("apiKeyId").isNumber() ? data.get("apiKeyId").asLong() : null));
+```
+
+> admin 的 `/internal/api-keys/resolve` 与网关的 `parse` 共用同一个 `ApiKeyView`，因此 admin 侧加了第 6 个
+> 分量后响应体里会**自动**多出 `apiKeyId`；网关侧只需要把这一行读进来。**Task 7 新增 `configSnapshot()` 时
+> 不要再动这一行**（那时它已经是 6 个参数）。
+
+- [ ] **Step 11: 编译整个反应堆，补掉所有既有 `new ApiKeyView(...)` 调用点**
+
+```powershell
+mvn -B -q test-compile -DskipTests
+```
+
+预期：`BUILD FAILURE` 并列出所有 `constructor ApiKeyView cannot be applied to given types` 的位置。**逐个补参数**（测试里补 `42L`、或补 `null` 表示「这条用例不关心数值主键」；生产代码里补真实值），至少包括：
+
+- `ApiKeyToolingTest`（Step 9 已补）；
+- `aihub-gateway/src/test/java/com/aihub/gateway/auth/ApiKeyAuthFilterTest.java`（两处构造）；
+- `aihub-gateway/src/test/java/com/aihub/gateway/auth/ApiKeyFilterContractTest.java` 的 `VALID_VIEW`；
+- `aihub-gateway/src/test/java/com/aihub/gateway/meter/RelayMeteringTest.java`；
+- `aihub-gateway/src/test/java/com/aihub/gateway/relay/RelayMeteringFlowTest.java` 的假 admin 视图。
+
+补齐后**再跑一次同一条命令**，必须绿（全反应堆 `BUILD SUCCESS`）。
+
+> 契约在本任务就位之后，Task 7 / 9 / 10 **新建**的测试与代码一律**按 6 个分量写**（Task 9 的
+> `ApiKeyView` 直接带数值主键 `42L`，`RateLimitFilter` 直接读 `view.apiKeyId()`），不存在
+> 「先写 5 个分量、以后有人回来补」这种跨任务占位。
+>
+> **不要**用「加一个 5 参数的便捷构造器」来减少改动：那会让「谁填了 apiKeyId」变得不可追踪，
+> 而这条决策的全部价值就是让它**必须**被显式填一次。
+
+- [ ] **Step 12: 跑本任务自述的测试与受影响模块**
+
+```powershell
+mvn -B -pl aihub-admin/aihub-common test
+mvn -B -pl aihub-gateway test
+$env:DOCKER_HOST='tcp://127.0.0.1:2375'; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ApiKeyMintAndResolveTest"
+```
+
+预期：`aihub-common 47`（Task 1 的 33 + 快照 12 + 契约测试 2）、`aihub-gateway 132`（**M2 基线，不回归**）、
+`ApiKeyMintAndResolveTest` 绿。若它报「`api_key_id` 为 null」，检查 `mint` 是否也补了 `entity.getId()`
+（MyBatis-Plus 只在 insert 后回填自增主键，漏一处就只有「新铸的 key」那一条路径是 null）。
+
+- [ ] **Step 13: 提交**
+
+```powershell
+git add aihub-admin/aihub-common/src/main/java/com/aihub/common/config aihub-admin/aihub-common/src/test/java/com/aihub/common/config aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey aihub-admin/aihub-common/src/test/java/com/aihub/common/apikey aihub-admin/aihub-service/src/main/java/com/aihub/service/apikey/ApiKeyService.java aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java aihub-gateway/src/test/java/com/aihub/gateway/auth/ApiKeyAuthFilterTest.java aihub-gateway/src/test/java/com/aihub/gateway/auth/ApiKeyFilterContractTest.java aihub-gateway/src/test/java/com/aihub/gateway/meter/RelayMeteringTest.java aihub-gateway/src/test/java/com/aihub/gateway/relay/RelayMeteringFlowTest.java
+git commit -m "feat: add the shared config snapshot contract and carry the numeric api key id"
 ```
 
 **验收标准**
@@ -1380,13 +1598,20 @@ git commit -m "feat: add the shared config snapshot contract and its delimiter c
 3. 编解码严格互逆（含字段里出现 `|` / `\` / `\n` / `\r`），载荷不含裸的 `\r`；畸形载荷（含未知格式版本、字段数不对）返回 `null`，未知**段字母**只跳过该段。
 4. `tenantPolicies(tenantId)` 只返回租户级策略、`keyPolicies(tenantId, apiKeyId)` 只返回该 key 的 key 级策略（决策 7 修订后两个维度都生效，各自有取值入口且互不串味）。
 5. main 作用域仍然零第三方依赖。
+6. **决策 14 的契约在本任务内完整落地**：`ApiKeyView` 是 6 个分量（`Long apiKeyId` 在最后，可空）；`ApiKeyCacheCodec` 是 6 段，**旧的 5 段载荷被判为畸形并返回 `null`**（缓存收敛，不是故障）；固定向量与段数用例同步更新。
+7. **契约的生产者/消费者与契约同一个提交**：admin `ApiKeyService` 的 `mint` / `loadFromDb` 填 `api_key.id`，gateway `AdminClient.parse` 透传 `apiKeyId`；`ApiKeyMintAndResolveTest` 证明 `resolve` 返回的视图里 `apiKeyId == api_key.id`。
+8. **整个反应堆编译通过**：`mvn -B -q test-compile -DskipTests` 绿，仓库里**没有**任何「5 个分量的 `ApiKeyView`」残留，也没有任何「先传 `null`、以后补」的占位或待办注释（后续任务一律直接使用真值）。
 
 **必须运行的命令与期望输出**
 
 | 命令 | 期望 |
 |---|---|
 | `mvn -B -pl aihub-admin/aihub-common test "-Dtest=ConfigSnapshotCodecTest"` | `Tests run: 12, Failures: 0, Errors: 0` + `BUILD SUCCESS` |
-| `mvn -B -pl aihub-admin/aihub-common test` | `Tests run: 45, Failures: 0, Errors: 0` + `BUILD SUCCESS` |
+| `mvn -B -pl aihub-admin/aihub-common test "-Dtest=ApiKeyToolingTest"` | `Tests run: 15, Failures: 0, Errors: 0` + `BUILD SUCCESS` |
+| `mvn -B -q test-compile -DskipTests`（整个反应堆） | `BUILD SUCCESS`（**没有** `constructor ApiKeyView cannot be applied to given types`） |
+| `mvn -B -pl aihub-admin/aihub-common test` | `Tests run: 47, Failures: 0, Errors: 0` + `BUILD SUCCESS` |
+| `mvn -B -pl aihub-gateway test` | `Tests run: 132, Failures: 0, Errors: 0` + `BUILD SUCCESS`（M2 基线，不回归） |
+| `$env:DOCKER_HOST='tcp://127.0.0.1:2375'; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ApiKeyMintAndResolveTest"` | `Failures: 0, Errors: 0` + `BUILD SUCCESS` |
 
 ---
 
@@ -2198,7 +2423,7 @@ mvn -B -pl aihub-admin/aihub-common test
 mvn -B -pl aihub-gateway test
 ```
 
-预期：`aihub-common 46`、`aihub-gateway 154`。报告实测数字。
+预期：`aihub-common 48`、`aihub-gateway 154`。报告实测数字。
 
 - [ ] **Step 9: 提交**
 
@@ -2219,7 +2444,7 @@ git commit -m "feat: add the token bucket lua script, its pure arithmetic and th
 |---|---|
 | `mvn -B -pl aihub-admin/aihub-common test "-Dtest=RateLimitScriptTest"` | `Tests run: 1, Failures: 0, Errors: 0` |
 | `mvn -B -pl aihub-gateway test -am "-Dtest=TokenBucketTest,LuaTokenBucketTest,LocalRateLimiterTest"` | `Tests run: 22, Failures: 0, Errors: 0` + `BUILD SUCCESS` |
-| `mvn -B -pl aihub-admin/aihub-common test` | `Tests run: 46, Failures: 0, Errors: 0` |
+| `mvn -B -pl aihub-admin/aihub-common test` | `Tests run: 48, Failures: 0, Errors: 0` |
 | `mvn -B -pl aihub-gateway test` | `Tests run: 154, Failures: 0, Errors: 0` |
 
 ---
@@ -3711,7 +3936,7 @@ git commit -m "feat: resolve a model to ordered channel candidates by priority a
 - Create: `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigCache.java`
 - Create: `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigClient.java`
 - Create: `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigConfig.java`
-- Modify: `aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java`（加 `CONFIG_SNAPSHOT_PATH` 与 `configSnapshot()`，并给 `parse` 补 `apiKeyId`）
+- Modify: `aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java`（加 `CONFIG_SNAPSHOT_PATH` 与 `configSnapshot()`；**`parse` 的 `apiKeyId` 已经在 Task 2 落地，本任务不要再动它**）
 - Modify: `aihub-gateway/src/main/resources/application.yml`（`aihub.channel.master-key` 与 `aihub.config.*`）
 - Test: `aihub-gateway/src/test/java/com/aihub/gateway/config/ConfigCacheTest.java`
 
@@ -4233,21 +4458,10 @@ import java.util.List;
         }
 ```
 
-**（d）在 `parse(int status, String body)` 里给 `ApiKeyView` 补 `apiKeyId`**（决策 14）：把构造那一行改成
-
-```java
-                return Optional.of(new ApiKeyView(
-                        data.path("keyId").asText(),
-                        data.path("tenantId").asLong(),
-                        data.path("tenantName").asText(),
-                        data.path("status").asText(),
-                        expireAt.isNull() || expireAt.isMissingNode() ? null : Instant.parse(expireAt.asText()),
-                        data.path("apiKeyId").isNumber() ? data.get("apiKeyId").asLong() : null));
-```
-
-> 注意：此时 `ApiKeyView` 还是 5 个分量（决策 14 在 Task 11 落地）。**本任务先不要改这一行** ——
-> 写了 6 个参数会编译失败。**Task 11 会回来改它**（那一任务同时改 `ApiKeyView` 与 `ApiKeyCacheCodec`）。
-> 本步骤只做 (a)(b)(c)。
+**（d）`parse(int status, String body)` 不要动**（决策 14）：`ApiKeyView` 的第 6 个分量与这一行的
+`apiKeyId` 读取**已经在 Task 2 落地**（契约与其生产者/消费者同一个提交，见全局约束）。本任务只做
+(a)(b)(c)。若你在这里看到 `parse` 只有 5 个参数，那说明 Task 2 没做完 —— **回去补 Task 2，不要在这里顺手改**
+（那会重新造出一个跨任务占位）。
 
 - [ ] **Step 5: 写 `ConfigClient` 与 `ConfigConfig`**
 
@@ -4992,11 +5206,11 @@ git commit -m "feat: decrypt channel keys locally and build per-channel upstream
 - Test: `aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/RateLimitFilterTest.java`
 
 **Interfaces:**
-- Consumes：Task 4（`RateLimiter.acquire(long, Long, String)` / `RateLimitDecision`）、既有 `ApiKeyAuthFilter.ATTRIBUTE_KEY_VIEW` / `ATTRIBUTE_KEY_HASH`、`GatewayErrors.write(...)`。
+- Consumes：Task 2（`ApiKeyView` 的数值 `apiKeyId`，决策 14 —— 本任务**直接读真值**，不需要任何占位或后续收口）、Task 4（`RateLimiter.acquire(long, Long, String)` / `RateLimitDecision`）、既有 `ApiKeyAuthFilter.ATTRIBUTE_KEY_VIEW` / `ATTRIBUTE_KEY_HASH`、`GatewayErrors.write(...)`。
 - Produces：
   - `ApiKeyAuthFilter.ATTRIBUTE_KEY_HASH = "aihub.apiKeyHash"`（鉴权成功时写入）。
   - `RateLimitFilter`：`@Component @Order(Ordered.HIGHEST_PRECEDENCE + 150)`；常量 `LIMIT_HEADER = "ratelimit-limit"` / `REMAINING_HEADER = "ratelimit-remaining"` / `RETRY_AFTER_HEADER = "retry-after"` / `RETRY_AFTER_MS_HEADER = "retry-after-ms"`；构造器 `RateLimitFilter(RateLimiter limiter, boolean enabled, MeterRegistry registry)`。
-  - **策略维度的取值**（决策 7 修订）：租户取 `ApiKeyView.tenantId()`，key 取 `ApiKeyView.apiKeyId()`（**数值主键**，决策 14）；没有 view 时 `tenantId=0` + `apiKeyId=null`（匿名桶只走租户级策略）。**桶 key 不变**：仍是 `(tenantId, sha256(secret))`。
+  - **策略维度的取值**（决策 7 修订）：租户取 `ApiKeyView.tenantId()`，key 取 `ApiKeyView.apiKeyId()`（**数值主键**，决策 14 —— 该分量自 Task 2 起就在共享契约里，本任务直接读，**没有占位**）；没有 view 时 `tenantId=0` + `apiKeyId=null`（匿名桶只走租户级策略）。**桶 key 不变**：仍是 `(tenantId, sha256(secret))`。
   - **响应头**（放行与拒绝**都**加）：`RateLimit-Limit: "{limit}, {burst}"`、`RateLimit-Remaining`。拒绝时再加 `Retry-After`（秒，向上取整 ≥1）与 `Retry-After-MS`（毫秒）。
   - **429 错误体**：`GatewayErrors.write(response, HttpStatus.TOO_MANY_REQUESTS, "rate_limit_error", "rate_limit_exceeded", msg)`。
   - **降级语义**：`decision.source() == LOCAL` 时**照常执行判定**（拒绝仍是 429），打一条**每分钟最多一次**的 WARN，并让 `aihub.ratelimit.degraded` 计数 +1。**绝不因为 Redis 故障而放行全部请求**（那是「无限流」，会把上游打挂），也绝不因为 Redis 故障而拒绝全部请求。
@@ -5009,7 +5223,7 @@ git commit -m "feat: decrypt channel keys locally and build per-channel upstream
 | `allowsWhenUnderTheLimitAndAddsTheRateLimitHeaders` | 放行 + `RateLimit-Limit` / `RateLimit-Remaining` |
 | `rejectsWith429AndTheOpenAiBodyWhenOverTheLimit` | 429 + `error.code == "rate_limit_exceeded"` + `error.type == "rate_limit_error"` + `param: null` |
 | `rejectionCarriesRetryAfterInSecondsAndMilliseconds` | 250ms → `Retry-After: 1` 与 `Retry-After-MS: 250`，`RateLimit-Remaining: 0` |
-| `usesTheTenantAndTheKeyHashAsTheBucketDimension` | 传进 `RateLimiter` 的是 `tenantId` 与鉴权过滤器写下的哈希（**数值 `apiKeyId` 的转发由 Task 11 在同一条用例上补断言** —— 该分量 Task 11 才进 `ApiKeyView`） |
+| `usesTheTenantAndTheKeyHashAsTheBucketDimension` | 传进 `RateLimiter` 的是 `tenantId`、认证视图里的**数值** `apiKeyId` 与鉴权过滤器写下的哈希（三者都从 `ApiKeyView` / exchange 属性里真取，**没有占位** —— 契约在 Task 2 已就位） |
 | `skipsWhenDisabled` | `enabled=false` 时完全不管（`acquire` 一次都没被调用） |
 | `skipsNonV1Paths` | `/healthz` 不受限流影响 |
 | `usesTheAnonymousBucketWhenThereIsNoApiKeyView` | 鉴权关闭时用 `tenantId=0` 且**仍然限流** |
@@ -5090,7 +5304,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class RateLimitFilterTest {
 
     private static final ApiKeyView VIEW =
-            new ApiKeyView("ak_demo", 7L, "demo", ApiKeyView.STATUS_ACTIVE, null);
+            new ApiKeyView("ak_demo", 7L, "demo", ApiKeyView.STATUS_ACTIVE, null, 42L);
 
     private static MockServerWebExchange exchange(String path, boolean withViewAndHash) {
         MockServerWebExchange exchange = MockServerWebExchange.from(
@@ -5174,6 +5388,10 @@ class RateLimitFilterTest {
 
         assertThat(limiter.tenantId).isEqualTo(7L);
         assertThat(limiter.keyHash).isEqualTo("hash-of-secret");
+        // 决策 7（修订）+ 决策 14：策略的 key 维度必须真的从认证视图里传下去 —— 这正是原文
+        // 「请求无法映射到 api_key_id」那句不成立的机器证据。数值主键自 Task 2 起就在共享契约里，
+        // 因此这里是**直接读真值**，不是什么「后续任务收口」。
+        assertThat(limiter.apiKeyId).isEqualTo(42L);
     }
 
     @Test
@@ -5214,6 +5432,8 @@ class RateLimitFilterTest {
         assertThat(limiter.calls).isEqualTo(1);
         assertThat(limiter.tenantId).isZero();
         assertThat(limiter.keyHash).isEqualTo("anonymous");
+        // 没有 view 时没有数值主键 → 策略解析只走租户级（决策 7 的第二级），这**不是**「不限流」。
+        assertThat(limiter.apiKeyId).isNull();
     }
 
     /** 降级 ≠ 放行：本机桶说拒绝，就必须回 429（否则 Redis 一挂就等于关掉了限流）。 */
@@ -5305,14 +5525,11 @@ class RateLimitFilterTest {
 }
 ```
 
-> **注意 1**：`new ApiKeyView("ak_demo", 7L, "demo", ApiKeyView.STATUS_ACTIVE, null)` 是 5 个分量
-> （决策 14 在 Task 11 落地）。**Task 11 会回来给这一行补第 6 个参数**（数值主键 `42L`），并在
-> `usesTheTenantAndTheKeyHashAsTheBucketDimension` 里补一条 `assertThat(limiter.apiKeyId).isEqualTo(42L)`
-> 的断言 —— 那条断言就是「请求 → key 级策略」这一环的机器证据（决策 7 修订）。
->
-> **注意 2**：本任务里 `RateLimitFilter` 传的 `apiKeyId` 是**显式占位 `null`**，不是「M3 不做 key 级」的
-> 决定 —— 数值主键此刻在共享契约里还不存在（Task 11 才加），而**策略解析本身在 Task 4 就已经
-> 是两级的、并有真用例钉住**。Task 11 收口后，key 级策略在端到端路径上即可生效。
+> **注意**：`new ApiKeyView("ak_demo", 7L, "demo", ApiKeyView.STATUS_ACTIVE, null, 42L)` 是 **6 个分量**
+> —— 决策 14 的契约在 **Task 2** 就已落地（那时同一个提交里也补好了 admin 侧填充与 `AdminClient.parse`），
+> 因此本任务写的每一处 `ApiKeyView` 都是 6 个分量，`RateLimitFilter` 也**直接读** `view.apiKeyId()`。
+> **没有占位、没有「以后有人回来补」这一步**：策略解析在 Task 4 是两级的、请求侧的这一环在本任务
+> 就是真值，key 级策略在端到端路径上自本任务起即可生效（全局约束：不许跨任务占位）。
 
 - [ ] **Step 3: 写 `RateLimitFilter`**
 
@@ -5401,12 +5618,10 @@ public class RateLimitFilter implements WebFilter {
         Object keyHash = exchange.getAttributes().get(ApiKeyAuthFilter.ATTRIBUTE_KEY_HASH);
         long tenantId = view == null ? 0L : view.tenantId();
         String hash = keyHash == null ? ANONYMOUS_KEY_HASH : keyHash.toString();
-        // 决策 7（修订）+ 决策 14：key 级策略的映射键是 api_key 的**数值主键**，它随
-        // ApiKeyView 一起下发。该分量在 Task 11 才进 ApiKeyView（本任务时 ApiKeyView 还是
-        // 5 个分量，写 view.apiKeyId() 会编译失败），因此这里先显式传 null，
-        // **Task 11 把这一行换成 `view == null ? null : view.apiKeyId()` 并在
-        // RateLimitFilterTest 上补断言** —— 与 Task 7 对 AdminClient.parse 的处置同一套手续。
-        Long apiKeyId = null;
+        // 决策 7（修订）+ 决策 14：key 级策略的映射键是 api_key 的**数值主键**，它随 ApiKeyView 一起
+        // 下发（该分量自 Task 2 起就在共享契约里，admin 侧填 api_key.id、网关侧 parse 透传），
+        // 因此这里直接读真值：没有 view（鉴权关闭）时为 null → 策略解析只走租户级那一维。
+        Long apiKeyId = view == null ? null : view.apiKeyId();
 
         RateLimitDecision decision;
         try {
@@ -5492,7 +5707,7 @@ git commit -m "feat: enforce the tenant rate limit in a gateway filter with an o
 
 **验收标准**
 1. 超限 → 429 + OpenAI 错误体（`code=rate_limit_exceeded`、`type=rate_limit_error`、`param=null`），并带 `Retry-After`（秒，向上取整 ≥1）、`Retry-After-MS`（毫秒）、`RateLimit-Remaining: 0`；放行时也带 `RateLimit-Limit` / `RateLimit-Remaining`。
-2. 桶的维度是 `tenantId + sha256(secret)`（策略维度是 `tenantId + apiKeyId`，两者**不要混**）；`ATTRIBUTE_KEY_HASH` 由 `ApiKeyAuthFilter` 在鉴权成功时写入（限流器拿不到 secret）。本任务传的 `apiKeyId` 是占位 `null`，**Task 11 收口**（见该任务 Step 1b）。
+2. 桶的维度是 `tenantId + sha256(secret)`（策略维度是 `tenantId + apiKeyId`，两者**不要混**）；`ATTRIBUTE_KEY_HASH` 由 `ApiKeyAuthFilter` 在鉴权成功时写入（限流器拿不到 secret）。**策略的 `apiKeyId` 直接取自认证后的 `ApiKeyView`**（契约见 Task 2 的决策 14；没有 view 时为 `null` → 只走租户级策略），用例断言传进 `RateLimiter` 的就是 `42L` —— 这一环**不经过任何占位**。
 3. `aihub.ratelimit.enabled=false` 完全不管；非 `/v1` 路径不管；没有 view（鉴权关闭）时用 `tenant=0` + `anonymous` 桶**继续限流**。
 4. Redis 降级（`source == LOCAL`）时**照常执行判定**（拒绝仍回 429），并有节流的 WARN + `aihub.ratelimit.degraded` 计数。
 5. 限流器自身抛异常时请求被放行（fail-open）。
@@ -5780,14 +5995,14 @@ mvn -B -pl aihub-gateway test -am "-Dtest=RelayAttemptsTest"
     }
 ```
 
-并把静态工厂里传 `null` 的那两行改成只传一个 `null`（`apiKeyId`，决策 14 在 Task 11 才接上 `view.apiKeyId()`）：
+并把静态工厂里传 `null` 的那两行改成只传一个 `null`（这里传的是 `apiKeyId`：契约（决策 14）虽然自 Task 2 起就在 `ApiKeyView` 里，但**计量侧把 `api_key_id` 落库**是 Task 11 的那一条遗留，本任务只做渠道填充，避免一步同时动两件事）：
 
 ```java
         return new RelayMetering(
                 requestId,
                 Instant.now().truncatedTo(ChronoUnit.MILLIS),
                 view == null ? TENANT_UNKNOWN : view.tenantId(),
-                null,   // apiKeyId：Task 11 接上 view.apiKeyId()（决策 14）
+                null,   // apiKeyId：计量侧的落库是 Task 11 的遗留项之一（决策 14 的契约在 Task 2 已就位）
                 model,
                 UsageCapture.start(streaming, maxCaptureBytes));
 ```
@@ -5990,7 +6205,7 @@ class FailoverRelayTest {
                 public Mono<Optional<ApiKeyView>> resolve(String keyHash) {
                     return keyHash.equals(VALID_HASH)
                             ? Mono.just(Optional.of(new ApiKeyView("ak_failover", 7L, "demo",
-                                    ApiKeyView.STATUS_ACTIVE, null)))
+                                    ApiKeyView.STATUS_ACTIVE, null, 42L)))
                             : Mono.just(Optional.empty());
                 }
 
@@ -6128,8 +6343,8 @@ class FailoverRelayTest {
 ```
 
 > **两个需要实施者注意的点**：
-> 1. `new ApiKeyView("ak_failover", 7L, "demo", ApiKeyView.STATUS_ACTIVE, null)` 是 5 个分量
->    （决策 14 在 Task 11 落地；**Task 11 会回来补第 6 个参数**）。
+> 1. `new ApiKeyView("ak_failover", 7L, "demo", ApiKeyView.STATUS_ACTIVE, null, 42L)` 是 **6 个分量**
+>    —— 决策 14 的契约在 **Task 2** 就已落地，**本任务按 6 个分量写即可，不需要也不允许留占位**。
 > 2. `SNAPSHOT_VERSION` 每次 `configSnapshot()` 调用都 +1：让 `ConfigClient` 的版本比对始终认为
 >    「拿到的是更新的快照」，避免本地缓存让不同用例互相影响（30 秒 TTL 内会复用同一个 Spring 上下文）。
 
@@ -6290,7 +6505,7 @@ class WireMockChannelFaultInjectionTest {
                 public Mono<Optional<ApiKeyView>> resolve(String keyHash) {
                     return keyHash.equals(VALID_HASH)
                             ? Mono.just(Optional.of(new ApiKeyView("ak_wiremock", 7L, "demo",
-                                    ApiKeyView.STATUS_ACTIVE, null)))
+                                    ApiKeyView.STATUS_ACTIVE, null, 42L)))
                             : Mono.just(Optional.empty());
                 }
 
@@ -6453,8 +6668,8 @@ class WireMockChannelFaultInjectionTest {
 }
 ```
 
-> **注意 1**：本类的 `ApiKeyView` 也是 5 个分量，**Task 11 会回来补第 6 个参数**（与
-> `FailoverRelayTest` 同一批改动）。
+> **注意 1**：本类的 `ApiKeyView` 同样是 **6 个分量**（`..., null, 42L)`）—— 决策 14 的契约在 **Task 2**
+> 就已落地，本任务（含 `FailoverRelayTest`）按 6 个分量写，不需要也不允许留占位。
 >
 > **注意 2（启动顺序陷阱，实测过同类问题）**：`@RegisterExtension static WireMockExtension` 的
 > `beforeAll` **未必**早于 `SpringExtension` 的上下文加载，因此 `@DynamicPropertySource` 里
@@ -6742,202 +6957,25 @@ git commit -m "feat: fail over across channel candidates with a pre-commit switc
 ## Task 11: M2 遗留（一）：`api_key_id` / `channel_id` / 超长 `model` 与透传白名单的回归
 
 **Files:**
-- Modify: `aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey/ApiKeyView.java`（**决策 14**）
-- Modify: `aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey/ApiKeyCacheCodec.java`（5 段 → 6 段）
-- Modify: `aihub-admin/aihub-common/src/test/java/com/aihub/common/apikey/ApiKeyToolingTest.java`
-- Modify: `aihub-admin/aihub-service/src/main/java/com/aihub/service/apikey/ApiKeyService.java`
-- Modify: `aihub-gateway/src/main/java/com/aihub/gateway/meter/RelayMetering.java`（model 截断 + `apiKeyId`）
-- Modify: `aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java`（`parse` 补 `apiKeyId`）
-- Modify: `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/RateLimitFilter.java`（Step 1b：把 Task 9 留的 `apiKeyId` 占位换成 `view.apiKeyId()`，收口决策 7 修订）
+- Modify: `aihub-gateway/src/main/java/com/aihub/gateway/meter/RelayMetering.java`（计量侧填 `view.apiKeyId()` + model 截断 128）
 - Modify: `aihub-gateway/src/main/java/com/aihub/gateway/relay/ModelsController.java`（快照 ∪ 遗留默认）
 - Modify: `aihub-gateway/src/test/java/com/aihub/gateway/relay/ModelsControllerTest.java`
 - Modify: `aihub-gateway/src/test/java/com/aihub/gateway/relay/RelayMeteringFlowTest.java`
 - Modify: `aihub-gateway/src/test/java/com/aihub/gateway/relay/ChatRelayControllerTest.java`
-- Modify: `aihub-gateway/src/test/java/com/aihub/gateway/auth/ApiKeyFilterContractTest.java`（补第 6 个参数）
-- Modify: `aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/RateLimitFilterTest.java`（补第 6 个参数）
-- Modify: `aihub-gateway/src/test/java/com/aihub/gateway/relay/FailoverRelayTest.java`（补第 6 个参数）
+
+> **本任务不再包含任何共享契约工作**：`ApiKeyView` 的第 6 个分量、`ApiKeyCacheCodec` 的 5 → 6 段、
+> `ApiKeyService` 的填充、`AdminClient.parse` 的透传、`RateLimitFilter` 读数值主键与它们各自的测试，
+> 全部已经前移（**决策 14 的契约在 Task 2**、限流侧的消费在 **Task 9**）。本任务只做三件 M2 遗留：
+> ① `api_key_id` / `channel_id` **落进计量事件与 `request_log`**；② 超长 `model` 截断；③ 透传白名单
+> 新增 `retry-after-ms` 与 IETF `RateLimit-*`。
 
 **Interfaces:**
-- Consumes：Task 10 的 `RelayMetering.onChannelSelected`、Task 7 的 `AdminClient.parse`。
+- Consumes：Task 2（`ApiKeyView.apiKeyId()` —— 契约已就位，直接使用，无占位）、Task 10 的 `RelayMetering.onChannelSelected` 与 `RelayAttempts.truncateModel(...)`、Task 7 的 `AdminClient.parse`（已是 6 个分量）。
 - Produces：
-  - `ApiKeyView` 变为 `record ApiKeyView(String keyId, long tenantId, String tenantName, String status, Instant expireAt, Long apiKeyId)`（**新参数在最后**，`UNUSABLE` 补 `null`）。
-  - `ApiKeyCacheCodec` 载荷变为 6 段（第 6 段是 `apiKeyId`，空串表示 null）；**旧的 5 段载荷被 `decode` 判为畸形并返回 null**（缓存收敛）。
-  - `RelayMetering` 的 `apiKeyId` 取自 `view.apiKeyId()`；事件的 `model` 用 `RelayAttempts.truncateModel(...)` 截到 128（决策 15）。
+  - `RelayMetering` 的 `apiKeyId` 取自 `view.apiKeyId()`（**Task 2 的契约**）；事件的 `model` 用 `RelayAttempts.truncateModel(...)` 截到 128（决策 15）。
   - `ModelsController`：`GET /v1/models` 返回「快照里的模型名 ∪ 遗留默认模型」（去重排序）。
 
-- [ ] **Step 1: 改 `ApiKeyView` 并修好所有调用点**
-
-把 `ApiKeyView` 的 record 头与 `UNUSABLE` 改为：
-
-```java
-public record ApiKeyView(String keyId, long tenantId, String tenantName, String status, Instant expireAt,
-                         Long apiKeyId) {
-```
-
-```java
-    public static final ApiKeyView UNUSABLE = new ApiKeyView("", 0L, "", "MISSING", null, null);
-```
-
-并在 javadoc 里补一段：
-
-```java
- * <p>{@code apiKeyId} 是 {@code api_key} 表的**数值主键**，M3 起随密钥视图一起下发：
- * M2 时它恒为 {@code null}（共享类型里没有它），导致 {@code request_log.api_key_id} 无法填充、
- * 用量无法按 API Key 聚合。补齐它需要同时改三处 —— 本 record、{@code ApiKeyCacheCodec} 的载荷段数、
- * 两侧的解析（admin 的 {@code ApiKeyService} 与 gateway 的 {@code AdminClient.Http.parse}）
- * （计划决策 14）。{@code UNUSABLE} 与「查不到」的哨兵仍然带 {@code null}。
-```
-
-**然后编译整个反应堆找出所有需要补参数的地方**：
-
-```powershell
-mvn -B -q test-compile -DskipTests
-```
-
-预期：`BUILD FAILURE` 并列出所有 `constructor ApiKeyView cannot be applied to given types` 的位置。**逐个补 `null`（测试里）或补真实值（生产代码里）**，至少包括：
-- `ApiKeyFilterContractTest.VALID_VIEW`；
-- `RateLimitFilterTest.VIEW`；
-- `RelayMeteringFlowTest` 的假 admin 视图；
-- `FailoverRelayTest` 的假 admin 视图；
-- `ApiKeyMintAndResolveTest`（admin 侧，若有直接构造）。
-
-> **不要**用「加一个 5 参数的便捷构造器」来减少改动：那会让「谁填了 apiKeyId」变得不可追踪，
-> 而这条决策的全部价值就是让它**必须**被显式填一次。
-
-- [ ] **Step 1b: 收口限流的 key 维度（决策 7 修订的最后一环）**
-
-数值主键进 `ApiKeyView` 之后，Task 9 在 `RateLimitFilter` 里留的那一行占位就可以换成真值了。
-
-在 `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/RateLimitFilter.java` 里：
-
-```java
-        // 决策 7（修订）+ 决策 14：key 级策略的映射键是 api_key 的**数值主键**，它随 ApiKeyView 下发。
-        Long apiKeyId = view == null ? null : view.apiKeyId();
-```
-
-并在 `RateLimitFilterTest` 里给 view 补上数值主键（`VIEW` 的第 6 个参数用 `42L`），然后在
-**既有**用例 `usesTheTenantAndTheKeyHashAsTheBucketDimension` 末尾补一条断言（**不新增用例**，
-总数不变）：
-
-```java
-        assertThat(limiter.tenantId).isEqualTo(7L);
-        assertThat(limiter.keyHash).isEqualTo("hash-of-secret");
-        // 决策 7（修订）：策略的 key 维度必须真的从认证视图里传下去 —— 这正是原文
-        // 「请求无法映射到 api_key_id」那句不成立的机器证据。
-        assertThat(limiter.apiKeyId).isEqualTo(42L);
-```
-
-同时把 `usesTheAnonymousBucketWhenThereIsNoApiKeyView` 补一条 `assertThat(limiter.apiKeyId).isNull();`
-（没有 view 时没有数值主键 → 策略解析只走租户级，那是决策 7 的第二级，不是「不限流」）。
-
-```powershell
-mvn -B -pl aihub-gateway test -am "-Dtest=RateLimitFilterTest,RateLimitResolverTest"
-```
-
-预期：`Tests run: 18, Failures: 0, Errors: 0` + `BUILD SUCCESS`。
-
-> **为什么这一步在 Task 11 而不在 Task 9**：`ApiKeyView` 的数值分量是决策 14 的产物、在本任务 Step 1
-> 才存在；在 Task 9 写 `view.apiKeyId()` 会编译失败。**策略解析本身（Task 4）早已是两级的**，
-> 本步只是把请求侧的最后一个字段接上 —— 与 Task 7 对 `AdminClient.parse` 的处置同一套手续。
-
-- [ ] **Step 2: 改 `ApiKeyCacheCodec`（5 段 → 6 段）**
-
-把 `FIELD_COUNT` 改为 `6`，`encode` 末尾追加一段，`decode` 解析第 6 段：
-
-```java
-    /**
-     * 载荷段数。M3 起是 6（新增 {@code apiKeyId}）；旧载荷会被 {@link #decode} 判为畸形
-     * → 缓存未命中 → 回源重写。这是**收敛行为**，不是故障，因此不需要清 Redis。
-     */
-    private static final int FIELD_COUNT = 6;
-```
-
-```java
-    public static String encode(ApiKeyView view) {
-        return escape(view.keyId()) + DELIMITER
-                + view.tenantId() + DELIMITER
-                + escape(view.tenantName()) + DELIMITER
-                + escape(view.status()) + DELIMITER
-                + (view.expireAt() == null ? "" : String.valueOf(view.expireAt().getEpochSecond())) + DELIMITER
-                + (view.apiKeyId() == null ? "" : String.valueOf(view.apiKeyId()));
-    }
-```
-
-`decode` 里把第 5、6 段一起取出再构造：
-
-```java
-        try {
-            String expireAt = parts.get(4);
-            String apiKeyId = parts.get(5);
-            return new ApiKeyView(parts.get(0), Long.parseLong(parts.get(1)), parts.get(2), parts.get(3),
-                    expireAt.isEmpty() ? null : Instant.ofEpochSecond(Long.parseLong(expireAt)),
-                    apiKeyId.isEmpty() ? null : Long.valueOf(apiKeyId));
-        } catch (RuntimeException e) {
-            return null;
-        }
-```
-
-并在类 javadoc 里补一句：
-
-```java
- * <p><b>段数是跨服务契约</b>：gateway 读 admin 写的载荷，任何一侧改了段数都会让另一侧
- * {@code decode} 返回 {@code null}（缓存未命中 → 回源 → 重写）。这**不是**故障，是收敛行为，
- * 因此不需要清 Redis；但改段数时必须同步 {@code ApiKeyToolingTest} 的固定向量。
-```
-
-- [ ] **Step 3: 改 `ApiKeyToolingTest` 的固定向量（契约测试必须同步）**
-
-在 `aihub-admin/aihub-common/src/test/java/com/aihub/common/apikey/ApiKeyToolingTest.java` 里，把所有
-`new ApiKeyView(...)` 的构造补齐第 6 个参数，并把固定向量字符串从 5 段改为 6 段（最后一段是 `apiKeyId`，
-null 时为空串）。并**新增**两条用例：
-
-```java
-    @Test
-    void roundTripsTheNumericApiKeyId() {
-        ApiKeyView view = new ApiKeyView("ak_abc", 7L, "demo", ApiKeyView.STATUS_ACTIVE, null, 42L);
-
-        assertThat(ApiKeyCacheCodec.decode(ApiKeyCacheCodec.encode(view))).isEqualTo(view);
-        assertThat(ApiKeyCacheCodec.encode(view)).isEqualTo("ak_abc|7|demo|ACTIVE||42");
-    }
-
-    /** 旧载荷（5 段）必须被判为畸形 → 缓存未命中 → 回源重写，而不是解出一个 apiKeyId=null 的半成品。 */
-    @Test
-    void legacyFiveFieldPayloadsAreRejectedSoTheCacheConverges() {
-        assertThat(ApiKeyCacheCodec.decode("ak_abc|7|demo|ACTIVE|1800000000")).isNull();
-    }
-```
-
-- [ ] **Step 4: 改 `ApiKeyService`（admin 侧填数值主键）**
-
-在 `loadFromDb` 的返回里补第 6 个参数：
-
-```java
-        return Optional.of(new ApiKeyView(entity.getKeyId(), entity.getTenantId(), tenantName,
-                entity.getStatus(), entity.getExpireAt(), entity.getId()));
-```
-
-`mint(...)` 里的 `cache(keyHash, new ApiKeyView(...))` 也补 `entity.getId()`（MyBatis-Plus 在 insert 后会回填自增主键）：
-
-```java
-        cache(keyHash, new ApiKeyView(keyId, tenant.getId(), tenantName, ApiKeyView.STATUS_ACTIVE, expireAt,
-                entity.getId()));
-```
-
-- [ ] **Step 5: 改 `AdminClient.parse`（gateway 侧透传 `apiKeyId`）**
-
-在 `AdminClient.Http.parse(int status, String body)` 里把构造 `ApiKeyView` 的那一行改成：
-
-```java
-                return Optional.of(new ApiKeyView(
-                        data.path("keyId").asText(),
-                        data.path("tenantId").asLong(),
-                        data.path("tenantName").asText(),
-                        data.path("status").asText(),
-                        expireAt.isNull() || expireAt.isMissingNode() ? null : Instant.parse(expireAt.asText()),
-                        data.path("apiKeyId").isNumber() ? data.get("apiKeyId").asLong() : null));
-```
-
-- [ ] **Step 6: 改 `RelayMetering`（`apiKeyId` 与 model 截断）**
+- [ ] **Step 1: 改 `RelayMetering`（计量侧的 `apiKeyId` 与 model 截断）**
 
 在 `RelayMetering.start(...)` 里把 `null` 换成视图里的值：
 
@@ -6958,7 +6996,7 @@ null 时为空串）。并**新增**两条用例：
 
 并补 import：`import com.aihub.gateway.relay.RelayAttempts;`。
 
-- [ ] **Step 7: 改 `ModelsController`（模型列表来自快照 ∪ 遗留默认）**
+- [ ] **Step 2: 改 `ModelsController`（模型列表来自快照 ∪ 遗留默认）**
 
 把 `ModelsController` 的依赖从 `UpstreamProperties` 改为 `(UpstreamProperties, ConfigClient)`：
 
@@ -7034,9 +7072,9 @@ public class ModelsController {
 > `snapshotWithModels(...)` 两个私有助手（都用 `new ConfigClient(cache, admin, upstream, properties)` 或
 > 直接构造 `ConfigClient` 的子类返回固定快照）。**不要**为一个测试去给 `ConfigClient` 抽接口。
 
-- [ ] **Step 8: 给 `RelayMeteringFlowTest` 补两条断言（决策 14/15）**
+- [ ] **Step 3: 给 `RelayMeteringFlowTest` 补两条断言（决策 14/15 的消费侧证据）**
 
-在假 admin 的视图里补 `apiKeyId`：
+在假 admin 的视图里补 `apiKeyId`（**契约在 Task 2 已落地，这里按 6 个分量写**）：
 
 ```java
                         ? Mono.just(Optional.of(new ApiKeyView("ak_flow", 7L, "demo",
@@ -7085,7 +7123,7 @@ public class ModelsController {
     }
 ```
 
-- [ ] **Step 9: 给 `ChatRelayControllerTest` 补透传白名单的回归**
+- [ ] **Step 4: 给 `ChatRelayControllerTest` 补透传白名单的回归**
 
 在该测试类里新增一条（**沿用该类既有私有助手的写法**，不要新造）：
 
@@ -7120,45 +7158,47 @@ public class ModelsController {
     }
 ```
 
-- [ ] **Step 10: 运行受影响的测试**
+- [ ] **Step 5: 运行受影响的测试**
 
 ```powershell
-mvn -B -pl aihub-admin/aihub-common test
 mvn -B -pl aihub-gateway test
+mvn -B -pl aihub-admin/aihub-common test
 ```
 
-预期：`aihub-common 47`（Task 3 的 46 + 本任务 2 - 1 条被改写的既有用例的净增）；`aihub-gateway 246`（Task 10 的 242 + 2 条新增 e2e + 1 条白名单用例 + ModelsController 净增 1）。
+预期：`aihub-gateway 246`（Task 10 的 242 + 2 条新增 e2e + 1 条白名单用例 + ModelsController 净增 1）；
+`aihub-common 48`（**本任务不再改动 `aihub-common`** —— 决策 14 的契约与它的两条契约测试都在 Task 2 落地，
+这里的 48 是**回归核对**，不是本任务的增量）。
 
-- [ ] **Step 11: 跑 admin 全量（确认 `ApiKeyView` 的改动没打破 admin 的 47 项）**
+- [ ] **Step 6: 跑 admin 全量（确认「`api_key_id` 真的有值」这条链路没打破 admin 的 47 项）**
 
 ```powershell
 $env:DOCKER_HOST='tcp://127.0.0.1:2375'; mvn -B -pl aihub-admin/aihub-web -am test
 ```
 
-预期：`aihub-web 47`，`Failures: 0, Errors: 0`。若 `ApiKeyMintAndResolveTest` 变红且报「api_key_id 为 null」，检查 `mint` 是否也补了 `entity.getId()`。
+预期：`aihub-web 47`，`Failures: 0, Errors: 0`。若 `ApiKeyMintAndResolveTest` 变红且报「api_key_id 为 null」，
+那是 **Task 2 的 `ApiKeyService` 填充**被改坏了（`mint` / `loadFromDb` 各一行）—— 本任务不应再动 `ApiKeyService`，
+回 Task 2 检查。
 
-- [ ] **Step 12: 提交**
+- [ ] **Step 7: 提交**
 
 ```powershell
-git add aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey aihub-admin/aihub-common/src/test/java/com/aihub/common/apikey aihub-admin/aihub-service/src/main/java/com/aihub/service/apikey/ApiKeyService.java aihub-gateway/src/main/java/com/aihub/gateway/meter/RelayMetering.java aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java aihub-gateway/src/main/java/com/aihub/gateway/relay/ModelsController.java aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/RateLimitFilter.java aihub-gateway/src/test/java/com/aihub/gateway/relay aihub-gateway/src/test/java/com/aihub/gateway/auth/ApiKeyFilterContractTest.java aihub-gateway/src/test/java/com/aihub/gateway/ratelimit/RateLimitFilterTest.java
-git commit -m "feat: carry the numeric api key id into metering and relay the rate limit header family"
+git add aihub-gateway/src/main/java/com/aihub/gateway/meter/RelayMetering.java aihub-gateway/src/main/java/com/aihub/gateway/relay/ModelsController.java aihub-gateway/src/test/java/com/aihub/gateway/relay/ModelsControllerTest.java aihub-gateway/src/test/java/com/aihub/gateway/relay/RelayMeteringFlowTest.java aihub-gateway/src/test/java/com/aihub/gateway/relay/ChatRelayControllerTest.java
+git commit -m "feat: persist the api key and channel ids into metering and relay the rate limit header family"
 ```
 
 **验收标准**
-1. `ApiKeyView` 带 `Long apiKeyId`；`ApiKeyCacheCodec` 是 6 段，**旧的 5 段载荷被判为畸形并返回 null**（缓存收敛，不是故障）；固定向量测试同步更新。
-2. `ApiKeyService.resolve` 返回的视图里 `apiKeyId == api_key.id`；计量事件的 `api_key_id` 因此有值（e2e 用例）。
-3. `channel_id` 有值（实际服务的渠道；兜底路径是 `LegacyChannel.ID` 哨兵）。
-4. 超长 `model`：事件里被截到 128；上游收到的是**原始**长模型名。
-5. 透传白名单新增 `retry-after-ms` 与 `ratelimit-limit/remaining/reset`，仍然是**精确名**。
-6. `GET /v1/models` = 快照模型名 ∪ 遗留默认模型；无快照时仍然返回遗留默认模型。
-7. **决策 7 修订收口**：`RateLimitFilter` 把认证视图里的数值 `apiKeyId` 传给 `RateLimiter`（用例断言 `42L`），因此 `rate_limit_policy` 的 **key 级**策略在端到端路径上生效；没有 view（鉴权关闭）时为 `null`，策略解析走租户级。
+1. **计量事件的 `api_key_id` 有值**（e2e 用例断言 `42L`）：它取自 Task 2 就已就位的共享契约 `ApiKeyView.apiKeyId()`，本任务只是把它**落进计量事件**；`channel_id` 也第一次有值（实际服务的渠道；兜底路径是 `LegacyChannel.ID` 哨兵）。
+2. 超长 `model`：事件里被截到 128；上游收到的是**原始**长模型名（转发逐字节不变）。
+3. 透传白名单新增 `retry-after-ms` 与 `ratelimit-limit/remaining/reset`，仍然是**精确名**。
+4. `GET /v1/models` = 快照模型名 ∪ 遗留默认模型；无快照时仍然返回遗留默认模型。
+5. **本任务不引入任何共享契约变更**：`ApiKeyView` / `ApiKeyCacheCodec` / `ApiKeyService` / `AdminClient.parse` / `RateLimitFilter` 的改动都已在 Task 2（契约）与 Task 9（消费）完成，本任务的文件列表里没有它们。
 
 **必须运行的命令与期望输出**
 
 | 命令 | 期望 |
 |---|---|
-| `mvn -B -pl aihub-admin/aihub-common test` | `Tests run: 47, Failures: 0, Errors: 0` |
 | `mvn -B -pl aihub-gateway test` | `Tests run: 246, Failures: 0, Errors: 0` |
+| `mvn -B -pl aihub-admin/aihub-common test` | `Tests run: 48, Failures: 0, Errors: 0`（回归核对，非本任务增量） |
 | `$env:DOCKER_HOST='tcp://127.0.0.1:2375'; mvn -B -pl aihub-admin/aihub-web -am test` | `Tests run: 47, Failures: 0, Errors: 0` |
 
 ---
@@ -7682,7 +7722,7 @@ mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ChannelKeyServiceTest"
 $env:DOCKER_HOST='tcp://127.0.0.1:2375'; mvn -B -pl aihub-admin/aihub-web -am test
 ```
 
-预期：`aihub-web 53`（47 + 6），`aihub-common` 仍然是 47。容器真的起来了（若 Docker 不可达，`AbstractIntegrationTest` 会抛 `IllegalStateException` 而不是静默跳过）。
+预期：`aihub-web 53`（47 + 6），`aihub-common` 仍然是 48。容器真的起来了（若 Docker 不可达，`AbstractIntegrationTest` 会抛 `IllegalStateException` 而不是静默跳过）。
 
 - [ ] **Step 6: 提交**
 
@@ -8712,7 +8752,7 @@ $env:DOCKER_HOST='tcp://127.0.0.1:2375'; mvn -B -pl aihub-admin/aihub-web -am te
 mvn -B -pl aihub-gateway test
 ```
 
-预期：`aihub-common 47`、`aihub-web 71`、`aihub-gateway 241`。
+预期：`aihub-common 48`、`aihub-web 71`、`aihub-gateway 246`。
 
 - [ ] **Step 3: 提交**
 
@@ -8732,7 +8772,7 @@ git commit -m "test: prove the token bucket lua script is atomic against a real 
 | 命令 | 期望 |
 |---|---|
 | `$env:DOCKER_HOST='tcp://127.0.0.1:2375'; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=RedisTokenBucketIntegrationTest"` | `Tests run: 7, Failures: 0, Errors: 0` |
-| `mvn -B -pl aihub-admin/aihub-common test` | `Tests run: 47, Failures: 0, Errors: 0` |
+| `mvn -B -pl aihub-admin/aihub-common test` | `Tests run: 48, Failures: 0, Errors: 0` |
 | `$env:DOCKER_HOST='tcp://127.0.0.1:2375'; mvn -B -pl aihub-admin/aihub-web -am test` | `Tests run: 71, Failures: 0, Errors: 0` |
 | `mvn -B -pl aihub-gateway test` | `Tests run: 246, Failures: 0, Errors: 0` |
 
@@ -9005,15 +9045,26 @@ git tag -a m3 -m "M3 流量治理完成：Redis+Lua 令牌桶限流（含本机�
 13. **本机 `git push` 不可能成功**（hosts 黑洞 + 出口阻断）：只做本地提交，控制器会在里程碑末尾
     通过 GitHub Git Data API 重放提交。
 14. **`ApiKeyView` 从 5 个分量变 6 个是编译期可见的破坏**：所有既有 `new ApiKeyView(...)` 都会被编译器
-    点出来（这是好事）。Task 7 / 9 / 10 的代码里刻意用了 5 个分量，Task 11 统一补齐 —— 若实施者
-    在 Task 7 就补了第 6 个参数，会编译失败；反过来 Task 11 忘记补，也会编译失败。**按任务顺序做，不要跳。**
-    **同理**：Task 9 的 `RateLimitFilter` 把限流的 `apiKeyId` 显式写成占位 `null`（那时 `ApiKeyView`
-    还没有该分量），**Task 11 Step 1b 把它换成 `view.apiKeyId()` 并补断言**。那不是「M3 不做 key 级
-    限流」——策略解析在 Task 4 就已经是两级的、并有真用例钉住；这里只是最后一个字段的编译顺序。
-15. **本计划的两处修订（2026-09-26，控制器 pre-flight 评审）**，实施者按修订后的正文执行即可，
-    但要知道**哪两处被改过**，以免照旧印象做事：
+    点出来（这是好事）。这个破坏**集中在 Task 2 一次发生**（契约 + `ApiKeyCacheCodec` 段数 + admin
+    `ApiKeyService` 填充 + gateway `AdminClient.parse` 透传 + 所有既有调用点，同一个提交），
+    Task 2 的验收标准里有「全反应堆 `test-compile` 绿」。**Task 7 / 9 / 10 / 11 的代码与测试一律按
+    6 个分量写**：契约已经在那里了，不存在「先写 5 个分量、以后再补」的写法。
+    **历史上的教训（诚实登记）**：本计划最初把决策 14 放在 **Task 11**，于是 Task 9 的 `RateLimitFilter`
+    只能把 `apiKeyId` 写成显式占位 `null`、并注明「Task 11 收口」，Task 7 也留了一条「先不要改 `parse`」
+    的注释。那让 Task 9 的提交**不满足「独立可提交、编译即绿」**这条纪律，也留下一个跨任务占位。
+    2026-09-26 已把契约前移到 **Task 2** 修掉（见全局约束）。**如果实施者看到任何「占位 `null` +
+    以后补」的注释，那是漏改，按契约就在 Task 2 处理，不要沿用它。**
+15. **本计划的三处修订（2026-09-26，控制器 pre-flight 评审与结构校正）**，实施者按修订后的正文执行即可，
+    但要知道**哪三处被改过**，以免照旧印象做事：
     - **决策 7**：限流策略从「只做 `tenant` 维度」改为 **`tenant + api_key` 两维**（key 级优先 →
       租户级回落 → 内置默认）。原文的 blocker（「拿不到数值 `api_key` 主键」）不成立，因为决策 14
       正好给 `ApiKeyView` 补了 `apiKeyId`，而限流过滤器排在鉴权之后。
     - **决策 11**：从不引入 WireMock 改为 **引入 `org.wiremock:wiremock:3.9.1`（仅 `aihub-gateway`
       的 test 作用域）**，用于 spec §10 / §12 要求的多渠道故障注入验收；JDK `HttpServer` 夹具**保留**。
+    - **决策 14 的落点从 Task 11 前移到 Task 2**（结构校正）：`ApiKeyView` 的第 6 个分量、
+      `ApiKeyCacheCodec` 的 5 → 6 段、`ApiKeyToolingTest` 的固定向量与两条新用例、admin `ApiKeyService`
+      的填充、gateway `AdminClient.parse` 的透传，全部与共享数据契约同在 **Task 2** 的一个提交里；
+      Task 7 不再动 `parse`，Task 9 直接读 `view.apiKeyId()`（**占位已删除**），Task 11 只剩下
+      `api_key_id` / `channel_id` 落库、超长 `model` 截断与透传白名单三件事。理由：Task 9 的过滤器
+      与 Task 4 的策略解析都需要这个数值主键，契约晚于使用方会让 Task 9 无法独立提交（违反全局约束
+      的「每个任务的提交必须让整个反应堆编译通过，且不许跨任务占位」）。
