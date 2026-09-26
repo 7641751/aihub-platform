@@ -14,6 +14,7 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
 
 import java.io.IOException;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 
@@ -141,6 +142,65 @@ class RelayAttemptsTest {
         assertThat(RelayAttempts.truncateModel(null)).isNull();
         // 中文按字符截断（JDBC 的 VARCHAR(128) 在 utf8mb4 下按字符计）。
         assertThat(RelayAttempts.truncateModel("模".repeat(200))).hasSize(128);
+    }
+
+    /**
+     * 非 BMP 模型名必须按**码点**截断，不能按 UTF-16 码元（评审 Fix 2）。
+     *
+     * <p>判别力来自前缀 {@code "m"}：它让每个 emoji 的高代理落在**奇数**下标，于是按码元切到第 128 个
+     * 恰好把一个代理对劈成两半（下面的对照断言直接验证旧行为确实切出孤立高代理）。旧实现返回的串以
+     * 孤立代理结尾，写 utf8mb4 时退化成 {@code ?}；无前缀时旧实现不劈代理，但只填了 64 个字符。
+     */
+    @Test
+    void nonBmpModelIsTruncatedOnCodePointsWithoutSplittingASurrogatePair() {
+        String astral = "\uD83D\uDE00"; // U+1F600：UTF-16 里占两个码元
+        String tooLong = "m" + astral.repeat(200);
+
+        String legacyCut = tooLong.substring(0, RelayAttempts.MODEL_MAX_LENGTH);
+        assertThat(Character.isHighSurrogate(legacyCut.charAt(legacyCut.length() - 1)))
+                .as("对照：按码元切正好落在配对中间（否则本用例没有判别力）")
+                .isTrue();
+
+        String truncated = RelayAttempts.truncateModel(tooLong);
+        assertThat(truncated.codePointCount(0, truncated.length()))
+                .as("按码点截断：非 BMP 名字也要填满 128 个字符")
+                .isEqualTo(RelayAttempts.MODEL_MAX_LENGTH);
+        assertThat(truncated).as("前缀 'm' + 127 个 emoji：按码点切 128 个字符，占 255 个码元")
+                .isEqualTo("m" + astral.repeat(127));
+        assertThat(truncated.length()).as("码元数 255 = 1 + 127×2，且列宽上界 128 码点仍然成立").isEqualTo(255);
+        assertNoLoneSurrogate(truncated, "截断结果");
+        assertThat(new String(truncated.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8))
+                .as("UTF-8 往返必须相等：孤立代理会在往返中被替换掉")
+                .isEqualTo(truncated);
+        assertThat(RelayAttempts.truncateModel(truncated)).as("幂等：再截一次还是它自己").isSameAs(truncated);
+
+        // 无前缀（偶数起点）时旧实现不劈代理，但只填 64 个字符：那也是一种失真。
+        String noPrefix = astral.repeat(200);
+        assertThat(noPrefix.substring(0, RelayAttempts.MODEL_MAX_LENGTH)
+                .codePointCount(0, RelayAttempts.MODEL_MAX_LENGTH))
+                .as("对照：旧实现在无前缀时只填 64 个字符")
+                .isEqualTo(64);
+        String noPrefixTruncated = RelayAttempts.truncateModel(noPrefix);
+        assertThat(noPrefixTruncated.codePointCount(0, noPrefixTruncated.length()))
+                .as("按码点截断同样填满 128 个字符")
+                .isEqualTo(RelayAttempts.MODEL_MAX_LENGTH);
+    }
+
+    /** 逐码元检查：不允许出现孤立的高/低代理（UTF-8 往返之外的第二道断言）。 */
+    private static void assertNoLoneSurrogate(String value, String description) {
+        for (int i = 0; i < value.length(); i++) {
+            char current = value.charAt(i);
+            if (Character.isHighSurrogate(current)) {
+                assertThat(i + 1 < value.length() && Character.isLowSurrogate(value.charAt(i + 1)))
+                        .as("%s在下标 %d 处的高代理后面必须跟低代理", description, i)
+                        .isTrue();
+                i++;
+            } else {
+                assertThat(Character.isLowSurrogate(current))
+                        .as("%s在下标 %d 处不能是孤立低代理", description, i)
+                        .isFalse();
+            }
+        }
     }
 
     /**

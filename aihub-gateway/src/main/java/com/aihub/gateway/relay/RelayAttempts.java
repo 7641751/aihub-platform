@@ -125,11 +125,18 @@ public final class RelayAttempts {
         return false;
     }
 
-    /** 计量事件里的 model 必须能落进 {@code VARCHAR(128)}（决策 15）。 */
+    /**
+     * 计量事件里的 model 必须能落进 {@code VARCHAR(128)}（决策 15）。
+     *
+     * <p>按**码点**而不是 UTF-16 码元截断：utf8mb4 下的 {@code VARCHAR(128)} 按字符计，而一个非 BMP
+     * 字符（emoji、CJK 扩展区汉字）在 Java 字符串里占**两个**码元。按码元切到第 128 个会把一个代理对
+     * 从中间劈开，孤立代理写进库时退化成 {@code ?}；按码点切既保证结果都是完整字符，也让非 BMP 名字
+     * 真正填满 128 个字符（旧实现只填 64 个）。码点数 ≤ 码元数，因此列宽上界只会更安全。
+     */
     public static String truncateModel(String model) {
-        if (model == null || model.length() <= MODEL_MAX_LENGTH) {
+        if (model == null || model.codePointCount(0, model.length()) <= MODEL_MAX_LENGTH) {
             return model;
         }
-        return model.substring(0, MODEL_MAX_LENGTH);
+        return model.substring(0, model.offsetByCodePoints(0, MODEL_MAX_LENGTH));
     }
 }

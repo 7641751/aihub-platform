@@ -20,8 +20,10 @@ import java.util.TreeSet;
  * **仍然并入遗留默认模型**：迁移期（或 admin 不可达走了兜底）时不能突然把这个端点变成空列表
  * —— 那会让所有客户端以为平台没有任何模型。
  *
- * <p>与 {@code ChatRelayController} 一样，这里**不回源 admin**：读的是已经缓存好的快照，
- * 因此上游或控制面抖动不会把这个端点变成故障（它与上游其实完全无关）。
+ * <p>与 {@code ChatRelayController} 一样，这里读的是 {@link ConfigClient#current()} 手上的**缓存快照**
+ * （最差回落到兜底快照）；{@code current()} **永不抛异常**，因此上游或控制面抖动不会把这个端点
+ * 变成故障（它与上游其实完全无关）。但**冷缓存（或缓存过期）时它会同步回源一次**——最长 5 s，
+ * 见 {@link ConfigClient} 登记的阻塞面：说这里「一次都不回源」是不成立的。
  * 鉴权由 {@code ApiKeyAuthFilter} 统一加在 {@code /v1/**} 前面，本类不重复实现
  * （限流、计量、路由同理，分别属于 M2/M3）。
  */
