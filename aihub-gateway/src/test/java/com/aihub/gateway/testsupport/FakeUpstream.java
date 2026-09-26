@@ -104,6 +104,32 @@ public final class FakeUpstream {
     }
 
     /**
+     * 只发一个错误状态码 + JSON 错误体（用于构造上游 5xx 与 429）。
+     * 与 {@link #enqueueJson(int, String)} 的实现相同，只是命名让故障注入用例读起来更清楚。
+     */
+    public synchronized void enqueueError(int status, String body) {
+        enqueueJson(status, body);
+    }
+
+    /**
+     * 连上但**永远不回响应头**：用来构造「上游超时」。
+     * <p>响应头不回 = 网关的 {@code responseTimeout} 会触发（非流式客户端按 {@code channel.timeoutMs}），
+     * 因此这个夹具的等待预算必须**大于**被测客户端的超时，否则用例会先被自己的兜底放行。
+     *
+     * @param holdMillis 最多扣留多少毫秒（到时写出 200 空 JSON 并关闭，避免测试进程挂住）
+     */
+    public synchronized void enqueueStall(long holdMillis) {
+        queued.add(exchange -> {
+            try {
+                Thread.sleep(holdMillis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            writeBody(exchange, 200, "application/json; charset=utf-8", "{}", Map.of());
+        });
+    }
+
+    /**
      * 分块发送的 SSE：第一帧写完**立刻 flush**，然后阻塞等测试放行（最多
      * {@value #SECOND_FRAME_HOLD_BUDGET_SECONDS} 秒），再写第二帧。
      *

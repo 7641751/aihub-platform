@@ -1,8 +1,11 @@
 package com.aihub.gateway.meter;
 
 import com.aihub.common.apikey.ApiKeyView;
+import com.aihub.common.config.ChannelDescriptor;
 import com.aihub.common.meter.MeteringEvent;
 import com.aihub.gateway.auth.ApiKeyAuthFilter;
+import com.aihub.gateway.config.LegacyChannel;
+import com.aihub.gateway.upstream.UpstreamProperties;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
@@ -150,11 +153,46 @@ class RelayMeteringTest {
         // 「截断到毫秒」在事件边界上唯一可观测的口径：带 123456789ns 亚毫秒部分的时刻，
         // 落到事件里只剩 .123 —— 亚毫秒部分不得进入事件（旧的 % 1_000 >= 0 是恒真断言，钉不住任何东西）。
         Instant withNanos = Instant.parse("2026-09-25T10:15:30.123456789Z");
-        MeteringEvent truncated = new RelayMetering("req-nanos", withNanos, 7L, null, null, "deepseek-chat",
+        MeteringEvent truncated = new RelayMetering("req-nanos", withNanos, 7L, null, "deepseek-chat",
                 UsageCapture.start(false, 4096)).toEvent(SignalType.ON_COMPLETE);
         assertThat(truncated.createdAtEpochMilli()).isEqualTo(withNanos.toEpochMilli());
         assertThat(truncated.createdAtEpochMilli() % 1_000L)
                 .as("毫秒位必须是输入时刻的毫秒位（实现若按微秒/纳秒写入，这里会是 0）")
                 .isEqualTo(123L);
+    }
+
+    /**
+     * 多渠道（M3）起事件里必须带上**实际服务**的那条渠道。判别性在于第二次选择：故障转移会在一次
+     * 请求里走过好几条候选，若实现用 {@code compareAndSet(null, ...)}（或只记首选），事件里留下的是
+     * **首选**那条（11），而真正产生响应的那条是 12 —— {@code request_log.channel_id} 从此与事实不符。
+     */
+    @Test
+    void theChannelThatServedTheRequestIsCarriedIntoTheEvent() {
+        RelayMetering metering = meteringFor(exchangeWithTenant(7L), false);
+
+        metering.onChannelSelected(channel(11L, "primary"));
+        assertThat(metering.toEvent(SignalType.ON_COMPLETE).channelId()).isEqualTo(11L);
+
+        metering.onChannelSelected(channel(12L, "standby"));
+
+        assertThat(metering.toEvent(SignalType.ON_COMPLETE).channelId())
+                .as("记录的是最后真正被调用（并产生响应）的那条候选，不是最先被选中的那条")
+                .isEqualTo(12L);
+    }
+
+    /** 遗留单渠道的哨兵 id 也写进事件（不是 NULL）：这样「走了兜底路径」在 request_log 里可查。 */
+    @Test
+    void theLegacySentinelChannelIsRecordedRatherThanLeftNull() {
+        RelayMetering metering = meteringFor(exchangeWithTenant(7L), false);
+
+        metering.onChannelSelected(LegacyChannel.of(
+                new UpstreamProperties("http://127.0.0.1:11434", "", "m")));
+
+        assertThat(metering.toEvent(SignalType.ON_COMPLETE).channelId()).isEqualTo(LegacyChannel.ID);
+    }
+
+    private static ChannelDescriptor channel(long id, String name) {
+        return new ChannelDescriptor(id, name, "https://ch" + id + ".example.com", "v1:QUJD", 1, 5_000,
+                ChannelDescriptor.STATUS_ACTIVE, 100, 0);
     }
 }

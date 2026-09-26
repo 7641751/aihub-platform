@@ -5,6 +5,8 @@ import com.aihub.common.config.ChannelDescriptor;
 import com.aihub.common.config.ConfigSnapshot;
 import com.aihub.common.config.ModelRouteDescriptor;
 import com.aihub.common.config.RatePolicy;
+import com.aihub.common.crypto.AesGcmChannelCipher;
+import com.aihub.common.crypto.ChannelKeyRegistry;
 import com.aihub.gateway.admin.AdminClient;
 import com.aihub.gateway.testsupport.FakeUpstream;
 import com.aihub.gateway.testsupport.MeteringTestConfig;
@@ -29,6 +31,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
 
@@ -110,6 +113,9 @@ abstract class RateLimitWiringSupport {
         registry.add("aihub.upstream.base-url", () -> upstream.baseUrl());
         registry.add("aihub.upstream.default-model", () -> "wiring-model");
         registry.add("aihub.internal.secret", () -> "test-internal-secret");
+        // M3 起渠道密钥是**逐渠道密文**：本夹具的渠道必须带一份能解开的密文（否则中继会按
+        // 「渠道不可用」跳过它，这些限流用例就再也打不到上游）。主密钥是合成值。
+        registry.add("aihub.channel.master-key", RateLimitWiringSupport::masterKey);
         // 死端口 = Redis 不可用。降级路径正是这些用例要证的。
         registry.add("spring.data.redis.port", () -> "1");
         // 连接被拒本来就是毫秒级；显式收短超时，避免任何情况下退化成「每请求 2 秒」。
@@ -133,16 +139,34 @@ abstract class RateLimitWiringSupport {
      * <p>渠道与路由不是点缀：{@code ConfigClient.usable()} 把「既没有渠道也没有路由」的快照当成
      * **空快照**（那是 admin 冷启动的中间状态），于是「只有策略行」的快照会被整体丢弃、策略悄悄
      * 变回内置默认 —— 实测就是这么红的。真实的控制面不会下发这种快照，测试也不该伪造。
+     * <p>渠道的 {@code apiKeyCipher} 也**必须**是真的密文（Task 10 起中继会把解不开密钥的候选当
+     * 「不可用」跳过）：这里的密文用下面 {@link #masterKey()} 加密一个合成明文，密钥来源与生产
+     * 完全同一条路径（网关本地主密钥 → 渠道密文）。
      */
     static ConfigSnapshot wiringSnapshot() {
         ChannelDescriptor channel = new ChannelDescriptor(11L, "wiring-channel",
-                upstream.baseUrl(), null, 0, 30_000, ChannelDescriptor.STATUS_ACTIVE, 100, 0);
+                upstream.baseUrl(), cipherText(), 1, 30_000, ChannelDescriptor.STATUS_ACTIVE, 100, 0);
         ModelRouteDescriptor route = new ModelRouteDescriptor("wiring-model", 11L, 100, 0,
                 ModelRouteDescriptor.STATUS_ACTIVE);
         return new ConfigSnapshot(1L, 2L, List.of(channel), List.of(route),
                 List.of(new RatePolicy(TENANT_ID, null, QPS, BURST),
                         new RatePolicy(ANONYMOUS_TENANT_ID, null, QPS, BURST)),
                 "wiring-model");
+    }
+
+    /** 合成主密钥（**绝不是真实密钥**）：只用于让夹具渠道的密文可解。 */
+    static String masterKey() {
+        byte[] key = new byte[32];
+        for (int i = 0; i < key.length; i++) {
+            key[i] = (byte) (i * 11 + 2);
+        }
+        return "v1:" + Base64.getEncoder().encodeToString(key);
+    }
+
+    /** 夹具渠道的密文（明文是显而易见的合成值，不会出现在任何断言里）。 */
+    private static String cipherText() {
+        return new AesGcmChannelCipher(ChannelKeyRegistry.parse(masterKey()))
+                .encrypt("sk-wiring-channel-plaintext-synthetic");
     }
 
     /**
