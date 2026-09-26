@@ -333,6 +333,10 @@ class ConfigCacheTest {
      * <p>这三条同时成立才算通过：本地层为空、Redis 读空（模拟 TTL 到期或 Redis 不可用）、admin
      * 不可达；仍然拿到那条多渠道路由（id=31，不是 {@link LegacyChannel#ID}），并且不抛异常，
      * 且这份内存副本**不写回 Redis**（否则会复活一条陈旧共享条目）。
+     *
+     * <p><b>三次复审修复 3：故障期内要读两次。</b>只读一次时，「admin 只被调用一次」这条断言对
+     * 修复前的实现同样成立（第一次读无论如何都要回源一次），所以它证明不了「故障期内的重复读不
+     * 再回源」。第二次读把这条区分开：修复前每次读都先付一次回源，计数会到 2。
      */
     @Test
     void combinedRedisAndAdminOutageStillServesTheLastGoodSnapshot() {
@@ -358,7 +362,17 @@ class ConfigCacheTest {
                 .extracting(ChannelDescriptor::id).containsExactly(31L);
         assertThat(served.channels()).extracting(ChannelDescriptor::id).doesNotContain(LegacyChannel.ID);
         assertThat(served.version()).isEqualTo(3L);
-        assertThat(adminCalls).as("手上还有快照时最多回源一次（修复 1 之前是每个请求都先回源一次）")
+
+        // 故障期内**再读一次**：这一条才让下面的计数真正有判别力（三次复审修复 3）。
+        // 只读一次时，`>= 1` 与 `hasValue(1)` 对修复前的实现**都**成立 —— 第一次读本来就是一次回源，
+        // 所以上一轮那次「改成精确 1」的断言改动是空转的。加上第二次读之后，只有「窗口内一次回源
+        // 都不做」的实现才会停在 1；修复前（每个请求都先付一次回源）这里会变成 2。
+        ConfigSnapshot servedAgain = client.current();
+
+        assertThat(servedAgain.channels()).as("故障期内重复读必须继续服务最近一次成功快照")
+                .extracting(ChannelDescriptor::id).containsExactly(31L);
+        assertThat(servedAgain.version()).isEqualTo(3L);
+        assertThat(adminCalls).as("故障期内的第二次读也不得回源（修复前每个请求都先回源一次，这里会是 2）")
                 .hasValue(1);
         assertThat(cache.local()).as("最近快照只留在内存里，绝不回填本地层").isEmpty();
         verify(values, never()).set(eq(ConfigCache.REDIS_KEY), anyString(), any(Duration.class));
@@ -597,18 +611,20 @@ class ConfigCacheTest {
         when(values.get(anyString())).thenReturn(null);
         AtomicInteger adminCalls = new AtomicInteger();
         AtomicInteger served = new AtomicInteger(1); // 1 = 尚未恢复, 2 = 已恢复
-        // 冷却窗口取 300 ms（生产默认是 5 s，理由见 GatewayConfigProperties）：本用例要证明的是
+        // 冷却窗口取 **1 s**（生产默认是 5 s，理由见 GatewayConfigProperties）：本用例要证明的是
         // 「窗口内一次都不回源、窗口过后必须回源」，这一点与窗口的具体长度无关 —— 用 5 s 只会让
-        // 用例白等 5 秒。生产默认值由 GatewayConfigProperties 的 @DefaultValue 与 application.yml 钉住。
+        // 用例白等 5 秒。生产的 5 s 由 GatewayConfigProperties 的 @DefaultValue 与 application.yml
+        // 钉住，那才是它该待的地方。窗口从 300 ms 放宽到 1 s 是**去抖动**（三次复审修复 4）：
+        // 8 次 current() 必须落在窗口内，机器一卡就可能越过 300 ms，那是一条与实现无关的红。
         ConfigCache cache = cache(new GatewayConfigProperties(Duration.ofSeconds(30), Duration.ofMinutes(10), 300,
-                Duration.ofMillis(300)));
+                Duration.ofMillis(1000)));
         ConfigClient client = new ConfigClient(cache, adminDeferring(() -> {
             adminCalls.incrementAndGet();
             return Mono.just(served.get() == 2
                     ? Optional.of(snapshot(2L, 22L))         // 控制面恢复
                     : Optional.<ConfigSnapshot>empty());     // 快速失败：控制面「没有快照」
         }), upstream, new GatewayConfigProperties(Duration.ofSeconds(30), Duration.ofMinutes(10), 300,
-                Duration.ofMillis(300)), registry);
+                Duration.ofMillis(1000)), registry);
 
         ConfigSnapshot first = client.current();
         assertThat(first.channels()).as("第一跳快速失败，手上什么都没有 → 遗留单渠道")
@@ -629,7 +645,7 @@ class ConfigCacheTest {
                 .isEqualTo(1.0d);
 
         // 窗口过去：必须能重新回源（冷却不是永久熔断）。
-        Thread.sleep(500L);
+        Thread.sleep(1200L);
         assertThat(client.current().channels()).as("窗口过后必须重新回源并拿到新快照")
                 .extracting(ChannelDescriptor::id).containsExactly(22L);
         assertThat(adminCalls).as("窗口过后只多一次回源").hasValue(2);
@@ -682,6 +698,60 @@ class ConfigCacheTest {
     }
 
     /**
+     * 三次复审修复 2（次要）：**「一次故障期一条」的 WARN 上界不能被「命中/未命中交替」绕过**。
+     *
+     * <p>{@link ConfigClient#current()} 在任何一次缓存命中时都会调 {@code clearDegraded()}，把
+     * 「正处于故障期」的标记清回 {@code false}；而 {@code logDegradedOncePerEpisode} 原来只在
+     * **CAS 失败**（即「本期已经打过」）的那条路径上检查 60 s 播报间隔 —— CAS **成功**那条
+     * （「重新进入故障期」）直接放行。于是二级缓存抖动（命中 → 未命中 → 命中 → 未命中）会让每个
+     * 周期都立刻打一条 WARN：上界从「一次故障期一条」退化成「每周期一条」，无界。
+     *
+     * <p>fixture 就是那个抖动：每一轮先让 Redis 命中（命中会把 lastGood 填成 v9，并清掉故障期标记），
+     * 再让本地层过期 + Redis 读空 —— 此时冷却窗口仍然有效，于是 {@code current()} 走
+     * {@code serveRetainedOrLegacy()} 并尝试播报一条降级 WARN。admin 全程不可达，只被真正问过一次。
+     *
+     * <p>断言 {@code hasSize(1)}：修复前这里会是 5（每轮一条）。
+     */
+    @Test
+    void flappingSecondLevelCacheKeepsOutageWarningsBounded() {
+        AtomicInteger adminCalls = new AtomicInteger();
+        ConfigCache cache = cache();
+        ConfigClient client = new ConfigClient(cache, adminReturning(() -> {
+            adminCalls.incrementAndGet();
+            return Optional.empty(); // admin 全程不可达
+        }), upstream, properties, registry);
+
+        Logger clientLogger = (Logger) LoggerFactory.getLogger(ConfigClient.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        clientLogger.addAppender(appender);
+        try {
+            for (int i = 0; i < 5; i++) {
+                // 「命中」：二级缓存回来了（别的实例重新写入 / 网络抖动恢复）—— 这一跳会清掉故障期标记。
+                when(values.get(anyString())).thenReturn(ConfigSnapshotCodec.encode(snapshot(9L, 21L)));
+                cache.invalidateLocal();
+                assertThat(client.current().channels()).as("二级命中必须照常服务它那一份")
+                        .extracting(ChannelDescriptor::id).containsExactly(21L);
+
+                // 「未命中」：二级又读不到、本地也过期了，而 admin 仍然不可达。
+                // 冷却窗口内 → 服务最近一次成功快照，并**尝试**播报一条降级 WARN。
+                when(values.get(anyString())).thenReturn(null);
+                cache.invalidateLocal();
+                assertThat(client.current().channels()).as("抖动期间仍然必须服务最近一次成功快照")
+                        .extracting(ChannelDescriptor::id).containsExactly(21L);
+            }
+        } finally {
+            clientLogger.detachAppender(appender);
+            appender.stop();
+        }
+
+        assertThat(adminCalls).as("admin 只被真正问过一次（其余请求都落在冷却窗口内）").hasValue(1);
+        assertThat(appender.list).as("命中/未命中交替不得让 WARN 变成每周期一条（修复前是 5 条）").hasSize(1);
+        assertThat(appender.list.get(0).getFormattedMessage()).as("那一条仍是「回源失败」那条")
+                .contains("配置快照回源失败");
+    }
+
+    /**
      * 复审修复 3（次要）：**缓存写入必须拒绝版本倒退**。
      *
      * <p>单飞槽位被释放之后，输掉 CAS 的调用者可能读到 {@code null} 并把**自己那条从未发布**的
@@ -725,6 +795,98 @@ class ConfigCacheTest {
         ConfigSnapshot served = client.current();
         assertThat(served.version()).as("更旧的快照绝不能赢得后续的服务").isEqualTo(6L);
         assertThat(served.channels()).extracting(ChannelDescriptor::id).containsExactly(66L);
+    }
+
+    /**
+     * 三次复审修复 1（重要）：**同版本的重新写入必须放行**。
+     *
+     * <p>守卫写成 {@code version() <= 水位} 时，「两级缓存都过期 → 回源拿到一个**没有变化**的版本」
+     * 这条路上，Redis 层会**永远**填不回去：本地层因为 key 已经过期而正常回填（{@code merge} 在
+     * 键不存在时直接插入），共享缓存却因为 {@code 10 <= 10} 被拒。此后每个实例都以本地 TTL 的
+     * 节奏（≈2 次/分钟/实例）去敲 admin，而不是大约每 10 分钟一次 —— 正是两级缓存要消除的那种
+     * 控制面压力；Redis 重启或一次瞬时写失败对那个版本留下同样的永久后果。等号不是「倒退」。
+     *
+     * <p>fixture 里控制面**始终**返回 v10（没有停机、也没有配置变更）：第一次读写入 Redis
+     * （水位=10），等本地 TTL 与冷却窗口都过去（两者都取 80 ms，模拟 Redis 的 10 分钟 TTL 也到期）
+     * 后第二次读三级全空、重新回源，拿到的还是 v10 —— 它必须被重新写进 Redis。
+     * 改成严格比较之前，下面第二个 {@code verify(values).set(...)} 会「Wanted but not invoked」。
+     *
+     * <p>反方向（更旧的版本仍被拒绝）由
+     * {@link #olderSnapshotNeverOverwritesANewerOneInEitherCacheLayer} 钉住，本修复没有放宽它。
+     */
+    @Test
+    void equalVersionIsRewrittenToRedisAfterBothCacheLayersLapse() throws Exception {
+        when(values.get(anyString())).thenReturn(null);
+        AtomicInteger adminCalls = new AtomicInteger();
+        GatewayConfigProperties shortLived = new GatewayConfigProperties(Duration.ofMillis(80),
+                Duration.ofMinutes(10), 300, Duration.ofMillis(80));
+        ConfigCache cache = cache(shortLived);
+        ConfigClient client = new ConfigClient(cache, adminReturning(() -> {
+            adminCalls.incrementAndGet();
+            return Optional.of(snapshot(10L, 44L)); // 控制面没有变化：每次都是同一个 v10
+        }), upstream, shortLived, registry);
+
+        assertThat(client.current().version()).as("第一次读：回源并回填两级").isEqualTo(10L);
+        verify(values).set(eq(ConfigCache.REDIS_KEY), eq(ConfigSnapshotCodec.encode(snapshot(10L, 44L))),
+                eq(shortLived.snapshotTtl()));
+
+        // 本地 80 ms TTL 与 80 ms 冷却窗口都过去（Redis 那份按 fixture 也已经读空）。
+        Thread.sleep(150L);
+        assertThat(cache.local()).as("前置条件：本地副本必须已经过期").isEmpty();
+        clearInvocations(values);
+
+        ConfigSnapshot second = client.current();
+
+        assertThat(second.version()).as("控制面没变，第二次读仍然服务 v10").isEqualTo(10L);
+        assertThat(adminCalls).as("前置条件：确实重新回过源（不是被冷却窗口挡下的）").hasValue(2);
+        assertThat(cache.local()).as("本地层被重新填入").isPresent();
+        verify(values).set(eq(ConfigCache.REDIS_KEY), eq(ConfigSnapshotCodec.encode(snapshot(10L, 44L))),
+                eq(shortLived.snapshotTtl()));
+    }
+
+    /**
+     * 三次复审修复 1（后半，重要）：**从 Redis 观察到的版本必须抬升写入水位**。
+     *
+     * <p>只让 {@code writeRedis} 记住「本实例写过的版本」是不够的：如果这条实例在**回源在途**时
+     * 从 Redis 读到了一个更新的版本（别的实例刚写进去的 v10），随后那条更旧的在途响应（v5）回来，
+     * 本地层会被守卫正确拒绝，但 Redis 的水位仍是「从未写过」，于是 v5 会被写进**共享**条目 ——
+     * 毒化所有其他实例。修复：{@code readRedis()} 把观察到的版本也推进水位
+     * （{@code accumulateAndGet(..., Math::max)}），配合严格 {@code <} 比较，同版本的正常回填仍然放行。
+     *
+     * <p>这一个子场景**不需要 Lua/CAS**（与代码里原先的披露相反）：观察与写入都在同一个进程里，
+     * 水位就是那次观察的结论。仍然拦不住的是**跨进程**那一半（本实例既没读到也没写过别人刚写的
+     * v7 时，更旧的 v5 会覆盖它），那才需要 Redis 侧的原子「读-比-写」。
+     *
+     * <p>fixture 用一个在订阅时才求值的 admin 替身：它在回源真正开始后调用
+     * {@code cache.readRedis()} 并采用那份 v10（复现 {@code resolve()} 在同一次在途回源里做的
+     * 「读到 Redis 的更新版本 → 刷本地」），然后才返回那条更旧的 v5。修复前 v5 会写进 Redis。
+     */
+    @Test
+    void olderInFlightResultIsNotWrittenToRedisAfterANewerVersionWasObservedInRedis() {
+        when(values.get(anyString())).thenReturn(ConfigSnapshotCodec.encode(snapshot(10L, 44L)));
+        ConfigCache cache = cache();
+        AtomicInteger adminCalls = new AtomicInteger();
+        ConfigClient client = new ConfigClient(cache, adminDeferring(() -> {
+            adminCalls.incrementAndGet();
+            // 回源在途时本实例从 Redis 观察到 v10（并像 resolve() 那样刷新本地副本）。
+            cache.readRedis().ifPresent(cache::putLocal);
+            return Mono.just(Optional.of(snapshot(5L, 55L))); // 晚到的、更旧的一次回源结果
+        }), upstream, properties, registry);
+
+        ConfigSnapshot loaded = client.refresh().block();
+
+        assertThat(loaded).as("回源本身仍返回它拿到的快照；被拒绝的只是对共享缓存的写入").isNotNull();
+        assertThat(loaded.version()).isEqualTo(5L);
+        assertThat(adminCalls).hasValue(1);
+        assertThat(cache.local()).as("本地层已由更新的 v10 占据，v5 不得覆盖它").isPresent()
+                .get().extracting(ConfigSnapshot::version).isEqualTo(10L);
+        verify(values, never()).set(eq(ConfigCache.REDIS_KEY), eq(ConfigSnapshotCodec.encode(snapshot(5L, 55L))),
+                any(Duration.class));
+
+        // 正向：更新的版本照常写得进去（守卫只拦倒退）。
+        cache.writeRedis(snapshot(11L, 66L));
+        verify(values).set(eq(ConfigCache.REDIS_KEY), eq(ConfigSnapshotCodec.encode(snapshot(11L, 66L))),
+                eq(properties.snapshotTtl()));
     }
 
     /**

@@ -45,8 +45,10 @@ import java.util.concurrent.atomic.AtomicReference;
  * 因此每次失败的尝试都会记录一个「冷却到什么时候」（{@code aihub.config.refresh-cooldown}，
  * 默认 **5 s**），窗口内不再回源。
  *
- * <p><b>日志与指标在故障期必须是有界的</b>：回源失败的 WARN 只在**一次故障期的开头**打一条，
- * 之后沉默到「一次成功回源」或「超过 {@link #COOLDOWN_LOG_INTERVAL_MILLIS}」，同时
+ * <p><b>日志与指标在故障期必须是有界的</b>：降级 WARN 的**硬上界是每
+ * {@link #COOLDOWN_LOG_INTERVAL_MILLIS}（60 s）一条**，与「是不是本次故障期的第一条」无关 ——
+ * 任何一次缓存命中都会结束「本期」（{@link #clearDegraded()}），只看「本期第一条」的实现会被
+ * 二级缓存抖动（命中 → 未命中 → 命中 → 未命中）绕成每周期一条，于是上界失效。同时
  * {@code aihub.config.snapshot.refresh.failures} 把每一次真实尝试都计数 —— 日志给人看，
  * 计数给告警看。旧实现是「并发重试 = 每请求两条 WARN」。
  *
@@ -124,15 +126,19 @@ public class ConfigClient {
     private final Counter refreshFailuresCounter;
     /**
      * 下一次允许回源的最早时刻（{@code System.currentTimeMillis()} 基准），`0` = 立即可回源。
-     * 只在**失败的**尝试之后推进；一次成功回源或一次可用的缓存命中都会把它清回 `0`。
+     * 在**每一次回源尝试开始时**推进，与这次尝试成功还是失败无关（见 {@link #markAttemptWindow()}）；
+     * {@link #invalidate()} 显式把它清回 `0`。
      */
     private final AtomicLong nextAttemptAt = new AtomicLong();
     /**
-     * 「正处于故障期」。用 CAS 而不是 {@code synchronized}：这条路径在 event loop 上，
-     * 它只决定**日志打不打**，不决定数据面行为，因此绝不能在这里引入锁。
+     * 「正处于故障期」。**它不再是日志放行的依据**，只用来选 {@link #lastDegradedLogAt} 的写法
+     * （无争用时 {@code set}，有争用时 CAS）：放行只由播报间隔决定（三次复审修复 2 —— 任何一次
+     * 缓存命中都会把它清回 {@code false}，靠它放行等于让缓存抖动产生每周期一条 WARN）。
+     * 用 CAS 而不是 {@code synchronized}：这条路径在请求线程上，它只决定日志怎么打，不决定
+     * 数据面行为，因此绝不能在这里引入锁。
      */
     private final AtomicBoolean degraded = new AtomicBoolean();
-    /** 故障期内上一条 WARN 的时间戳（毫秒）；与 {@link #degraded} 一起把 WARN 限流成「一次故障期一条 + 每分钟一条」。 */
+    /** 上一条降级 WARN 的时间戳（毫秒）。**日志放行的唯一依据**：距今不足 60 s 就一条都不打。 */
     private final AtomicLong lastDegradedLogAt = new AtomicLong();
     /** 当前快照 version 的**可观测镜像**（{@link Gauge} 需要 Number，不能直接量一个 record）。 */
     private final AtomicLong visibleVersion = new AtomicLong();
@@ -165,7 +171,17 @@ public class ConfigClient {
                 .register(registry);
     }
 
-    /** 当前生效的快照。三级顺序 + 版本比对 + 兜底，**永不 null / 永不抛**。 */
+    /**
+     * 当前生效的快照。三级顺序 + 版本比对 + 兜底，**永不 null / 永不抛**。
+     *
+     * <p><b>登记的残留阻塞面（三次复审记录，本轮不修）</b>：冷却窗口**过去之后**、而
+     * {@link #lastGood} 已经有内容时，本方法仍会先走 {@link #refreshBlocking()}，因此
+     * **每个冷却窗口最多有一个请求**会为一次挂死的 admin 阻塞自己的线程最长
+     * {@link #REFRESH_TIMEOUT}（5 s）。这比修复前好得多（修复前是「每个请求都先付一次回源」），
+     * 而且这部分读已经被 {@code RateLimitFilter} 放到可阻塞的弹性线程池上、不再占 event loop，
+     * 但必须记在这里：它是「每窗口一次」，不是「零阻塞」。彻底消除它需要把快照读取改成完全异步
+     * （或把「窗口已过 + 手上有 lastGood」这条路径也改成先服务再后台刷新），那是跨任务的接口改动。
+     */
     public ConfigSnapshot current() {
         ConfigSnapshot resolved = resolve();
         if (resolved != null) {
@@ -215,7 +231,7 @@ public class ConfigClient {
         ConfigSnapshot retained = lastGood.get();
         if (retained != null) {
             // 这条 WARN 曾经是**每请求一条**（并发重试时代每个请求都会走到这里）。
-            // 现在被限流成「一次故障期一条 + 每分钟一条」，见 #logDegradedOncePerEpisode。
+            // 现在被限流成「每 60 s 至多一条」，见 #logDegradedOncePerEpisode。
             logDegradedOncePerEpisode("两级缓存均已过期/不可用且 admin 不可达，继续使用最近一次成功快照（version={}）",
                     retained.version());
             visibleVersion.set(retained.version());
@@ -329,6 +345,13 @@ public class ConfigClient {
      * <p><b>冷却窗口</b>：窗口内直接返回空（调用方服务 {@link #lastGood}），这是「失败重试速率
      * 不得超过 1/冷却窗口」的那道闸。它是**抑制**而不是限速：没有它时，快速失败的 admin 会让
      * 重试速率逼近请求速率（5 s 超时管的是单次尝试的时长，不是两次尝试的间隔）。
+     *
+     * <p><b>空 {@link Mono} 是三种情况的同一个结果，调用方不要把它当判据</b>（三次复审记录）：
+     * 冷却窗口内被抑制、admin 明确回「没有快照」、以及流内异常被 {@code onErrorResume} 折成空，
+     * 在这里**完全一样**。将来的失效调用方（Pub/Sub 监听器，决策 16）因此**不能**把「空」读成
+     * 「没事可做」—— 它必须直接读 {@link #current()}（或 {@link #lastGood}）来确认手上有没有快照。
+     * 现在唯一的调用方 {@link #current()} 之所以没问题，是因为它在调本方法**之前**自己先看了
+     * {@link #inCooldown()}，而不是把空信号当判据。
      */
     public Mono<ConfigSnapshot> refresh() {
         Mono<ConfigSnapshot> existing = inFlight.get();
@@ -422,22 +445,27 @@ public class ConfigClient {
      * 要么每 {@link #COOLDOWN_LOG_INTERVAL_MILLIS} 补一条 —— 长故障期里日志条数因此有界
      * （旧实现是每请求两条：回源失败一条 + 服务最近快照一条）。
      *
-     * <p>用 CAS 认领「谁负责打这条日志」而不是 {@code synchronized}：本方法在 event loop 上，
+     * <p><b>播报间隔对「本期第一条」同样生效</b>（三次复审修复 2）：{@link #clearDegraded()}
+     * 会在**任何一次缓存命中**时把 {@link #degraded} 清回 {@code false}，而二级缓存抖动
+     * （命中 → 未命中 → 命中 → 未命中）会让每一次「重新进入故障期」都走 CAS 成功那一支。只在
+     * CAS **失败**那一支检查间隔，等于给抖动留了一条每周期一条 WARN 的路 —— 上界从「一次故障期
+     * 一条」退化成「每周期一条」，恰好废掉本方法存在的理由。因此放行只由 {@link #lastDegradedLogAt}
+     * 决定，{@link #degraded} 只用来选时间戳的写法（无争用时 {@code set}，有争用时 CAS）。
+     *
+     * <p>用 CAS 认领「谁负责打这条日志」而不是 {@code synchronized}：本方法在请求路径上，
      * 日志的取舍绝不能变成锁。
      */
     private void logDegradedOncePerEpisode(String message, Object... arguments) {
         long now = System.currentTimeMillis();
-        if (!degraded.compareAndSet(false, true)) {
-            long last = lastDegradedLogAt.get();
-            if (now - last < COOLDOWN_LOG_INTERVAL_MILLIS) {
-                return; // 还在这条故障期的「安静期」内。
-            }
-            // 超过播报间隔：用 CAS 认领，避免并发请求同时补打。
-            if (!lastDegradedLogAt.compareAndSet(last, now)) {
-                return;
-            }
-        } else {
+        boolean firstOfEpisode = degraded.compareAndSet(false, true);
+        long last = lastDegradedLogAt.get();
+        if (now - last < COOLDOWN_LOG_INTERVAL_MILLIS) {
+            return; // 还在这条故障期的「安静期」内 —— 与「本期是不是第一条」无关。
+        }
+        if (firstOfEpisode) {
             lastDegradedLogAt.set(now);
+        } else if (!lastDegradedLogAt.compareAndSet(last, now)) {
+            return; // 超过播报间隔：用 CAS 认领，避免并发请求同时补打。
         }
         log.warn(message, arguments);
     }
@@ -473,6 +501,14 @@ public class ConfigClient {
     /**
      * 失效本地缓存，并**同时放行冷却窗口**：失效是「配置刚刚变了」的显式信号（未来的 Pub/Sub
      * 监听器会用它，见决策 16），此时不该让一次陈旧的失败尝试挡住立刻重新回源。
+     *
+     * <p><b>登记的缺口：它今天其实带不来一次回源（三次复审记录，不修）</b>。本方法只清本地层，
+     * 紧接着 {@link #resolve()} 仍会读到 Redis 里那份**同样陈旧的**共享条目并采用它 —— 于是
+     * 调用方根本走不到回源，上面那句 {@code nextAttemptAt.set(0L)} 是空转的；Redis 的写入水位
+     * （{@code ConfigCache} 的 {@code observedRedisVersion}）也不会因此重置。**真正的失效必须
+     * 同时绕过/清掉二级缓存**（删除 {@code ConfigCache.REDIS_KEY}，或带上一个「忽略已知版本」的
+     * 标记，并把水位一起处理掉），否则多实例部署下「配置变了」这个信号只影响本进程的本地层。
+     * M4 之前没有发布方（决策 16），因此本轮只登记。
      */
     public void invalidate() {
         nextAttemptAt.set(0L);
