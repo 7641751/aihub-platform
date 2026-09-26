@@ -18,6 +18,7 @@ import java.time.Duration;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * 限流过滤器是「429 长什么样、降级时怎么办」的唯一落点。
@@ -39,12 +40,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       （本类的 {@code RecordingRateLimiter} 把 {@code acquire} 整个换掉了，看不到任何桶 key）。</li>
  * </ul>
  *
- * <p>本类里由控制器评审带进来的钉子只有两条，且都在「过滤器自己这一层」能自证的范围内：
+ * <p>本类里由控制器评审带进来的钉子都在「过滤器自己这一层」能自证的范围内：
  * <ul>
  *   <li>放行与拒绝的分岔：拒绝时**不**调用 {@code chain.filter}，放行时调用 —— test slice 的假链
  *       是这一点的唯一证据；</li>
  *   <li>没有哈希时用 {@code ANONYMOUS_KEY_HASH} 哨兵，**绝不**把 {@code null} 拼进桶 key ——
- *       否则所有无哈希请求共享一个桶（还会被字面量 {@code "null"} 拼出 {@code aihub:ratelimit:7:null}）。</li>
+ *       否则所有无哈希请求共享一个桶（还会被字面量 {@code "null"} 拼出 {@code aihub:ratelimit:7:null}）；</li>
+ *   <li>降级/拒绝/自身故障三条路径的计数形态（{@code source} 只加在会取两个值的计数器上）；</li>
+ *   <li>收窄后的 catch 的边界：{@code RuntimeException} 与 {@code null} 判定 → fail-open，
+ *       而 {@code Error} → **向上抛**（{@link #anErrorFromTheLimiterPropagatesInsteadOfFailingOpen()}）。</li>
  * </ul>
  *
  * <p><b>线程模型</b>：判定被切到 {@code Schedulers.boundedElastic()} 上执行，本类的用例因此都
@@ -306,6 +310,64 @@ class RateLimitFilterTest {
         assertThat(exchange.getResponse().getStatusCode()).isNull();
     }
 
+    /**
+     * <b>收窄后的 catch 只兜 {@code RuntimeException}：{@code Error} 必须向上抛</b>（复审 Fix 3）。
+     *
+     * <p>收窄这个 catch 时原先**没有任何用例**覆盖 {@code Error} 这一侧（替身字段是
+     * {@code RuntimeException}，只覆盖了它和 null），于是「收窄」这件事本身就是无证据的声明 ——
+     * 把它改回 {@code catch (RuntimeException | Error e)} 全绿。这条用例补上判别力：
+     * JVM 级故障不能被当成「限流降级」，否则一个已经失去资源的 JVM 会继续放行请求、把故障扩散。
+     *
+     * <p>用 {@code AssertionError} 而不是 {@code OutOfMemoryError}：Reactor 的
+     * {@code Exceptions.throwIfFatal} 会把 {@code VirtualMachineError} 直接在调度线程上重抛
+     * （那时订阅者永远收不到终态信号，用例会以超时而不是断言失败收场）。{@code AssertionError}
+     * 是非致命的 {@code Error}，会正常经 {@code onError} 传到订阅者，因此它精确地测「catch 的宽度」。
+     */
+    @Test
+    void anErrorFromTheLimiterPropagatesInsteadOfFailingOpen() {
+        RecordingRateLimiter limiter = new RecordingRateLimiter(null);
+        limiter.failWithError = new AssertionError("限流器遇到 JVM 级故障");
+        MockServerWebExchange exchange = exchange("/v1/chat/completions", true);
+        AtomicReference<ServerWebExchange> passed = new AtomicReference<>();
+
+        assertThatThrownBy(() -> filter(limiter, true).filter(exchange, chain(passed))
+                .block(Duration.ofSeconds(5)))
+                .as("Error 必须向上抛：它表达的是 JVM 级故障，不是「限流机制降级」")
+                .hasRootCauseInstanceOf(AssertionError.class);
+        assertThat(passed.get()).as("Error 绝不能被吞成 fail-open（收窄 catch 之前的形态就是这样）")
+                .isNull();
+    }
+
+    /**
+     * <b>{@code fail_open} 计数器不带任何常量标签</b>：这是本轮**已披露**的一处指标形态变更
+     * （复审 Fix 4）。
+     *
+     * <p>上一轮把 {@code source=local} 从这条计数器上一起拿掉了，而复审只点名了 {@code degraded}
+     * 那条 —— 因此这里把它变成可执行的契约而不是注释：fail-open 发生时**没有任何一级给出过判定**
+     * （Redis 与本机桶都没结论），{@code source=local} 会是一条**假的**来源标注；它与
+     * {@code degraded} 是同一个「常量标签不区分任何两个时间序列」的理由。
+     * 「去掉标签」会改变既有时序的名字，所以它必须在报告里被明确写出来（本轮已写）。
+     */
+    @Test
+    void theFailOpenCounterCarriesNoConstantSourceTag() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        RecordingRateLimiter limiter = new RecordingRateLimiter(null);
+        limiter.failWith = new IllegalStateException("限流器内部错误");
+
+        new RateLimitFilter(limiter, true, registry)
+                .filter(exchange("/v1/chat/completions", true), chain(new AtomicReference<>()))
+                .block(Duration.ofSeconds(5));
+
+        assertThat(registry.get(RateLimitFilter.FAIL_OPEN_METRIC).counter().count())
+                .as("fail-open 必须被计数（它是「限流保护失效」的对外信号）")
+                .isEqualTo(1.0);
+        assertThat(registry.find(RateLimitFilter.FAIL_OPEN_METRIC)
+                .tag(RateLimitFilter.SOURCE_TAG, RateLimitFilter.SOURCE_LOCAL)
+                .counter())
+                .as("fail-open 时没有一级给出过判定，source=local 是假标签")
+                .isNull();
+    }
+
     /** {@link RateLimitFilter#ANONYMOUS_KEY_HASH} 是 G3 的哨兵，必须是可被引用、且非空的常量。 */
     @Test
     void theAnonymousSentinelIsNotEmpty() {
@@ -332,6 +394,8 @@ class RateLimitFilterTest {
         Long apiKeyId = -1L;
         String keyHash;
         RuntimeException failWith;
+        /** 非致命的 {@code Error}（JVM 级故障）：用来测「catch 只兜 RuntimeException」这条边界。 */
+        Error failWithError;
 
         RecordingRateLimiter(RateLimitDecision decision) {
             super(null, null, null);
@@ -346,6 +410,9 @@ class RateLimitFilterTest {
             this.keyHash = keyHash;
             if (failWith != null) {
                 throw failWith;
+            }
+            if (failWithError != null) {
+                throw failWithError;
             }
             return decision;
         }

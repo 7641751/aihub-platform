@@ -1,38 +1,24 @@
 package com.aihub.gateway.ratelimit;
 
-import com.aihub.common.apikey.ApiKeyView;
-import com.aihub.common.config.ChannelDescriptor;
-import com.aihub.common.config.ConfigSnapshot;
-import com.aihub.common.config.ModelRouteDescriptor;
-import com.aihub.common.config.RatePolicy;
-import com.aihub.gateway.admin.AdminClient;
 import com.aihub.gateway.config.ConfigClient;
 import com.aihub.gateway.testsupport.FakeUpstream;
-import com.aihub.gateway.testsupport.MeteringTestConfig;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.ApplicationContext;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Import;
-import org.springframework.context.annotation.Primary;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import reactor.core.publisher.Mono;
+import org.springframework.test.annotation.DirtiesContext;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.List;
-import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -44,7 +30,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 链上」这类故障**完全免疫** —— 那正是 M3 前几个任务留下来的真实缺口（限流器全写好了，一行都没接）。
  * 本类不构造任何限流组件，只发真实 HTTP、只读响应，因此它红就等于「线上不会限流」。
  *
- * <p>三个被钉住的事实，每一个都只能由「真的接上了」来解释：
+ * <p>装配（假 admin、死端口 Redis、请求辅助方法）全部来自 {@link RateLimitWiringSupport} ——
+ * 本类是它的**预热**子类（冷缓存那一半由 {@code RateLimitColdStartTest} 与
+ * {@code RateLimitColdCacheAuthDisabledTest} 负责）。上一轮本类曾自带一份**平行**的
+ * {@code FakeAdmin} / {@code @DynamicPropertySource} / 请求辅助，并在 javadoc 里声称两者「只差预热
+ * 与否」——那段声明当时是假的（两份副本已经漂移：support 设了 {@code aihub.config.local-ttl}，
+ * 本类没有）。现在本类真的继承 support，声明与事实一致。
+ *
+ * <p>被钉住的四个事实，每一个都只能由「真的接上了」来解释：
  * <ol>
  *   <li>请求一直打到**出现 429 为止**，且这个 429 必然落在尝试次数上界（{@link #MAX_ATTEMPTS}）之内
  *       —— 钉的是规则（超限必拒）而不是时序：「第几个请求被拒」取决于机器快慢，
@@ -53,7 +46,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       （{@code RateLimit-Limit: 1, 30} / {@code RateLimit-Remaining: 0} / 退避头）；
  *       这里的 {@code 1, 30} 是**控制面快照**下发的租户级策略，**不是**内置默认 {@code 10, 20}
  *       —— 内置默认的补充速率恰好追平本类的请求速率，桶永远耗不干净，那样连 429 都打不出来；</li>
- *   <li>{@code /healthz} 仍然 200：限流只守 {@code /v1/**}，运维端点不受影响。</li>
+ *   <li>{@code /healthz} 仍然 200：限流只守 {@code /v1/**}，运维端点不受影响；</li>
+ *   <li><b>流式（SSE）路径在限流开启时仍然是流式的</b>：判定被 offload 到
+ *       {@code boundedElastic} 后，中继的订阅线程确实变了，因此必须有一条真 HTTP 用例证明
+ *       「帧仍然逐帧到达、且响应头上带着限流结论」——见
+ *       {@link #aStreamingRequestStaysStreamingAndCarriesTheRateLimitHeaders()}。</li>
  * </ol>
  *
  * <p><b>Redis 指向死端口</b>（{@code spring.data.redis.port=1}，与 M1/M2/M3 既有做法一致）：
@@ -61,56 +58,25 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 而这正是 §9 与控制器 ruling 要求的那一条（降级 ≠ 放行全部）。连接被拒是毫秒级的，
  * 加上短超时，整套用例的附加延迟是秒级而不是「每个请求 2 秒」。
  *
- * <p><b>本类会把配置缓存预热</b>（{@link #warmTheConfigSnapshotOnTheTestThread()}），
- * 因此它证的只是「缓存有货时限流链正确」。**冷缓存**那一半（请求路径上从来没人预热过）
- * 由 {@code RateLimitColdStartTest} 负责 —— 两个类各自成类，是因为 Spring 的测试上下文按类缓存，
- * 而「冷」只有在上下文没被别的类调用过 {@code current()} 时才成立。
+ * <p><b>本类也清脏上下文</b>（{@code @DirtiesContext(BEFORE_CLASS)}）：三个子类的上下文配置
+ * （除鉴权开关外）完全相同，于是 Spring 会**复用**上一个类缓存下来的上下文 —— 而那个上下文里的
+ * {@code aihub.upstream.base-url} 是上一个类那次 {@code FakeUpstream} 的端口，它的
+ * {@code @AfterAll} 已经把服务器停掉了。复用等于让本类打到一台已经关掉的假上游（实测：502 +
+ * {@code Connection refused}）。类前置清脏保证每个子类的上下文都按**自己**这次启动的假上游解析
+ * base-url，与 {@code RateLimitColdStartTest} 的理由相同。
  */
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Import({MeteringTestConfig.class, RateLimitWiringTest.FakeAdmin.class})
-class RateLimitWiringTest {
+@DirtiesContext(classMode = DirtiesContext.ClassMode.BEFORE_CLASS)
+class RateLimitWiringTest extends RateLimitWiringSupport {
 
     /**
-     * 两个**不同**的密钥（因此是两个不同的桶）。这不只是卫生习惯：{@link #FakeAdmin} 对任何哈希都
-     * 回同一个 {@code apiKeyId=42}，所以「两个密钥各自有独立的桶」同时证明了桶的第二维是
-     * {@code sha256(secret)} 而**不是** {@code api_key_id} —— 写成后者的实现会让两个用例互相耗尽
-     * 对方的名额（那条断言会红）。
+     * 客户端读到 SSE 第一帧的预算。与 {@code SseStreamingTest} 同一个量级：它必须**远小于**
+     * 上游扣留第二帧的预算（{@code FakeUpstream.SECOND_FRAME_HOLD_BUDGET_SECONDS} = 30 s），
+     * 否则「谁先到期」由时序抖动决定。
      */
-    private static final String OVER_LIMIT_SECRET = "wiring-over-limit-secret";
-    private static final String IN_LIMIT_SECRET = "wiring-in-limit-secret";
+    private static final long CLIENT_READ_TIMEOUT_SECONDS = 5;
 
-    /**
-     * 由**配置快照**下发的租户级策略（{@code qps=1 / burst=30}）。
-     *
-     * <p>为什么用一对显式的小额度，而不是内置默认的 {@code 10/20}：本类的请求间隔约 100ms，
-     * 而内置默认的补充速率是 10/s —— 恰好追平请求速率，桶会在 20 附近动态平衡、永远耗不干净
-     * （这不是猜测：第一版就是这么红的，实测第 21 个仍是 200）。换成 {@code 1/30} 后，
-     * 30 个请求的总耗时（约 0.1s 量级，见实测）内最多补充 1 个令牌，因此「第 31 个必然被拒」
-     * 是确定性的，与机器快慢无关。
-     *
-     * <p><b>{@code qps} 不能写 0</b>：{@code RateLimitResolver} 把非正的 qps/burst 当成配置事故、
-     * 回落内置默认（Task 4 的按行校验，刻意不跨维回落），所以 {@code 0/3} 表达不出「永不补充」——
-     * 它只会静默变回 {@code 10/20}。
-     *
-     * <p>顺带它把「策略来自控制面快照」这条链也钉住了：断言的 {@code RateLimit-Limit} 是
-     * {@code "1, 30"} 而不是内置的 {@code "10, 20"}，因此「快照 → RateLimitResolver → RateLimiter
-     * → 过滤器」任何一环断开都会红。
-     */
-    private static final int QPS = 1;
-    private static final int BURST = 30;
-
-    private static final long TENANT_ID = 7L;
-
-    /**
-     * 打空桶的尝试次数上界。理论需要「把 burst 放空所需时间 / 单请求耗时」次 ≈
-     * (30 s / 毫秒级) ，几百次远远够用；而一个「降级就放行」的实现永远打不到。
-     */
-    private static final int MAX_ATTEMPTS = 400;
-
-    private static FakeUpstream upstream;
-
-    @LocalServerPort
-    private int gatewayPort;
+    private static final String FIRST_FRAME = "data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\n\n";
+    private static final String SECOND_FRAME = "data: [DONE]\n\n";
 
     @Autowired
     private ApplicationContext context;
@@ -118,84 +84,35 @@ class RateLimitWiringTest {
     @Autowired
     private ConfigClient configClient;
 
-    @BeforeAll
-    static void startUpstream() {
-        upstream = FakeUpstream.start();
-    }
-
-    @AfterAll
-    static void stopUpstream() {
-        upstream.stop();
-    }
-
     /**
      * 在**测试线程**上把配置快照灌进本地缓存（{@code ConfigClient} 的 TTL 是 30 秒，足够本类跑完）。
      *
      * <p><b>为什么必须有这一句</b>：{@code ConfigClient.current()} 在两级缓存都空时走
-     * {@code refreshBlocking()}，而它内部是 {@code Mono.block()} —— 在 event loop 线程上**必然**抛
-     * {@code IllegalStateException: block()/blockFirst()/blockLast() are blocking}，于是冷启动的
-     * 第一个请求永远拿不到快照、策略静默回落成内置默认 {@code 10/20}。这是 Task 7 的
-     * {@code ConfigClient} 自身的缺陷（{@code current()} 直到本任务才第一次被请求路径调用，
-     * 所以之前没有任何测试碰到它），**不是限流链的问题**。
+     * {@code refreshBlocking()}，而它内部是 {@code Mono.block()}。{@code block()} 在**非阻塞线程**
+     * （Netty event loop）上会抛 {@code IllegalStateException: block()/blockFirst()/blockLast() are
+     * blocking}，被 {@code refreshBlocking} 吞成一次「回源失败」，于是 {@code current()} 只能回落到
+     * 遗留单渠道、策略静默变回内置默认 {@code 10/20}。这是 Task 7 的 {@code ConfigClient} 自身的性质，
+     * **不是限流链的问题**。
      *
-     * <p>本类的职责是证明「限流链接上了」，因此这里把那个缺陷挡在门外（缓存有货 → 请求路径只读本地缓存，
-     * 不触发回源），让断言指向限流本身。缺陷本身已登记在任务报告里，不在本任务修。
+     * <p><b>这条性质的成立条件比看上去窄</b>（本轮实测更正）：那个检查发生在 {@code subscribe()}
+     * **之后**，因此若控制面是**同步**的，回源会在抛异常之前就跑完并写进本地缓存，第二次
+     * {@code resolve()} 照样拿得到快照 —— 症状被夹具掩盖。真实的 {@code AdminClient.Http} 是 WebClient
+     * （异步），所以生产形状下它确实会丢掉这一次回源。判别性用例是
+     * {@code RateLimitColdCacheAuthDisabledTest}（鉴权关闭 + 冷缓存 + 异步控制面：修复前实测拿到
+     * {@code 10, 20}）。
+     *
+     * <p>本类的职责是证明「限流链接上了」，因此这里把缓存预热好（缓存有货 → 请求路径只读本地缓存，
+     * 不触发回源），让断言指向限流本身。冷缓存那一半由 {@code RateLimitColdStartTest} 负责
+     * （它那条只证「冷缓存也用上策略」，判别力有限，理由见该类的 javadoc）。
      */
     @BeforeEach
     void warmTheConfigSnapshotOnTheTestThread() {
         configClient.refresh().block(Duration.ofSeconds(5));
     }
 
-    @DynamicPropertySource
-    static void properties(DynamicPropertyRegistry registry) {
-        registry.add("aihub.upstream.base-url", () -> upstream.baseUrl());
-        registry.add("aihub.upstream.default-model", () -> "wiring-model");
-        registry.add("aihub.auth.enabled", () -> "true");
-        registry.add("aihub.internal.secret", () -> "test-internal-secret");
-        // 死端口 = Redis 不可用。降级路径正是本条要证的。
-        registry.add("spring.data.redis.port", () -> "1");
-        // 连接被拒本来就是毫秒级；显式收短超时，避免任何情况下退化成「每请求 2 秒」。
-        registry.add("spring.data.redis.timeout", () -> "500ms");
-        // 其余网关测试默认关掉限流（见 src/test/resources/application.properties）：本类显式打开。
-        registry.add("aihub.ratelimit.enabled", () -> "true");
-    }
-
-    @TestConfiguration
-    static class FakeAdmin {
-        @Bean
-        @Primary
-        AdminClient adminClient() {
-            return new AdminClient() {
-                @Override
-                public Mono<Optional<ApiKeyView>> resolve(String keyHash) {
-                    return Mono.just(Optional.of(
-                            new ApiKeyView("ak_wiring", TENANT_ID, "wiring", ApiKeyView.STATUS_ACTIVE, null, 42L)));
-                }
-
-                /**
-                 * 一份**合法**的快照：租户级策略 {@code 0/3} + 一条渠道 + 一条路由。
-                 *
-                 * <p>渠道与路由不是点缀：{@code ConfigClient.usable()} 把「既没有渠道也没有路由」的快照
-                 * 当成**空快照**（那是 admin 冷启动的中间状态，会回落遗留单渠道），于是「只有策略行」
-                 * 的快照会被整体丢弃、策略悄悄变回内置默认 —— 第一版就是这么写的，实测第 4 个请求
-                 * 仍拿到 {@code RateLimit-Limit: 10, 20}。真实的控制面不会下发这种快照，测试也不该伪造。
-                 */
-                @Override
-                public Mono<Optional<ConfigSnapshot>> configSnapshot() {
-                    ChannelDescriptor channel = new ChannelDescriptor(11L, "wiring-channel",
-                            upstream.baseUrl(), null, 0, 30_000, ChannelDescriptor.STATUS_ACTIVE, 100, 0);
-                    ModelRouteDescriptor route = new ModelRouteDescriptor("wiring-model", 11L, 100, 0,
-                            ModelRouteDescriptor.STATUS_ACTIVE);
-                    return Mono.just(Optional.of(new ConfigSnapshot(1L, 2L, List.of(channel), List.of(route),
-                            List.of(new RatePolicy(TENANT_ID, null, QPS, BURST)), "wiring-model")));
-                }
-            };
-        }
-    }
-
     /**
      * 链子上的限流组件必须**存在且被 Spring 装配**：这条只是最小的接线证据，
-     * 单靠它不足以证明「过滤器真的在跑」（那由下面两条 HTTP 用例证明）。
+     * 单靠它不足以证明「过滤器真的在跑」（那由下面几条 HTTP 用例证明）。
      */
     @Test
     void theRealLimiterChainIsWiredIntoTheRunningContext() {
@@ -262,7 +179,7 @@ class RateLimitWiringTest {
      */
     @Test
     void anInLimitRequestStillSucceedsWhileRedisIsDown() throws Exception {
-        upstream.enqueueJson(200, FakeUpstream.completionJson());
+        upstream().enqueueJson(200, FakeUpstream.completionJson());
 
         HttpResponse<String> response = post("/v1/chat/completions", IN_LIMIT_SECRET);
 
@@ -281,20 +198,66 @@ class RateLimitWiringTest {
                 .as("/healthz 不该出现限流响应头").isEmpty();
     }
 
-    private HttpResponse<String> post(String path, String secret) throws Exception {
-        HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + gatewayPort + path))
-                .header("Content-Type", "application/json")
-                .header("Authorization", "Bearer ak_wiring." + secret)
-                .POST(HttpRequest.BodyPublishers.ofString("{\"model\":\"wiring-model\",\"stream\":false}",
-                        StandardCharsets.UTF_8))
-                .build();
-        return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
-    }
+    /**
+     * <b>流式路径在限流开启时仍然是流式的</b>（复审 Fix 1 的第一部分）。
+     *
+     * <p>为什么这条必须存在：判定被 {@code subscribeOn(LIMITER_SCHEDULER)} 整体 offload 到
+     * {@code boundedElastic} 之后，放行分支的 {@code chain.filter(exchange)}（中继 → 上游 SSE）
+     * 也在**弹性线程**上被订阅，订阅线程与 M1/M2 时不再是同一个。这是一个真实的线程模型变更，
+     * 而在本轮之前**没有任何用例执行过它**：测试资源里 {@code aihub.ratelimit.enabled=false}，
+     * 于是 {@code SseStreamingTest} / {@code RelayMeteringFlowTest} / {@code ChatRelayControllerTest}
+     * 全部走的是「过滤器直接 {@code chain.filter}」那条早退分支。引用「全反应堆绿」来为这个
+     * blast radius 背书，等于什么都没证。
+     *
+     * <p>本用例用已有的握手夹具（{@code FakeUpstream.enqueueHandshakeSse}）把两件事一起钉住：
+     * <ol>
+     *   <li>响应头里有限流结论（{@code RateLimit-Limit: 1, 30} 来自控制面快照）——
+     *       证过滤器真的在这一跳上跑了；</li>
+     *   <li>第一帧在上游**还没写第二帧**时就到了客户端（随后放行才收到 {@code [DONE]}）——
+     *       证 offload 之后中继仍然逐帧 flush，M1 的字节级透传语义没有被线程模型变更破坏。</li>
+     * </ol>
+     * 断言顺序无关：本用例用 {@link RateLimitWiringSupport#IN_LIMIT_SECRET}（burst 30，
+     * 本类至多对这条桶发两个请求），因此不会与打空桶的那条用例互相消耗。
+     */
+    @Test
+    void aStreamingRequestStaysStreamingAndCarriesTheRateLimitHeaders() throws Exception {
+        upstream().enqueueHandshakeSse(FIRST_FRAME, SECOND_FRAME);
 
-    private HttpResponse<String> get(String path) throws Exception {
-        HttpRequest request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + gatewayPort + path))
-                .GET()
-                .build();
-        return HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<InputStream> response = postSse("/v1/chat/completions", IN_LIMIT_SECRET);
+        assertThat(response.statusCode()).isEqualTo(200);
+        // 限流头由过滤器在提交响应头**之前**写好，因此流式响应同样带着它们。
+        assertThat(response.headers().firstValue(RateLimitFilter.LIMIT_HEADER))
+                .as("流式响应也必须带上限流结论（判定与写头发生在同一个 offload 块里）")
+                .hasValue(QPS + ", " + BURST);
+        assertThat(response.headers().firstValue(RateLimitFilter.REMAINING_HEADER)).isPresent();
+
+        BufferedReader reader = new BufferedReader(
+                new InputStreamReader(response.body(), StandardCharsets.UTF_8));
+        ExecutorService readerThread = Executors.newSingleThreadExecutor();
+        try {
+            Future<String> firstLine = readerThread.submit(reader::readLine);
+            String line;
+            try {
+                line = firstLine.get(CLIENT_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                throw new AssertionError("限流开启后网关不再逐帧 flush：第一帧没能在 "
+                        + CLIENT_READ_TIMEOUT_SECONDS + " 秒内到达客户端（上游仍在扣留第二帧，等待预算 "
+                        + FakeUpstream.SECOND_FRAME_HOLD_BUDGET_SECONDS + " 秒）", e);
+            }
+            assertThat(line).isEqualTo("data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}");
+            assertThat(upstream().secondFrameWritten())
+                    .as("第一帧到达客户端时上游还没写第二帧 —— 判定被 offload 到 boundedElastic 后仍逐帧 flush")
+                    .isFalse();
+
+            upstream().releaseSecondFrame();
+
+            assertThat(reader.lines().toList()).contains("data: [DONE]");
+        } finally {
+            // 任何提前失败都必须放行握手并关掉 body：上游与其它用例共用一条 dispatch 线程，
+            // 一个仍在阻塞等放行的 handler 会把后面的用例一起拖住。
+            upstream().releaseSecondFrame();
+            readerThread.shutdownNow();
+            response.body().close();
+        }
     }
 }
