@@ -12,7 +12,7 @@
 - [x] **M0 地基**：多模块骨架、统一响应与异常、Flyway 表结构、基础设施连通与健康检查、最小 SSE 转发验证、Docker Compose 全栈
 - [x] **M1 网关直通**：API Key 鉴权（Caffeine → Redis → admin 三级回源）+ 单渠道字节级透传（流式与非流式同一段代码）+ 上游状态码 / 响应体 / `Content-Type` 原样透传 + `GET /v1/models`
 - [x] **M2 流式与计量**：SSE 转发 + usage 捕获 + 计量落库
-- [ ] **M3 流量治理**：Lua 令牌桶限流 + 多渠道路由 + 故障转移
+- [x] **M3 流量治理**：Lua 令牌桶限流 + 多渠道路由 + 故障转移 + 熔断 + 渠道密钥本地解密 + 配置快照
 - [ ] **M4 业务平台**：租户 / API Key / 渠道管理 / 配额 / 审计
 - [ ] **M5 异步流水线**：文档上传 → 解析 → 嵌入 → 向量库
 - [ ] **M6 压测与打磨**：压测报告、故障注入报告、上线
@@ -21,19 +21,22 @@
 
 **M2 到底做了什么**：用量捕获是**旁路观察者** —— 转发路径仍然是字节级直通（上游状态码 / `Content-Type` / 响应体字节一字不改），只是挂了一只只读的 `asByteBuffer()` 探针，把经过的字节复制进一个有界尾窗。非流式从整体 JSON 里读 `usage`；流式则在请求体里注入 `stream_options.include_usage`（**这是唯一被允许的请求体改写**），再从最后一帧读 `usage`。每个 `/v1/**` 请求由网关铸一个 UUID 写进响应头 `x-request-id`，`POST /v1/chat/completions` 同时把它当作计量事件的 `request_id`；幂等键是 `(request_id, created_at)`，两个值都由**网关**在请求开始时各生成一次（`created_at` 截断到毫秒）并随事件投递，消费端原样使用 —— 消费端若用自己的 `now()`，每次重投都会写成新的一行。事件经 RabbitMQ 用共享的分隔符文本 codec（不是 JSON：`aihub-common` 是零依赖的）投给 admin，由 admin 幂等落 `request_log`；**只有 admin 声明拓扑**，网关只发布。broker 不可用时网关先落内存队列（有界）、再落磁盘 spool，由定时任务重投，任何丢弃都会让 `dropped` 计数 +1 并打 ERROR（绝不静默丢弃）。`request_log` 的月分区由运行时维护：启动补齐 + 每日 03:10 UTC 前推 2 个月。另有 M1 的三处遗留修复：SSE 增量 flush 的可证伪断言、客户端断连计量、`retry-after` 与 `x-ratelimit-*` 透传，以及 `defaultModel` 为空的 NPE。
 
-**验收状态**：全量测试实测 **200 项通过 / 0 失败 / 0 错误 / 0 跳过**（aihub-common 21、aihub-web 47、aihub-gateway 132；`mvn -B clean test` → `BUILD SUCCESS`）。真实上游端到端验收（Docker Compose 全栈 + 真实模型）结论：非流式与流式响应都带 `x-request-id`，两次请求在 `request_log` 各落一行且 token 数与上游响应体里的 `usage` **完全一致**，非流式那行 `ttft_ms` 为 `NULL`、流式那行为正数，行的 `request_id` 等于客户端看到的响应头、`created_at` 等于事件里的值，重放同一事件不产生第二行。M0/M1 时代「用自建 stub 上游验收」的做法已被这一轮真实上游验收取代，M1 遗留的「真实模型回答了问题」就此关闭。
+**验收状态**：全量测试实测 **490 项通过 / 0 失败 / 0 错误 / 0 跳过**（aihub-common 56、aihub-web 92、aihub-gateway 342；`mvn -B clean test` → `BUILD SUCCESS`，含 Testcontainers 真容器用例）。M2 的真实上游端到端验收（Docker Compose 全栈 + 真实模型）结论：非流式与流式响应都带 `x-request-id`，两次请求在 `request_log` 各落一行且 token 数与上游响应体里的 `usage` **完全一致**，非流式那行 `ttft_ms` 为 `NULL`、流式那行为正数，行的 `request_id` 等于客户端看到的响应头、`created_at` 等于事件里的值，重放同一事件不产生第二行。
+
+**M3 到底做了什么**：`/v1/**` 现在先过**限流**再过**路由**。限流是 Redis + Lua 的令牌桶，策略按 **`tenant + api_key` 两个维度**选取（key 级覆盖 → 租户级回落 → 内置默认 `qps=10 / burst=20`），桶的状态键是 `aihub:ratelimit:{tenantId}:{sha256(secret)}`；超限回 OpenAI 形状的 `429 rate_limit_exceeded`，并带 `Retry-After` / `Retry-After-MS` / `RateLimit-Limit` / `RateLimit-Remaining` / `RateLimit-Reset`；**Redis 挂了降级成本机令牌桶，但仍然拒绝**（降级 ≠ 放行；多实例下放行量约为「策略 × 实例数」）。路由按 `model_route` 的 `priority` 分组（数字小的组先服务），组内按 `model_route.weight` 权重随机，`channel.status != ACTIVE` 或不可用的渠道被排除，熔断中的渠道排到最后而不是删除。每条渠道用自己的 base-url / 超时（`channel.timeout_ms` 只对非流式生效）与**自己解密出来的**密钥，凭据**逐请求**注入、绝不挂到共享客户端上。**故障转移**的规则只有两条：上游结果可切换（**429 与 5xx**；4xx 原样透传、不换）且响应**尚未提交**（`response.isCommitted()` 为假）—— 一旦有字节写回客户端就绝不再换，这就是「仅在未输出任何 token 时允许切换」的机器形式；一次请求最多试 3 条候选（首选 + 两条备用）。上游 **429 还会给该渠道打一个 30 秒的跨实例熔断标记**（Redis key `aihub:channel:circuit:{id}`；Redis 不可用时退化为本机表），5xx 与超时只做当次切换。**渠道密钥是 AES-GCM 密文**（`v{n}:{base64(nonce‖ciphertext+tag)}`，自描述版本）：admin 只下发密文，主密钥只在环境变量 `AIHUB_CHANNEL_MASTER_KEY` 里，**解密只发生在网关本地**，明文不跨网络、不进日志；轮换 = 环境变量里新旧两把并存 → 重加密 → 删旧密钥，密文自描述版本让回退安全。控制面配置通过 HMAC 签名的 `GET /internal/config/snapshot` 下发，网关侧是**三级读取两级缓存**（Caffeine 30 秒 → Redis 10 分钟 → admin），带 singleflight 合并回源、版本比对（本地命中也会探一次 Redis 版本）、回源失败后的 cooldown 限速，以及两级缓存都空时的**内存 last-good 快照**；快照完全没有时才回落到 `aihub.upstream.*` 合成的遗留单渠道。另外收口了 M2 的三处遗留：透传白名单补上 `retry-after-ms` 与 IETF `RateLimit-*`、超长 `model` 在计量事件里按码点截断（转发给上游的请求体逐字节不变）、`api_key_id` / `channel_id` 真正落进 `request_log`。**多渠道故障注入的验收**用 **WireMock**（`org.wiremock:wiremock:3.9.1`，仅 `aihub-gateway` 的 test 作用域、**进程内**起桩，不需要 Docker / broker / Redis）在 `WireMockChannelFaultInjectionTest` 里做 —— 那是设计文档 §10 / §12 的原文口径：几条命名桩分别注入 429 / 挂住超时 / 中途断流，验证自动切换与「已开始回写就不切换」。**这是 M3 唯一的 test 作用域新依赖，生产依赖零新增**（设计文档 §4.2 说「WireMock 在 M3 引入时再锁定版本」，落点就是这里）。
+
+**M3 验收状态（诚实说明）**：M3 的验收标准「WireMock 注入 429/超时，能自动切换」在**进程内**这一层已经完成并实测通过 —— `WireMockChannelFaultInjectionTest` 8 条用例（`mvn -B clean test -pl aihub-gateway -am "-Dtest=WireMockChannelFaultInjectionTest"` → `Tests run: 8, Failures: 0, Errors: 0`），它证明的是每条命名桩各自的注入与切换规则、熔断标记参与路由、以及「已提交之后绝不拼接备用渠道」。**compose 全栈上的数据面验收（真实 admin + gateway + MySQL + Redis + RabbitMQ 上的多渠道切换、Redis 熔断键、限流响应头、限流降级、admin 宕机继续按缓存路由）本轮未做**，由控制器在计划 Task 15 Step 5 执行；本 README 不声称它已经跑过。
 
 **复现口径（诚实说明）**：上面的数字与「`mvn -B test` 在本机全绿」都产自这台开发机：除了 Docker 守护进程，它还依赖两项**不在仓库里**的环境配置 —— 用户级 `~/.testcontainers.properties`（把 Testcontainers 指向 TCP 上的 Docker）以及本机 `.mvn/maven.config` 里的 JVM 参数。因此在一台干净机器上，需自行保证：Docker 可达，且 JDK 21+ 上允许 Mockito 的动态 agent 挂载（例如 `mvn -B test -DargLine="-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading"`）；这些**环境作用域**的 JVM 开关有意不进 `pom.xml`。`aihub-web` 的集成测试要真起容器，必须让 Testcontainers 找到 Docker（本机是 `DOCKER_HOST=tcp://127.0.0.1:2375`）；`aihub-gateway` 的测试**不需要** Docker，也不需要有 broker 在跑。
 
 
-## M0/M1/M2 已知边界
+## M0/M1/M2/M3 已知边界
 
 以下是有意划出的范围边界与**尚未被验证的东西**，不是缺陷清单。带「未验证 / 未做」字样的条目请当作事实陈述读：它们没有被任何测试或真实环境证明过。
 
 - `/healthz` 会返回组件明细且不鉴权，等控制面鉴权落地后会一并收紧。
-- 网关**不做**限流（Redis + Lua 令牌桶）、配额预扣与校正、对账与账单 —— 属于 M3/M4。
-- 网关**不做**多渠道、权重路由、熔断与故障转移 —— M2 仍是单渠道，`GET /v1/models` 也只回报一个配置的模型（M3）。
-- 网关**不做**租户 / 渠道 / 配额管理、审计与管理台；API Key 的控制台签发 / 列表 / 吊销接口属于 M4（目前只有本地 CLI 铸造路径）。
+- 配额（预扣 / 实际校正 / 异步对账与账单）整体属于 M4；M3 做的是**限流**（QPS/burst），不是**余额记账**（详见下文 M3 的边界）。
+- 网关**不做**租户 / 渠道 / 配额管理、审计与管理台；API Key 的控制台签发 / 列表 / 吊销接口属于 M4（目前只有本地 CLI 铸造路径 + 一个默认关闭的 dev-only 渠道 seeder）。
 - `POST /v1/embeddings` 与文档上传 / 向量化流水线属于 M5，M2 只计量 chat 直通。
 - **Redis 是鉴权的信任源之一**：网关把 Redis 里的密钥缓存命中当作**权威结果**，命中即放行、不再回查 MySQL；能往 Redis 写 `aihub:apikey:<sha256>` 的对端等于能伪造任意 API Key，所以 Redis 必须与控制面同等级隔离保护。由此，密钥的吊销 / 停用也不会立刻生效 —— 要等缓存过期（本机 Caffeine ≤30s，Redis ≤5m）。
 - `docker-compose.yml` 仅供**本地开发**：Redis 没有密码，宿主映射已收紧为 `127.0.0.1:6380:6379`（本机 IDE 仍可连 6380，容器之间仍走 `redis:6379`）。生产环境的 Redis 认证（`requirepass`）与网络隔离属于 M3 加固项。
@@ -42,7 +45,7 @@
 
 M2 新增的边界：
 
-- **`request_log` 的 `api_key_id` 与 `channel_id` 恒为 `NULL`**：共享的 `ApiKeyView` 里没有 `api_key` 的数值主键（补它属于跨服务契约变更），多渠道也还没做。因此这个里程碑的 `request_log` **还不能按 API Key 或渠道聚合**。鉴权关闭、或 exchange 里没有 key 视图时，`tenant_id` 记哨兵 `0`。
+- **（M3 已关闭）`request_log` 的 `api_key_id` 与 `channel_id` 曾恒为 `NULL`**：M2 时共享的 `ApiKeyView` 里没有 `api_key` 的数值主键、多渠道也还没做，所以那个里程碑的 `request_log` 不能按 API Key 或渠道聚合。M3 把两者都补上了（`ApiKeyCacheCodec` 的载荷因此是 6 段；见下文 M3 的边界）。鉴权关闭、或 exchange 里没有 key 视图时 `api_key_id` 是 `NULL`、`tenant_id` 记哨兵 `0`。
 - **`prompt_tokens = 0` 表示「未知」，不是「零」**：拿不到上游 `usage` 时（上游没回、响应体超出捕获窗口），`completion_tokens` 是**估算值**（1 个汉字 ≈ 0.6 token、1 个非汉字字符 ≈ 0.3 token，向上取整），`prompt_tokens` 记 0，并用 `error_code = usage_missing`（客户端中断则是 `client_disconnected`）把这件事标出来。M4 的账单 / 对账必须把带这两个 `error_code` 的行当**近似值**处理，不能当精确用量。
 - **捕获窗口是 1 MiB 的「尾部」**（`aihub.metering.max-capture-bytes`，默认 `1048576`）：流式下这是对的（`usage` 在最后一帧），但**非流式**响应体是一整块 JSON —— 一旦超过这个上限，头部被丢掉、JSON 不再可解析，精确 `usage` 会**静默降级**成估算值。现实中的非流式 body 远小于 1 MiB，所以保留了默认值；要调小它，先确认非流式 body 仍能完整落在窗口内。`TailBuffer.truncated()` 目前没有计数器，窗口被截断只在结果上体现为 `usage_missing`。
 - **计量计数已注册但不对外暴露**：`aihub.metering.published / spooled / dropped / replayed` 四个 Micrometer 计数器存在，但 gateway 只 `include` 了 `health,info`，`/actuator/metrics` 没开（对外暴露计量指标属于 M6）。运维信号目前只有「drop 计数 + ERROR 日志」，spool 也只能看日志与目录，**没有**人工巡检接口，也**没有** DLQ 重投工具。
@@ -54,13 +57,34 @@ M2 新增的边界：
 - **计量只覆盖 `POST /v1/chat/completions` 一个端点**：网关全树只有一个发布点（`ChatRelayController.chatCompletions` 的 `doFinally`，`ChatRelayController.java` 里那一次 `meteringPublisher.publish(...)`）。`GET /v1/models`、`POST /v1/embeddings`（M5 才有实现，当前是 `404`）以及所有在控制器之前就被短路的响应（`401 invalid_api_key`、`404` 等）都带 `x-request-id`，但**没有计量事件、也不会在 `request_log` 落行**。所以「每个 `/v1/**` 请求一行」是错的：M4 做账单 / 对账时，不能把「日志里出现过某个 `x-request-id`」当作「库里一定有对应的行」。
 - **客户端在首个字节之前中断，会被记成 `ERROR` / `gateway_error` 而不是 `CANCELLED`**：`gateway_error` 这条分支覆盖的是「响应**尚未提交**时冒出来的异常」，而响应提交之前的客户端中断无法与网关自身的真实故障可靠区分（Reactor 在提交之前不会给出可分辨的信号），代码因此不猜测、按未预期异常记账 —— 这是 brief 指定、评审后保留的行为。设计文档 §9 的「客户端断连不计入错误告警」只对**响应已提交之后**的断连成立（那条才记 `CANCELLED` / `client_disconnected`）。**按 `gateway_error` 告警前必须先确认客户端侧没有对应的主动中断**，否则会把客户端行为误报成网关故障。
 - **本地 compose 下网关「起得来」要 broker，「跑得下去」不要**：`docker-compose.yml` 里 gateway 配了 `depends_on: rabbitmq: service_healthy`，所以本地 compose 下 broker 不健康时网关**根本不会被启动**；这是编排上的便利约定，**不是**运行时要求 —— 运行期 broker 挂掉网关照常转发（事件先落内存队列、再落磁盘 spool，恢复后重投）。直接 `java -jar` 跑网关没有这条依赖。
-- **超长 `model` 会让那一行落不进 `request_log`，并最终进死信队列**：`model` 直接取自客户端请求体（网关既不截断也不校验），而 `request_log.model` 是 `VARCHAR(128)`（`V1__init_schema.sql`）。模型名超过 128 字符时，客户端**照常拿到上游响应**（计量是旁路），admin 侧 INSERT 报「数据过长」→ `DataAccessException` → 重试 3 次 → 进 `aihub.metering.dlq`：这一行在 `request_log` 里根本不存在，而 DLQ 成了**任何持合法 API Key 的客户端都能触碰**的入口。网关侧的截断 / 校验属于后续里程碑（M2 有意不做）。
+- **（M3 已关闭）超长 `model` 曾会让那一行落不进 `request_log` 并最终进死信队列**：`request_log.model` 是 `VARCHAR(128)`，而模型名直接取自客户端请求体。M2 时这会让 admin 侧 INSERT 报「数据过长」→ 重试 3 次 → 进 `aihub.metering.dlq`，而 DLQ 成了任何持合法 API Key 的客户端都能触碰的入口。M3 在**计量事件组装时**按码点把 `model` 截到 128（转发给上游的请求体逐字节不变），这条风险因此关闭；`request_log.model` 与客户端实际请求的模型名在全长超过 128 时**不再相同**，按 model 聚合时要记得这一点。
 - **admin 起不来会连带把网关降级成「冷缓存一律 `401`」**：`RequestLogPartitionMaintainer` 是 `ApplicationRunner`，分区覆盖建立不起来时（缺 `pmax`、补建后仍不覆盖、DDL 失败）它直接抛异常，**admin 拒绝启动**。admin 同时是网关的密钥回源后端，所以 admin 不在 = 缓存未命中的 key 一律 fail-closed `401 invalid_api_key`（与「key 是错的」在客户端不可区分）。补分区是 DDL，因此应用数据库账号需要对 `request_log` 的 **`ALTER` 权限**（见 `docs/CONVENTIONS.md` 第 7 节）。
-- **流式中途上游断流，网关不会给客户端发 SSE `error` 事件**：设计文档 §9 写的是「发 SSE `error` 事件后关流」，而 M1/M2 的实现是**直接收尾**（响应已提交时 `response.setComplete()`），客户端看到的是**被截断的流**（没有错误帧、通常也没有 `[DONE]`），计量侧照记 `ERROR` / `upstream_stream_error`。这是 M1 起就有的形状，M2 未改动、也未声称改过。
+- **流式中途上游断流，网关不会给客户端发 SSE `error` 事件**：设计文档 §9 写的是「发 SSE `error` 事件后关流」，而 M1/M2 的实现是**直接收尾**（响应已提交时 `response.setComplete()`），客户端看到的是**被截断的流**（没有错误帧、通常也没有 `[DONE]`），计量侧照记 `ERROR` / `upstream_stream_error`。这是 M1 起就有的形状，M2/M3 未改动、也未声称改过。
+
+M3 新增的边界：
+
+- **配额（预扣 / 实际校正 / 异步对账）整体属 M4，M3 做的是「限流」而不是「余额记账」**：`RateLimitFilter` 管 QPS/burst，丢弃是**暂时**的（下个窗口自动恢复）；配额扣减是**持久**的。`429 rate_limit_exceeded` 与 M4 的 `QUOTA_EXCEEDED` 是两件事，**不要混用**。M3 不碰 `quota` 表。
+- **限流的降级是「近似」**：Redis 不可用时退化为**本机**令牌桶，只看得见本进程的流量 —— 多实例下实际放行量约为「策略 × 实例数」。**降级不等于放行**：超限照样 429。
+- **熔断的触发面只有 429**：5xx 与超时只做**当次**切换、不打熔断标记（一个坏请求不该把整条渠道关 30 秒）。**所有候选都在熔断中时仍然会尝试**最高优先级那一组（best-effort，会打 WARN 并给 `aihub.route.all-broken` 计数 +1）。
+- **配置变更的热生效延迟**：M3 没有 Pub/Sub 发布方（配置 CRUD 在 M4），生效靠「本地 TTL 30 秒 + 快照 `version` 比对」。`version` 是**毫秒级**时间戳，同一毫秒内改两行会撞车；而 `version = max(updated_at)` 在**删除**最新更新的那一行之后会**回退**（M3 没有删除接口，只能手写 SQL，所以是潜在缺口）—— 网关的比对是严格 `>`，于是更旧的快照可能被 last-good 继续服务。M4 的 CRUD 落地时必须一并处理。
+- **未鉴权的 `/v1/**` 请求不会被限流**：鉴权过滤器排在限流过滤器之前，没有合法 key 的请求在 401 处就结束了。因此未鉴权洪峰不在这套限流的保护范围内。
+- **限流指标与熔断日志不对外暴露**：`aihub.ratelimit.rejected` / `aihub.ratelimit.degraded` / `aihub.ratelimit.fail_open` / `aihub.route.all-broken` 已注册，但 `/actuator/metrics` 仍然只 `include` 了 `health,info`（对外暴露属 M6）。
+- **`channel.models_json` 不参与路由**：路由只用 `model_route`；`GET /v1/models` 的模型集合来自「`model_route` 里出现过的模型名 ∪ 遗留默认模型」。`channel.models_json` 的路由语义与渠道 CRUD 一起属 M4。
+- **`GET /v1/models` 的冷缓存读会回源一次**：它读同一个 `ConfigClient`，缓存冷/过期时会**同步**回源 admin（有 5 秒上界），冷启动时这个端点的首字节可能慢到秒级。生产默认 `aihub.ratelimit.enabled=true`（请求链已在限流过滤器里切到 `boundedElastic`），而**网关测试的默认是 `false`** —— 「生产调度」与「测试调度」不是同一个。
+- **「非超时」的上游中途中断仍会被记成客户端断连**：响应已提交之后上游把连接断掉（不是读超时、也不是连不上）时，Reactor 给出的形状与客户端跑掉完全相同，那一行因此记 `CANCELLED` / `client_disconnected` 而不是 `ERROR` / `upstream_stream_error`。按 `client_disconnected` 统计客户端行为前必须知道它包含这部分上游故障（`WireMockChannelFaultInjectionTest#midStreamBreakIsMeteredAsAClientDisconnect` 把这个缺口钉成了可执行事实）。
+- **`client_disconnected` 的判定只在 Netty 上成立**：中继把「上游响应体订阅被取消」当作客户端断连（M3 Task 10）。在 Servlet 模式的容器（Tomcat / Jetty）上，响应**正常结束**时也会触发同一次取消，于是每一次成功响应都会被误记成断连。网关测试因此把 Web 服务器工厂显式钉成 Netty（`NettyWebServerTestAutoConfiguration` + 一条断言）—— 这也是为什么 M3 引入 WireMock 时必须同时加那个测试配置（WireMock 的 Jetty 12 绑定会把 Jetty 的 servlet 类带进 classpath，Boot 的反应式服务器候选里 Jetty 排在 Netty 前面）。
+- **`model_not_found`（404）会被计量成 `gateway_error`**：它是控制器入口的早返回，计量按「未预期错误」记 `ERROR` / `gateway_error` —— 一个**客户端**问题会抬高网关的错误计数。按 `gateway_error` 告警时先看 HTTP 状态码是不是 404。
+- **`request_log` 没有 `channel_id` / `api_key_id` 的索引**：M3 新填的这两列是 M4 按渠道 / 按 Key 聚合的前提，但 V1 没有为它们建索引（M3 不加迁移），那类查询会在分区表上扫描。
+- **dev-only 的渠道 seeder 默认关闭**：`AIHUB_DEMO_SEED_ENABLED=true` 才会创建 bean；打开时还要求 `AIHUB_CHANNEL_MASTER_KEY` 与 demo 上游 base-url（demo 密钥没有默认值），否则**在任何写库动作之前**抛异常。它是本地联调工具，不是初始化数据的手段，也**不是** M4 的控制台。
+- **admin 侧的快照装配在「脏库」时每轮打一条 WARN**：`max(updated_at)` 版本比对发现回退/撞车时告警，按每次网关轮询去重（不是每请求一次，但也不是一次性）。
+- **Redis 仍然没有密码**（`requirepass`）与网络隔离加固 —— 未在 M3 做，仍是对生产部署的要求（见 `docs/CONVENTIONS.md` 第 6 节）。
+
 
 ## 技术栈
 
-Java 21（编译目标）· Spring Boot 3.5.16 · MyBatis-Plus 3.5.17 · MySQL 8 · Flyway · Redis 7 · RabbitMQ 3.13 · WebFlux · Testcontainers · Docker Compose
+Java 21（编译目标）· Spring Boot 3.5.16 · MyBatis-Plus 3.5.17 · MySQL 8 · Flyway · Redis 7 · RabbitMQ 3.13 · WebFlux · Testcontainers · WireMock 3.9.1（**仅 `aihub-gateway` 的 test 作用域，进程内**，见下）· Docker Compose
+
+> **为什么技术栈里多了 WireMock**：设计文档 §4.2 把「WireMock 在 M3 引入时再锁定版本」写成了待办，§10 / §12 又点名用 WireMock 做多渠道故障注入验收，所以 M3 在 `aihub-gateway` 的**test 作用域**引入 `org.wiremock:wiremock:3.9.1`（另加同版本的 `wiremock-jetty12`）：进程内起 stub，**不需要 Docker / broker / Redis**，生产依赖零新增。`aihub-admin` 侧一个字节都没动。为什么还需要 `wiremock-jetty12` 与一组 `<exclusion>`：WireMock 3.x 的 core 自带 Jetty 11 绑定，而本项目的父 POM（`spring-boot-starter-parent`）把 `org.eclipse.jetty:*` 统一管到 Jetty 12，两者混在一个 classpath 上会直接 `FatalStartupException: Jetty 11 is not present` / `IncompatibleClassChangeError`（细节写在 `aihub-gateway/pom.xml` 的注释里）。JDK 的 `com.sun.net.httpserver.HttpServer` 夹具**继续保留**（`FakeUpstream`，承担细粒度口径），WireMock 与它是并存关系、不是替代。
 
 ## 快速开始
 
@@ -222,9 +246,15 @@ docker -H tcp://127.0.0.1:2375 compose exec -T mysql sh -c 'mysql -uroot -p"$MYS
 mvn -B clean test
 ```
 
-当前实测：`mvn -B clean test` → `BUILD SUCCESS`，**Tests run: 200, Failures: 0, Errors: 0, Skipped: 0**（aihub-common 21、aihub-web 47、aihub-gateway 132）。注意 Maven 的**进程退出码不可信**（本机见过 `BUILD SUCCESS` 却给出 `[exit code: 1]`），判定以 surefire 汇总 + `BUILD SUCCESS` 为准；另外 Surefire 对含 `@Nested` 的外层类会打印 `Tests run: 0`，那种情况下以 XML 为准。
+当前实测（M3 收口时跑的一轮，`DOCKER_HOST=tcp://127.0.0.1:2375`，从 `clean` 开始）：`mvn -B clean test` → `BUILD SUCCESS`，**Tests run: 490, Failures: 0, Errors: 0, Skipped: 0**（aihub-common 56、aihub-web 92、aihub-gateway 342；M2 收口时是 481 —— 差额全部来自 M3 的验收测试：WireMock 多渠道故障注入 8 条 + 一条「测试跑在 Netty 上」的守卫）。注意 Maven 的**进程退出码不可信**（本机见过 `BUILD SUCCESS` 却给出 `[exit code: 1]`），判定以 surefire 汇总 + `BUILD SUCCESS` 为准；另外 Surefire 对含 `@Nested` 的外层类会打印 `Tests run: 0`（`ModelsControllerTest` 就是这种），那种情况下以 XML / 合计为准。
 
-聚焦跑单个类时用**逗号**而不是加号（`-Dtest=A,B`）—— `-Dtest=A+B` 在 Surefire 3.5.6 上会被当成**一个**类名，配合本仓库 `.mvn/maven.config` 里的 `-Dsurefire.failIfNoSpecifiedTests=false`，它会**静默跳过**你要跑的类却照样 `BUILD SUCCESS`；`-Dtest=A,B` 在 pwsh 里还要加引号（逗号会被 shell 吃掉）。
+只跑 M3 的验收类（进程内 WireMock，**不需要 Docker**）：
+
+```powershell
+mvn -B clean test -pl aihub-gateway -am "-Dtest=WireMockChannelFaultInjectionTest"
+```
+
+聚焦跑单个类时用**逗号**而不是加号（`-Dtest=A,B`）—— `-Dtest=A+B` 在 Surefire 3.5.6 上会被当成**一个**类名，配合本仓库 `.mvn/maven.config` 里的 `-Dsurefire.failIfNoSpecifiedTests=false`，它会**静默跳过**你要跑的类却照样 `BUILD SUCCESS`；`-Dtest=A,B` 在 pwsh 里还要加引号（逗号会被 shell 吃掉）。另外**单独构建一个模块要带 `-am`**：`.m2repo` 里有一份空的 `aihub-common` jar，不带 `-am` 会报假的「package does not exist」。
 
 ## 目录结构
 

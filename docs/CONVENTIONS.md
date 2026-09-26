@@ -54,15 +54,19 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 | `code` | HTTP | `type` | 触发场景 | 由谁产出 |
 |---|---|---|---|---|
 | `invalid_api_key` | `401` | `invalid_request_error` | 缺 `Authorization`、格式不是 `Bearer <key_id>.<secret>`、key 不存在 / 已停用 / 已过期，以及**所有密钥来源都失败**（Redis 未命中且 admin 不可达 / 5xx，见第 5 节） | `ApiKeyAuthFilter` |
+| `rate_limit_exceeded` | `429` | `rate_limit_error` | 租户 / API Key 超过限流策略（`rate_limit_policy` 的 qps/burst）。**降级到本机令牌桶时同样回 429**（降级 ≠ 放行） | `RateLimitFilter` |
+| `model_not_found` | `404` | `invalid_request_error` | 请求的 `model` 在配置快照的 `model_route` 里没有任何可用候选（且没有遗留单渠道可回落） | `ChatRelayController` |
 | `upstream_unreachable` | `502` | `api_error` | 连不上上游（`WebClientRequestException`）；上游的**业务**错误状态码不走这里 | `ChatRelayController` |
 | `internal_error` | `500` | `api_error` | 兜底：连错误体本身都序列化失败时（`GatewayErrors.serialize` 的 catch 分支） | `GatewayErrors` |
 
-三条容易踩的规则：
+几条容易踩的规则：
 
 - **上游状态码与响应体原样透传**：上游返回 `401` / `429` / `502` 时，客户端看到的就是上游的状态码与 body，网关不重写、不折叠成 `500`；只有「根本没连上上游」才是 `502 upstream_unreachable`。同理上游的 `Content-Type` 也原样拷贝（不解析），上游没发就不补默认值。
 - **畸形请求头按 401 处理**，不按 400：密钥格式错误不是参数校验问题，回 400 会让客户端以为换个 body 就能通过。
 - **`/v1/**` 目前没有全局 500 处理器**：网关自身未预期的异常（不是上面这三个码）落到 Spring WebFlux 的默认错误响应，形状由 `Accept` 决定（JSON 或 HTML 错误页），**不保证**是上面的 OpenAI 体。新增数据面错误码时请走 `GatewayErrors.write`，不要依赖默认处理。
 - admin 的 `{code,message,data}` 信封只属于 admin 自己的接口（含 `/internal/**` 的 401）。数据面不套用，admin 也不套用 OpenAI 形状。
+- **设计文档 §9 的「流开始前失败 → 统一错误体 `{"code","message"}`」已被取代**：`/v1/**` 的错误体**一律**是上面的 OpenAI 形状。M1 用官方 OpenAI Python SDK 验收过这条契约，给数据面套 admin 信封会让所有 SDK 的 `error.message` 取值路径同时失效 —— 那不是「按 spec 实现」，是回归。admin 与 `/internal/**` 仍然是 `{"code","message","data"}`。
+- **`429` 是限流用户唯一该看的信号**：`rate_limit_exceeded` 附带 `Retry-After`（秒）、`Retry-After-MS`（毫秒，Azure 风格）与 IETF 的 `RateLimit-Limit` / `RateLimit-Remaining` / `RateLimit-Reset` 三个头（`limit, burst` 形状，见 6.6 节）。客户端退避请读 `Retry-After`，不要自己猜窗口。这些头**只在网关自己拒绝时**出现；上游返回的 `Retry-After` / `x-ratelimit-*` 属于透传白名单（第 3 节），两者语义相同、来源不同。
 
 ## 5. 内部接口约定（`/internal/**`）
 
@@ -116,8 +120,28 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - **拿不到 usage 时** `completion_tokens` 是**估算值**（1 个汉字 ≈ 0.6 token、1 个非汉字字符 ≈ 0.3 token，
   向上取整），`prompt_tokens` 记 0，并用 `error_code` 标出这个事实。M4 的账单/对账必须把带
   `usage_missing` / `client_disconnected` 的行当近似值处理。
-- **M2 的已知缺口**：`api_key_id` 与 `channel_id` 恒为 `NULL`（共享的 `ApiKeyView` 里没有 `api_key` 数值
-  主键；多渠道属 M3），鉴权关闭时 `tenant_id` 记哨兵 `0`。
+- **`api_key_id` 与 `channel_id` 自 M3 起有值**：前者来自共享 `ApiKeyView` 新增的数值主键
+  （`ApiKeyCacheCodec` 的载荷因此是 **6 段**，旧载荷会被判为畸形 → 缓存未命中 → 回源重写，
+  这是收敛而非故障），后者来自路由结果。鉴权关闭、或 exchange 里没有 key 视图时 `api_key_id` 是
+  `NULL` 而 `tenant_id` 记哨兵 `0`。走**遗留单渠道兜底**时 `channel_id` 是 `Long.MIN_VALUE`
+  哨兵（不是 NULL），因此「走了兜底路径」在 `request_log` 里可查。超长 `model`（>128 字符）**只在
+  计量事件里被截断**，转发给上游的请求体逐字节不变。
+- **「非超时」的上游中途中断在计量上仍与客户端断连不可区分（M3 的已知分类缺口）**：响应已提交之后
+  上游把连接断掉（不是读超时、不是连不上）时，Reactor 给出的形状与「客户端跑掉」完全一样
+  （`RelayAttempts.isUpstreamFailure` 按原因链只认超时与连接失败），因此那一行记的是
+  `CANCELLED` / `client_disconnected`，而不是 `ERROR` / `upstream_stream_error`。
+  `WireMockChannelFaultInjectionTest#midStreamBreakIsMeteredAsAClientDisconnect` 把这个缺口钉成了
+  可执行事实。**按 `client_disconnected` 做客户端行为统计前必须知道它包含了这一部分上游故障。**
+- **`client_disconnected` 的判定依赖 Netty 的写回路径**：中继把「上游响应体的订阅被取消」当作客户端
+  断连的信号（M3 Task 10）。这条判定只在 **Netty**（生产用的反应式服务器）上成立；如果网关被部署到
+  Servlet 模式的容器（Tomcat / Jetty），Servlet 的 async 完成回调会在**每次响应正常结束**时取消写-flush
+  处理器，于是每一次成功响应都会被误记成客户端断连。网关的测试 classpath 因此显式把 Web 服务器工厂钉成
+  Netty（`NettyWebServerTestAutoConfiguration` + `AihubGatewayApplicationTests` 的断言）——
+  谁再把 servlet 容器带上测试 classpath，那条断言会先红，而不是让计量状态悄悄失真。
+
+- **`request_log` 没有 `channel_id` / `api_key_id` 的索引**（V1 的既有形状，M3 不加迁移）：
+  这两列是 M4 聚合（按渠道 / 按 Key 出账与告警）的前提，但那类查询在分区表上会走扫描 ——
+  M4 做聚合时要一并决定加索引还是改成分区裁剪友好的查询。
 - **`prompt_tokens = 0` 的语义是「未知」而不是「零」**：下游任何按 token 计费 / 对账的代码都必须先看
   `error_code`，不能把 0 当成真实用量。
 - **捕获窗口是响应字节的尾部**（`aihub.metering.max-capture-bytes`，默认 1 MiB）：流式下 `usage` 在最后
@@ -133,6 +157,87 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - **未经真实 broker 端到端验证的分支**：`mandatory` / publisher-returns 的「消息被退回算投递失败」这条
   分支只有单元测试撑着 —— 发布端在 gateway 模块，broker 夹具在 admin 这边，而 gateway 的测试不允许
   依赖 Docker、也不允许依赖 admin 的模块。改动它时请补单元级证据，别假设它被端到端覆盖了。
+
+## 6.6 渠道密钥与配置快照（admin → gateway）
+
+- **渠道密钥是 AES-GCM 密文**：`channel.api_key_cipher` 存 `v{n}:{base64(nonce‖ciphertext+tag)}`，
+  **自描述版本**。主密钥来自环境变量 `AIHUB_CHANNEL_MASTER_KEY`（格式 `v1:<base64 32 字节>[,v2:…]`），
+  **不落库、不进镜像、不打日志**。加解密实现只有一份：`com.aihub.common.crypto`（JDK `javax.crypto`，
+  仍然零第三方依赖）。密钥长度为 32 字节是**构造期**校验：16 字节会被当成「配错了」直接拒绝，
+  而不是静默按 AES-128 用（那会让同一条密文在两种配置下读出两种结果）。
+- **明文只在网关本地出现**：admin 只下发密文；gateway 拿到密文后用本地主密钥解密，再把明文注入到
+  该渠道的上游请求头。明文**不跨越网络**、不进 admin 的任何日志/指标。轮换 = 「环境变量里同时放旧新两把
+  → 解密旧版本重加密为新版本 → 确认没有行还指着旧版本 → 删掉旧密钥」。密文自描述版本让**回退**安全：
+  把新密钥去掉，旧密文照样可解。
+- **主密钥缺失两侧行为不同（有意）**：admin 是**写入路径**，`encrypt` 直接抛异常（静默写坏数据更糟）；
+  gateway 是**请求路径**，解不开只返回空（该渠道被跳过），**照常启动**。
+- **快照接口**：`GET /internal/config/snapshot`（HMAC 签名，`GET` + 应用内路径 + 时间戳；契约见第 5 节）。
+  一次返回 `{version, generatedAtEpochMilli, defaultModel, channels[], routes[], ratePolicies[]}`。
+  `version` 是**三张表 `updated_at` 的最大值**（epoch 毫秒），任何配置写入都会推进它。
+  **已知缺口（M4 前无删除接口）**：`max(updated_at)` 会**回退** —— 删掉最新更新的那一行（或删空）
+  之后 version 变小，而网关的比对是严格的 `>`，于是更旧的快照会被 lastGood 记住并继续服务。
+  M3 没有删除 API（只能手写 SQL），所以是潜在缺口而不是现网缺陷；M4 的渠道/策略 CRUD 落地时必须
+  一并解决（高水位持久化，或把比对放宽到 `>=`）。
+- **路由的候选来自 `model_route`**：`priority` **数字小的组优先**，组内按 `model_route.weight`
+  **权重随机**（权重非正数按 1）；`channel.status != ACTIVE` 或渠道不可用的行被排除。
+  熔断渠道在组内**排到最后**（不是删除）；所有候选都熔断时仍然放行最高优先级那一组（best-effort + WARN，
+  并给 `aihub.route.all-broken` 计数 +1）。**`channel.models_json` 不参与路由**，`GET /v1/models` 的
+  模型集合来自「`model_route` 里出现过的模型名 ∪ 遗留默认模型」。
+- **故障转移只看两件事**：① 上游结果是否属于「可切换」（**429 与 5xx**；4xx 不切换、原样透传）；
+  ② 响应是否**尚未提交**（`response.isCommitted()` 为假）。第二个条件是铁律：一旦有字节写回客户端，
+  再切换就会把半截响应拼成脏数据 —— 这就是「仅在未输出任何 token 时允许切换」的机器形式。
+  一次请求最多试 **3** 条候选（`RelayAttempts.MAX_ATTEMPTS`，首选 + 两条备用），上界由「候选列表截断」
+  与「尝试循环结构上每条候选最多订阅一次」两半共同兑现。
+- **熔断只由 429 触发**（Redis key `aihub:channel:circuit:{id}`，TTL **30 秒**，跨实例共享）；
+  5xx 与超时只触发**当次**切换。Redis 不可用时退化为**本机**熔断表（单机近似）；标记**无论 Redis 写成功
+  与否都镜像到本机表**，否则「Redis 接受了标记、随后这 30 秒内读不到」会让已熔断的渠道静默复活。
+- **限流按 `tenant + api_key` 两个维度选策略**（与设计文档 §8.1 ② 的维度一致）：先取与本次请求
+  `apiKeyId` 匹配的 key 级行（`rate_limit_policy.api_key_id = api_key.id`），没有才用该租户的租户级行
+  （`api_key_id IS NULL`），都没有则用内置默认 `qps=10 / burst=20`。**每一维内部**多条 ACTIVE 时取
+  `id` 最大的那条（表上没有唯一约束，M4 的控制台会强制单条生效）。非正的 qps/burst 一律回落到默认值。
+  **桶的状态维度**是 `aihub:ratelimit:{tenantId}:{sha256(secret)}`（与策略维度是两件事，别混）；
+  本机降级桶的键是 `local:ratelimit:{tenantId}:{hash}`（前缀只加一次）。
+  鉴权关闭时没有数值主键 → `apiKeyId` 为 `null`，此时只按租户级判定（不是「不限流」）。
+- **限流的响应契约**：超限回 `429` + 第 4 节的 OpenAI 错误体（`code=rate_limit_exceeded`，
+  `type=rate_limit_error`），并带 `Retry-After`（秒）、`Retry-After-MS`（毫秒）、
+  `RateLimit-Limit: {qps}, {burst}`、`RateLimit-Remaining`、`RateLimit-Reset`。
+  **`RateLimit-Limit` 直接暴露生效的策略值**，因此「key 级覆盖有没有生效」在响应头里就能看见。
+- **降级链（数据面永不因控制面故障整体不可用）**：Redis 不可用 → 限流退化为**本机令牌桶**
+  （单机近似；多实例下实际放行量约为「策略 × 实例数」）**且照常拒绝**；熔断退化为**本机**熔断表；
+  admin 不可达 → 继续用**陈旧快照**（Redis 或本地），完全没有快照时才回落到 `aihub.upstream.*`
+  合成的**遗留单渠道**（其渠道 id 是 `Long.MIN_VALUE` 哨兵，会在 `request_log.channel_id` 里可见）。
+  限流自身出故障（连本机桶都抛异常）时是 **fail-open**：记 `aihub.ratelimit.fail_open` 并放行 ——
+  「限流组件坏了」不该让整个数据面 500。
+- **配置快照的读取是三级 + 两级缓存**：Caffeine（本机，30 秒）→ Redis（10 分钟）→ admin；
+  本地命中也会做一次 **Redis 版本比对**（M3 没有 Pub/Sub 发布方，这是唯一的跨实例收敛手段）。
+  同一次缺失由 **singleflight** 合并成一次回源；回源失败/超时后进入 **cooldown**（`aihub.config.refresh-cooldown`，
+  默认 5 秒）以请求速率遏制控制面；两级缓存都空且 admin 不可达时，服务**内存里的 last-good 快照**
+  （永不过期，取版本更高的那个），最后才是遗留单渠道。**热生效延迟**因此是「本地 TTL 30 秒 + 版本比对」，
+  而不是推送。
+- **`GET /v1/models` 的冷缓存读可能回源一次**：它读的是同一个 `ConfigClient`，缓存冷/过期时会**同步**
+  回源 admin（有 5 秒上界），因此这个端点的首字节延迟在冷启动时可能达到秒级。生产默认
+  `aihub.ratelimit.enabled=true`，请求链在限流过滤器里已经被切到 `boundedElastic`；**网关测试的默认是
+  false**，于是 Relay 路径上的同一次配置读会落在 Netty 事件循环上 —— 「生产调度」与「测试调度」不是同一个，
+  改动这条链时要两边都想一遍。
+- **未鉴权的 `/v1/**` 请求不会被限流**：鉴权过滤器（`+100`）排在限流过滤器（`+150`）之前，
+  没有合法 key 的请求在鉴权处就 401 了，根本走不到限流。因此「未鉴权洪峰」不在这套限流的保护范围内。
+- **404 走的是 `gateway_error`**：`model_not_found`（没有可用候选）在控制器入口就返回，
+  计量按「未预期错误」记 `ERROR` / `gateway_error` —— 也就是说一个**客户端**问题会抬高网关的错误计数。
+  按 `gateway_error` 告警时要先看 HTTP 状态码是不是 404。
+- **限流与配额是两件事**：`RateLimitFilter` 管 QPS/burst（丢弃是暂时的、下个窗口自动恢复）；
+  配额（§6.2）管余额（扣减是持久的）。**不要把 429 `rate_limit_exceeded` 与未来的 `QUOTA_EXCEEDED`
+  混为一谈**；配额整体属 M4，M3 不碰 `quota` 表。
+- **API Key 的吊销 / 停用延迟是显式接受的**：本机 Caffeine ≤30s、集群 Redis ≤5m。M3 **不加**
+  吊销广播，也**不写** Pub/Sub 监听器：§6.3 的 Pub/Sub 失效只针对**配置快照**，而 M3 没有配置写入方
+  （发布端不存在），为一个不存在的发布端写监听器只会得到一条永远不触发的代码路径。真正的收敛手段是
+  M4 的吊销接口 + 显式 `DEL`。
+- **dev-only 的渠道 seeder**：`aihub.demo-seed.enabled`（`AIHUB_DEMO_SEED_ENABLED`）**默认关闭**，
+  且关掉时**不创建任何 bean**；打开时还需要 `AIHUB_CHANNEL_MASTER_KEY` 与两个 demo 上游 base-url
+  （demo 密钥**没有默认值**，必须在环境里给），否则**在任何写库动作之前**就抛异常。它是本地联调工具，
+  **不是**初始化数据的手段。
+- **admin 侧的快照装配是「脏库每轮一个 WARN」**：`max(updated_at)` 版本比对在配置表被手改、
+  版本回退或三表 updated_at 撞车时打 WARN（按 `snapshot()` 调用去重，不是每条请求一次，但**每次网关轮询
+  都会有一条**）。看到它先查是不是有人直接改了库。
 
 ## 7. 数据库约定
 
@@ -154,6 +259,13 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - 纯 Web 层测试用 `@WebMvcTest`（gateway 侧用 `@WebFluxTest` / `WebTestClient`），不要为了省事拖起整个上下文。
 - **`aihub-gateway` 的测试永远不允许依赖 Docker，也不允许要求有 broker 在跑**：数据面要能独立构建、
   独立测试。计量链路因此被设计成「发布端可替换」（内存投递替身），需要真 broker 的用例一律放在 admin 侧。
+- **网关测试的 Web 服务器被显式钉成 Netty**：Boot 3.5 按 Tomcat → Jetty → Undertow → Netty 的顺序
+  `@Import` 反应式服务器工厂，每个都是 `@ConditionalOnMissingBean`，**第一个 classpath 上成立的胜出**。
+  只要测试 classpath 上出现 servlet 容器（M3 引入 WireMock 时就发生过：它的 Jetty 12 绑定带进了
+  `jetty-ee10-servlet`），整个网关测试套件就会静默改跑「Servlet 模式下的 Jetty」，响应写回路径因此变化
+  （详见 6.5 的 `client_disconnected` 那条）。`NettyWebServerTestAutoConfiguration` +
+  `AihubGatewayApplicationTests#theGatewayTestContextRunsOnNettyNotOnAServletContainer` 是这条约束的
+  实现与守卫：**不要删它们，也不要为了绕开某个测试依赖而把断言放宽**。
 - **admin 的集成测试要真起容器**：本机必须让 Testcontainers 找到 Docker，即
   `DOCKER_HOST=tcp://127.0.0.1:2375`（用户级 `~/.testcontainers.properties` 里也写着同一个值；缺了它
   `AbstractIntegrationTest` 会直接 `IllegalStateException` 而不是静默跳过）。
