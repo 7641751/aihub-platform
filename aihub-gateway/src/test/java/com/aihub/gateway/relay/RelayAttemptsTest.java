@@ -108,12 +108,29 @@ class RelayAttemptsTest {
         assertThat(RelayAttempts.servable(candidates, broken)).isEqualTo(candidates);
     }
 
+    /**
+     * 遗留单渠道的哨兵渠道**永远可服务**，与主密钥无关（它的密钥来自 {@code aihub.upstream.api-key}，
+     * 不是密文）。
+     *
+     * <p>判别力来自那个**坏掉的**解密器：同一个 {@code servable} 调用里还放了一条真实渠道，它的密文
+     * 在这个解密器下解不开。因此「结果恰好只含哨兵」这件事只有在「哨兵不走密文解密」时才成立 ——
+     * 把哨兵也送去解密，它就会与真实渠道一起被滤掉，{@code servable} 于是退回**原列表**，断言红。
+     * 旧版本用「好解密器 + 只有哨兵」断言 {@code hasSize(1)}，那是恒真的：{@code ChannelKeyDecryptor}
+     * 对哨兵无条件返回 {@code Optional.of}，所以无论实现怎么改它都会绿。
+     */
     @Test
     void legacyChannelIsAlwaysServable() {
         UpstreamProperties legacy = new UpstreamProperties("http://127.0.0.1:11434", "", "m");
+        ChannelKeyDecryptor broken = decryptor(new AesGcmChannelCipher(ChannelKeyRegistry.parse("")), legacy);
+        ChannelDescriptor legacyChannel = LegacyChannel.of(legacy);
+        ChannelDescriptor realButUndecryptable = channel(1L, "v1:QUJD");
 
-        assertThat(RelayAttempts.servable(List.of(LegacyChannel.of(legacy)), decryptor(cipher(), legacy)))
-                .hasSize(1);
+        assertThat(RelayAttempts.servable(List.of(legacyChannel, realButUndecryptable), broken))
+                .as("哨兵的密钥来自 aihub.upstream.api-key：主密钥为空也必须留在可服务列表里")
+                .containsExactly(legacyChannel);
+        assertThat(broken.canServe(realButUndecryptable))
+                .as("对照：这个解密器确实什么都解不开（否则上面那条断言没有判别力）")
+                .isFalse();
     }
 
     @Test

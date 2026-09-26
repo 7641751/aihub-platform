@@ -18,6 +18,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 基于 JDK 内置 HttpServer 的假上游：无需 Docker、无需额外依赖。
@@ -40,6 +41,13 @@ public final class FakeUpstream {
     private final HttpServer server;
     private final Deque<Responder> queued = new ArrayDeque<>();
     private volatile CapturedRequest lastRequest;
+
+    /**
+     * 本夹具收到的请求总数。{@code lastRequest} 只能回答「最后一次是谁」，回答不了「同一家被打了
+     * 几次」—— 而「一次客户端请求最多把每条候选渠道各打一次」这条上界恰恰只有计数能证伪
+     * （故障转移实现可能把同一条候选重复订阅）。
+     */
+    private final AtomicInteger requests = new AtomicInteger();
 
     /**
      * 握手响应「等测试放行」的预算。**必须严格大于客户端的读取预算**（{@code SseStreamingTest} 现为 5 秒）：
@@ -194,12 +202,18 @@ public final class FakeUpstream {
         return lastRequest;
     }
 
+    /** 本夹具收到的请求总数（{@link #clearLastRequest()} 会一并清零）。 */
+    public int requestCount() {
+        return requests.get();
+    }
+
     /**
-     * 清空捕获。用例之间共享同一个假上游，而「请求根本没有到达上游」这一断言只有先把上一次的
-     * 捕获清掉才成立（JUnit 不保证方法顺序）。
+     * 清空捕获（含请求计数）。用例之间共享同一个假上游，而「请求根本没有到达上游」这一断言只有先把
+     * 上一次的捕获清掉才成立（JUnit 不保证方法顺序）。
      */
     public void clearLastRequest() {
         lastRequest = null;
+        requests.set(0);
     }
 
     public void stop() {
@@ -207,6 +221,7 @@ public final class FakeUpstream {
     }
 
     private void handle(HttpExchange exchange) throws IOException {
+        requests.incrementAndGet();
         String body;
         try (InputStream in = exchange.getRequestBody()) {
             body = new String(in.readAllBytes(), StandardCharsets.UTF_8);

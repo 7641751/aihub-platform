@@ -24,6 +24,14 @@ import java.util.concurrent.ThreadLocalRandom;
  *       注册表由 Spring Boot 的 actuator 自动配置提供，而全局静态注册表在测试之间会互相污染
  *       （与 {@code ConfigConfig} / {@code MeteringConfig} 的同一套理由）。</li>
  * </ul>
+ *
+ * <p><b>登记的调度缺口（评审遗留，不在本任务修）</b>：{@code configClient::current} 会被
+ * {@link RouteResolver#candidates(String)} 在**每一个被中继的请求**上读到（回源本身被冷却窗口限制成
+ * 「每窗口至多一次」，但读快照这件事是逐请求的）。生产默认 {@code aihub.ratelimit.enabled=true}，因此
+ * 请求路径在可阻塞的弹性线程池上；而网关的**测试**默认把它关掉（多个 {@code @SpringBootTest} 显式
+ * 写 {@code false}），于是被测到的那套调度是 Netty event loop。两者不是同一套调度 —— 将来若把
+ * {@code CandidateList} 的读取做成热路径，必须先在**限流开启**的形态下复核（见 {@code ConfigClient} 与
+ * Task 10 报告里的同一条登记）。
  */
 @Configuration
 public class RouteConfig {

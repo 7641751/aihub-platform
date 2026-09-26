@@ -50,7 +50,9 @@ import java.util.Set;
  * <ul>
  *   <li>候选来自 {@link RouteResolver#candidates(String)}（健康渠道按 priority/weight 排序，
  *       熔断渠道作为最后手段排在末尾），经 {@link RelayAttempts#servable} 与
- *       {@link ChannelDescriptor#usable()} 过滤，并被 {@link RelayAttempts#MAX_ATTEMPTS} 截断；</li>
+ *       {@link ChannelDescriptor#usable()} 过滤，并被 {@link RelayAttempts#MAX_ATTEMPTS} 截断；
+ *       尝试循环本身保证**每条候选最多被订阅一次**（见 {@link #attempt}），因此一次请求的上游调用数
+ *       结构性地上界于 {@code min(候选数, MAX_ATTEMPTS)}；</li>
  *   <li>每条渠道用它**自己的** base-url / 超时（{@link UpstreamClientFactory#forChannel}）与
  *       **自己解密出来的密钥**（逐请求注入 {@code Authorization}，绝不挂在共享客户端上）；</li>
  *   <li>上游 5xx / 超时 / 连不上 → 试下一个候选；上游 **429** → 先给该渠道打熔断标记（30s）再试下一个；
@@ -204,12 +206,16 @@ public class ChatRelayController {
     /**
      * 候选列表：路由结果经「密钥可服务」过滤 + {@link ChannelDescriptor#usable()} 过滤，并截断到
      * {@link RelayAttempts#MAX_ATTEMPTS}；为空时回落到「遗留单渠道」（**只在快照里真的有遗留渠道、
-     * 且它确实可用时才回落**）；再为空 → 抛 {@link RouteSelectionException} 由调用方翻成 404。
+     * 且交回来的确实就是那个哨兵、且它确实可用时才回落**）；再为空 → 抛 {@link RouteSelectionException}
+     * 由调用方翻成 404。
      *
      * <p>{@code usable()} 那道门不能省（G15）：{@code RouteResolver} 自己也过滤，但中继不该依赖调用方
      * 已经过滤过 —— 遗留兜底这条路径的候选就是在这里造出来的，而把一条 base-url 为空 / 超时非正的
      * 渠道交给 {@link UpstreamClientFactory} 的后果是「异常穿出请求路径（客户端 500）」或
      * 「每个请求都瞬间超时」。
+     *
+     * <p>截断到上界只是上界的**两半之一**（另一半在 {@link #attempt} 的循环结构里）：它让「最后一个
+     * 候选」有唯一定义，但不能阻止同一条候选被订阅多次。
      */
     private List<ChannelDescriptor> candidateList(String model) {
         List<ChannelDescriptor> candidates = RelayAttempts.servable(routeResolver.candidates(model), keyDecryptor)
@@ -223,15 +229,24 @@ public class ChatRelayController {
         ConfigSnapshot snapshot = configClient.current();
         ChannelDescriptor legacy = configClient.legacyChannel();
         boolean hasLegacy = snapshot.channels().stream().anyMatch(channel -> LegacyChannel.isLegacy(channel.id()));
-        if (hasLegacy && legacy.usable() && keyDecryptor.canServe(legacy)) {
+        // 这里的两道判断都是**能真为假**的条件（顺序即语义）：
+        //   · hasLegacy：快照里**确实**有遗留渠道 —— 「控制面把这条上游配好了」才是回落的理由；
+        //   · isLegacy(legacy.id())：configClient.legacyChannel() 交回来的必须**就是那个哨兵**。
+        //     它不是 channel 表里的主键，任何别的描述符出现在这个位置都是装配错误 —— 那种情况下
+        //     宁可回 404，也不能把一条来路不明的渠道当成兜底渠道服务出去。
+        //   · legacy.usable()：它自己可用（base-url 非空、超时为正）。
+        // 刻意**不**写 keyDecryptor.canServe(legacy)：ChannelKeyDecryptor 对哨兵 id 无条件返回
+        // Optional.of（它的密钥来自 aihub.upstream.api-key，与主密钥无关），因此那个判断在这条路径上
+        // 恒真 —— 写着它只会让人误以为这里有一道凭据检查（真正管凭据的是哨兵身份本身）。
+        if (hasLegacy && LegacyChannel.isLegacy(legacy.id()) && legacy.usable()) {
             return List.of(legacy);
         }
         throw new RouteSelectionException(model);
     }
 
     /**
-     * 逐个候选尝试。**每次尝试都是延迟订阅**（{@code Mono.defer}），因此前一个候选只要
-     * 「没有被写出去一个字节」，就还可以换下一个。
+     * 逐个候选尝试（**不嵌套的线性尝试链**）。每次尝试都是延迟订阅（{@code Mono.defer}），因此前一个
+     * 候选只要「没有被写出去一个字节」，就还可以换下一个。
      *
      * <p>切换的判据是上游**响应头到达之后、响应体写回之前**这个窗口：
      * <ul>
@@ -244,6 +259,19 @@ public class ChatRelayController {
      * </ul>
      * 一旦 {@link #relay} 开始写字节，响应就被提交，此后异常只会走收尾分支 ——
      * 这就是「仅在未输出任何 token 时允许切换」的机器实现。
+     *
+     * <p><b>上界由本方法的循环结构兑现，而不只是靠截断候选列表</b>
+     * （{@link RelayAttempts#MAX_ATTEMPTS}）。单条候选的「请求 + 失败分类」被收在
+     * {@link #tryCandidate} 里，且它把逃逸的上游失败折成一个「继续」信号（{@code true}）而不是继续
+     * 外抛。于是「换下一个」只发生在 {@link Mono#flatMap} 的**下游**，同一个失败不可能再回到本方法的
+     * 任何受保护区域里、把同一个下标**第二次**订阅出去：一次客户端请求的上游调用数因此**结构上**
+     * 等于 {@code min(候选数, 上界)}。
+     *
+     * <p>反面教材（本方法修掉的缺陷）：把递归订阅写在受保护区域**内部**、同时又在
+     * {@code onErrorResume} 里为同一个逃逸失败再订阅一次，会让 {@code attempt(i)} 展开成
+     * {@code C(m) = 1 + 2·C(m-1)} —— 3 条候选的混合故障（503 → 429 → 连不上）实测打 **7 次**上游，
+     * 而且把刚刚写下熔断标记的 429 渠道自己又打了一遍。截断候选列表对这种放大完全无能为力（它管得住
+     * 「候选有几条」，管不住「同一条被订阅几次」）。
      */
     private Mono<Void> attempt(List<ChannelDescriptor> candidates, int index, RelayRequestBody.Prepared prepared,
                                ServerHttpResponse response, RelayMetering metering) {
@@ -257,19 +285,41 @@ public class ChatRelayController {
                     "api_error", "upstream_unreachable", "Upstream service is unreachable");
         }
         ChannelDescriptor channel = candidates.get(index);
-        // 计量里记的是**最后被尝试**的那条：最后一个候选总会把响应回写，因此正常路径下它等于
-        // 「实际服务的那条」；全都失败时它等于最后被尝试的那条（故障因此可归因）。
-        metering.onChannelSelected(channel);
         Optional<String> upstreamKey = keyDecryptor.upstreamKey(channel);
         if (upstreamKey.isEmpty()) {
-            // 解不开密钥：不浪费一次往返，直接跳到下一个候选。绝不在这里抛异常。
+            // 解不开密钥：这条候选**根本不会被调用**，因此也不进计量（channel_id 只记真的发出去的
+            // 那一条），更不浪费一次往返。绝不在这里抛异常。
             log.warn("渠道 {} 的密钥不可用，跳过该候选", channel.id());
             return attempt(candidates, index + 1, prepared, response, metering);
         }
+        // 凭据已经到手 = 这条渠道**马上就要被真的调用**，此时才记进计量：事件里的 channel_id 因此是
+        // 「实际被调用」的那条，而不是「看候选名单时排在前面、却从未被联系过」的那条。
+        metering.onChannelSelected(channel);
         WebClient client = clientFactory.forChannel(channel, prepared.streaming());
         String apiKey = upstreamKey.get();
-        boolean hasNext = index + 1 < candidates.size();
 
+        return tryCandidate(channel, client, apiKey, index, index + 1 < candidates.size(),
+                        prepared, response, metering)
+                .flatMap(moveOn -> moveOn
+                        ? attempt(candidates, index + 1, prepared, response, metering)
+                        : Mono.<Void>empty());
+    }
+
+    /**
+     * **单条候选**的一次尝试。它返回的是「要不要继续换下一个候选」这个**信号本身**
+     * （{@code Mono<Boolean>}），而不是在这里递归订阅下一个候选 —— 逃逸的上游失败在
+     * {@code onErrorResume} 里被折成 {@code true}，于是它**不会**再向外传播，也就**不可能**回到
+     * 调用方的受保护区域里触发第二次订阅（见 {@link #attempt} 的上界说明）。
+     *
+     * <p>429 的熔断标记、5xx/4xx 的分类、以及「最后一个候选原样回写」的语义都与改造前逐字相同；
+     * 变的只是「换下一个候选」这件事由谁执行。
+     *
+     * @return {@code true} = 这条候选失败、且还有下一个候选，调用方应继续；空完成 = 响应已由
+     *         {@link #relay} 回写，不再切换；错误 = 没有下一个候选，或响应已提交（交给顶层收尾）
+     */
+    private Mono<Boolean> tryCandidate(ChannelDescriptor channel, WebClient client, String apiKey, int index,
+                                       boolean hasNext, RelayRequestBody.Prepared prepared,
+                                       ServerHttpResponse response, RelayMetering metering) {
         return Mono.defer(() -> {
             WebClient.RequestBodySpec spec = client.post()
                     .uri(CHAT_COMPLETIONS_PATH)
@@ -283,27 +333,36 @@ public class ChatRelayController {
             return spec.bodyValue(prepared.bodyToForward())
                     .exchangeToMono(upstream -> {
                         int status = upstream.statusCode().value();
-                        if (status == 429) {
+                        if (status == 429 && !LegacyChannel.isLegacy(channel.id())) {
                             // 429 = 该渠道的速率/配额已满：立刻跨实例熔断 30 秒（决策 10）。
                             // 即便这是最后一个候选、马上就要把 429 透传给客户端，标记也必须打 ——
                             // 它影响的正是**后续**请求的路由。
+                            //
+                            // 遗留哨兵（id = Long.MIN_VALUE）是唯一的例外：它不是 channel 表里的主键，
+                            // 为它写一条 aihub:channel:circuit:<哨兵> 没有任何路由会去读，却会让
+                            // 「这个键空间里只放真实渠道 id」不再成立。429 照旧原样透传。
                             circuitBreaker.markOpen(channel.id());
                         }
-                        if (hasNext && RelayAttempts.shouldFailoverBeforeCommit(status)) {
+                        // 两条分类规则**都**出现在决策路径上：「可切换」（5xx/429）换下一个候选；
+                        // 「客户端的错必须原样透传」（4xx 非 429）**即使**前一条将来被放宽也不换。
+                        // 两条规则的互斥性由 RelayAttemptsTest 逐条钉住，因此这里多出来的判断不会
+                        // 产生行为差异 —— 它是把「不重试客户端的错」这条铁律写在真正决策的地方。
+                        boolean switchable = RelayAttempts.shouldFailoverBeforeCommit(status)
+                                && !RelayAttempts.isClientErrorThatMustNotBeRetried(status);
+                        if (hasNext && switchable) {
                             log.warn("渠道 {}（{}）返回 {}，尝试下一个候选渠道（第 {} 个候选失败）",
                                     channel.id(), channel.name(), status, index + 1);
                             // releaseBody 防止连接泄漏，然后再切下一个。
-                            return upstream.releaseBody().then(
-                                    Mono.defer(() -> attempt(candidates, index + 1, prepared, response, metering)));
+                            return upstream.releaseBody().thenReturn(true);
                         }
-                        return relay(upstream, response, metering);
+                        return relay(upstream, response, metering).thenReturn(false);
                     });
         }).onErrorResume(RelayAttempts::isUpstreamFailure, ex -> {
             if (hasNext && !response.isCommitted()) {
                 // 「响应尚未提交」是切换的唯一前提：连接失败/首字节之前的超时都发生在这个窗口里。
                 log.warn("渠道 {}（{}）的上游失败（{}），尝试下一个候选渠道",
                         channel.id(), channel.name(), ex.getClass().getName());
-                return Mono.defer(() -> attempt(candidates, index + 1, prepared, response, metering));
+                return Mono.just(true);
             }
             // 没有下一个候选，或响应已经提交：交给顶层收尾（502 / 结束这段流）。
             return Mono.error(ex);

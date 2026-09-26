@@ -31,6 +31,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -60,6 +62,7 @@ class UnusableChannelRelayTest {
     private RecordingClientFactory clientFactory;
     private RouteResolver routeResolver;
     private ConfigClient configClient;
+    private ChannelCircuitBreaker circuitBreaker;
     private ChatRelayController controller;
 
     @BeforeEach
@@ -69,7 +72,7 @@ class UnusableChannelRelayTest {
                 new UpstreamProperties(upstream.baseUrl(), null, MODEL));
         routeResolver = mock(RouteResolver.class);
         configClient = mock(ConfigClient.class);
-        ChannelCircuitBreaker circuitBreaker = mock(ChannelCircuitBreaker.class);
+        circuitBreaker = mock(ChannelCircuitBreaker.class);
         lenient().when(circuitBreaker.isOpen(anyLong())).thenReturn(false);
         lenient().when(configClient.current()).thenReturn(ConfigSnapshot.empty());
 
@@ -134,6 +137,66 @@ class UnusableChannelRelayTest {
         assertThat(exchange.getResponse().getBodyAsString().block())
                 .contains("\"code\":\"model_not_found\"");
         assertThat(clientFactory.requestedChannelIds()).isEmpty();
+    }
+
+    /**
+     * 回落路径的第二道门：{@code configClient.legacyChannel()} 交回来的描述符必须**真的是遗留哨兵**
+     * （id = {@link LegacyChannel#ID}）。
+     *
+     * <p>为什么需要这道门：{@code keyDecryptor.canServe(legacy)} 在这条路径上是**恒真**的
+     * （{@code ChannelKeyDecryptor} 对哨兵无条件返回 {@code Optional.of}），因此它钉不住任何东西；
+     * 而「回落路径会不会把一条**任意**渠道当成兜底渠道发出去」是一个能真实出错的判断。这里喂一条
+     * id=99 的真实渠道（base-url 可用、密钥可解），中继必须拒绝它并回 404 —— 而不是悄悄服务它。
+     */
+    @Test
+    void aFallbackDescriptorThatIsNotTheLegacySentinelIsNeverServed() throws Exception {
+        ChannelDescriptor snapshotLegacy = new ChannelDescriptor(LegacyChannel.ID, "legacy-single-channel",
+                upstream.baseUrl(), null, 0, 60_000, ChannelDescriptor.STATUS_ACTIVE, 100, 0);
+        ChannelDescriptor impostor = new ChannelDescriptor(99L, "not-the-legacy-channel", upstream.baseUrl(),
+                cipherText(), 1, 5_000, ChannelDescriptor.STATUS_ACTIVE, 100, 0);
+        assertThat(impostor.usable()).as("夹具前提：这条「假兜底」自己是可用的（密钥也可解）").isTrue();
+        when(routeResolver.candidates(MODEL)).thenReturn(List.of());
+        when(configClient.current()).thenReturn(new ConfigSnapshot(1L, 1L, List.of(snapshotLegacy),
+                List.of(), List.of(), MODEL));
+        when(configClient.legacyChannel()).thenReturn(impostor);
+
+        MockServerWebExchange exchange = exchange();
+
+        controller.chatCompletions(body(), exchange).block(Duration.ofSeconds(10));
+
+        assertThat(exchange.getResponse().getStatusCode())
+                .as("不是哨兵的兜底描述符不得被服务（它是配置/装配错误，不是一条可用路由）")
+                .isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(clientFactory.requestedChannelIds()).isEmpty();
+    }
+
+    /**
+     * 遗留单渠道返回 429 时**不得**写熔断键：哨兵 id
+     * （{@code -9223372036854775808}）不是 {@code channel} 表里的真实主键，为它写一条
+     * {@code aihub:channel:circuit:<哨兵>} 会让「这个键空间里只有真实渠道 id」不再成立。
+     *
+     * <p>判别性：修前那条路径会调用 {@code markOpen(Long.MIN_VALUE)}，{@code never()} 立刻红。
+     * 429 本身仍然必须原样透传（这条渠道是唯一候选，没有下一个可切）。
+     */
+    @Test
+    void aLegacySentinelFourTwoNineIsRelayedWithoutWritingACircuitKey() throws Exception {
+        ChannelDescriptor legacy = LegacyChannel.of(
+                new UpstreamProperties(upstream.baseUrl(), null, MODEL));
+        when(routeResolver.candidates(MODEL)).thenReturn(List.of());
+        when(configClient.current()).thenReturn(new ConfigSnapshot(1L, 1L, List.of(legacy),
+                List.of(), List.of(), MODEL));
+        when(configClient.legacyChannel()).thenReturn(legacy);
+        upstream.enqueueError(429, "{\"error\":{\"message\":\"legacy upstream rate limited\"}}");
+
+        MockServerWebExchange exchange = exchange();
+
+        controller.chatCompletions(body(), exchange).block(Duration.ofSeconds(10));
+
+        assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        assertThat(exchange.getResponse().getBodyAsString().block())
+                .contains("legacy upstream rate limited");
+        verify(circuitBreaker, never()).markOpen(anyLong());
+        assertThat(clientFactory.requestedChannelIds()).containsExactly(LegacyChannel.ID);
     }
 
     private MockServerWebExchange exchange() {

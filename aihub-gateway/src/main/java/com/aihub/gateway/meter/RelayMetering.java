@@ -31,8 +31,10 @@ import java.util.concurrent.atomic.AtomicReference;
  * <p>{@code model} 在**事件组装时**被截断到 {@code request_log.model} 的列宽（{@link RelayAttempts#MODEL_MAX_LENGTH}，
  * 决策 15）。转发给上游的请求体从不经过本类，因此仍是客户端写的那串字节。
  *
- * <p>{@code channelId} 由控制器在每次尝试前通过 {@link #onChannelSelected(ChannelDescriptor)} 更新，
- * 因此事件里记的是**实际服务**（或最后尝试）的那条渠道 —— 故障转移之后它不再是首选那条。
+ * <p>{@code channelId} 由控制器在**凭据到手、即将发出上游请求**时通过
+ * {@link #onChannelSelected(ChannelDescriptor)} 更新，因此事件里记的是**实际被调用**的那条渠道
+ * （最后那条被联系过的）—— 故障转移之后它不再是首选那条，而在发出请求之前就被跳过的候选
+ * （密钥解不开）根本不会出现在这里。
  */
 public final class RelayMetering {
 
@@ -50,8 +52,9 @@ public final class RelayMetering {
     private final long tenantId;
     private final Long apiKeyId;
     /**
-     * 实际被服务（或被最后尝试）的渠道 id。**可变**：一次请求可能在故障转移里走过好几条候选，
-     * 事件里要的是**最后那条**（它产生了客户端拿到的响应），而不是最先被选中的那条。
+     * 实际被调用（**凭据已到手、即将发出上游请求**）的渠道 id。**可变**：一次请求可能在故障转移里
+     * 走过好几条候选，事件里要的是**最后那条真的被调用**的（它产生了客户端拿到的响应），而不是
+     * 最先被选中的那条。
      */
     private final AtomicReference<Long> channelId = new AtomicReference<>();
     private final String model;
@@ -86,11 +89,16 @@ public final class RelayMetering {
     }
 
     /**
-     * 记录本次请求**最后尝试**的那条候选渠道（多渠道/故障转移，M3）。
+     * 记录一条**即将被真的调用**的候选渠道（多渠道/故障转移，M3）。
      *
-     * <p>控制器在每次尝试之前调用它，因此事件里的 {@code channel_id} 是「最后被调用、并产生了
-     * 客户端看到的那个结果」的渠道：正常路径下它等于服务的那条；故障转移后它等于**备用**那条
-     * （不是首选那条）；所有候选都在响应未提交时失败时它等于最后一次尝试的那条，故障因此可归因。
+     * <p>控制器在**解密出该渠道的密钥之后、发出上游请求之前**调用它 —— 也就是这条候选不再只是
+     * 「候选名单上的一项」，而是本次请求真的会去联系的一条。因此事件里的 {@code channel_id} 是
+     * 「最后那条被联系过的渠道」：正常路径下它等于服务的那条；故障转移后它等于**备用**那条
+     * （不是首选那条）；所有候选都在响应未提交时失败时它等于最后一次被联系的那条，故障因此可归因。
+     *
+     * <p><b>刻意不用「最后尝试」这种更强的说法</b>：密钥解不开、在发出请求之前就被跳过的候选
+     * **不算**被尝试过，也绝不会出现在这个字段里（否则「全都解不开」的请求会记下一条从未被联系过的
+     * 渠道）。写进来的每一条都确实产生过一次上游调用。
      *
      * <p>遗留单渠道的哨兵 id（{@code LegacyChannel.ID}）也照样写进事件（不是 NULL）：这样
      * 「走了兜底路径」在 {@code request_log} 里是可查的，而不是与「多渠道正常路径」混在一起。

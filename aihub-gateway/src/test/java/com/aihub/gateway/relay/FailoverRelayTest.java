@@ -414,6 +414,13 @@ class FailoverRelayTest {
         assertThat(response.body()).contains("\"code\":\"upstream_unreachable\"");
         assertThat(primary.lastRequest()).isNull();
         assertThat(standby.lastRequest()).isNull();
+
+        MeteringEvent event = awaitEvent(response);
+        assertThat(event).isNotNull();
+        assertThat(event.channelId())
+                .as("两条候选都在**发出上游请求之前**就被跳过（密钥解不开）：事件里不得记下任何一条"
+                        + "从未被联系过的渠道（记成 12 会让 request_log 指向一条本次请求根本没碰过的渠道）")
+                .isNull();
     }
 
     /**

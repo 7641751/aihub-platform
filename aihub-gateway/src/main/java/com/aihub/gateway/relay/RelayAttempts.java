@@ -27,8 +27,15 @@ public final class RelayAttempts {
      * 二次打击，也让「一次请求 = 一次计费」的直觉彻底失真。3 覆盖了实际的「主 / 备 / 第三备」拓扑，
      * 同时把放大上界钉死在 3 倍。
      *
-     * <p>上界在**进入尝试循环之前**生效（截断候选列表），而不是在循环里数到 3 才停：这样「最后一
-     * 个候选」的语义是唯一确定的 —— 无论上界是否把它截掉，最后一个候选都照原样回写它自己的响应。
+     * <p>上界由**两半**共同兑现，缺一不可：
+     * <ol>
+     *   <li>进入尝试循环之前把候选列表截断到本值（{@code ChatRelayController#candidateList}）：
+     *       这让「最后一个候选」的语义唯一确定 —— 无论上界是否把它截掉，最后一个候选都照原样回写
+     *       它自己的响应；</li>
+     *   <li>尝试循环**结构上**保证每条候选最多被订阅一次（{@code ChatRelayController#attempt}）：
+     *       截断只管得住「候选有几条」，管不住「同一条被订阅几次」—— 而后者曾让 3 条候选的混合故障
+     *       打出 7 次上游调用。</li>
+     * </ol>
      */
     public static final int MAX_ATTEMPTS = 3;
 
@@ -45,7 +52,16 @@ public final class RelayAttempts {
         return upstreamStatus >= 500 || upstreamStatus == 429;
     }
 
-    /** 「客户端的错，必须原样透传、不得重试」的判据（429 除外，它是要切换的）。 */
+    /**
+     * 「客户端的错，必须原样透传、不得重试」的判据（429 除外，它是要切换的）。
+     *
+     * <p><b>它有生产调用方</b>：{@code ChatRelayController#tryCandidate} 的切换决策同时读本方法与
+     * {@link #shouldFailoverBeforeCommit(int)}（{@code 可切换 && ! 客户端的错}），因此这条铁律写在
+     * 真正决策的地方，而不是只活在测试里。两条规则彼此互斥（同一个状态码不可能既是「该切换」又是
+     * 「必须原样透传」），互斥性由 {@code RelayAttemptsTest} 逐条钉住 —— 若将来有人放宽
+     * {@link #shouldFailoverBeforeCommit}（例如把 408 也算进去），这里的 {@code !} 仍会把 4xx 挡在
+     * 切换之外。
+     */
     public static boolean isClientErrorThatMustNotBeRetried(int upstreamStatus) {
         return upstreamStatus >= 400 && upstreamStatus < 500 && upstreamStatus != 429;
     }
