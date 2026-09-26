@@ -1,8 +1,12 @@
 package com.aihub.gateway.config;
 
+import com.aihub.common.crypto.AesGcmChannelCipher;
+import com.aihub.common.crypto.ChannelKeyRegistry;
 import com.aihub.gateway.admin.AdminClient;
+import com.aihub.gateway.relay.ChannelKeyDecryptor;
 import com.aihub.gateway.upstream.UpstreamProperties;
 import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -33,5 +37,22 @@ public class ConfigConfig {
     public ConfigClient configClient(ConfigCache cache, AdminClient adminClient, UpstreamProperties upstream,
                                      GatewayConfigProperties properties, MeterRegistry registry) {
         return new ConfigClient(cache, adminClient, upstream, properties, registry);
+    }
+
+    /**
+     * 渠道密钥的解密器（**主密钥只在网关本地**，设计文档 §6.1）。
+     * 主密钥为空时 {@link com.aihub.common.crypto.ChannelKeyRegistry} 是空表，
+     * 所有真实渠道都会「解不开」并被路由跳过 —— 这是**可启动**的降级，不是启动失败
+     * （与 admin 侧的「无主密钥拒绝加密」相反，理由见决策 3）。
+     */
+    @Bean
+    public AesGcmChannelCipher channelCipher(
+            @Value("${aihub.channel.master-key:}") String masterKey) {
+        return new AesGcmChannelCipher(ChannelKeyRegistry.parse(masterKey));
+    }
+
+    @Bean
+    public ChannelKeyDecryptor channelKeyDecryptor(AesGcmChannelCipher cipher, UpstreamProperties upstream) {
+        return new ChannelKeyDecryptor(cipher, upstream);
     }
 }
