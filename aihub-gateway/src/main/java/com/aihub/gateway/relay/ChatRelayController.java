@@ -343,12 +343,12 @@ public class ChatRelayController {
                             // 「这个键空间里只放真实渠道 id」不再成立。429 照旧原样透传。
                             circuitBreaker.markOpen(channel.id());
                         }
-                        // 两条分类规则**都**出现在决策路径上：「可切换」（5xx/429）换下一个候选；
-                        // 「客户端的错必须原样透传」（4xx 非 429）**即使**前一条将来被放宽也不换。
-                        // 两条规则的互斥性由 RelayAttemptsTest 逐条钉住，因此这里多出来的判断不会
-                        // 产生行为差异 —— 它是把「不重试客户端的错」这条铁律写在真正决策的地方。
-                        boolean switchable = RelayAttempts.shouldFailoverBeforeCommit(status)
-                                && !RelayAttempts.isClientErrorThatMustNotBeRetried(status);
+                        // 两条分类规则塌成**一个**判定（RelayAttempts.FailoverDecision）：「可切换」（5xx/429）
+                        // 换下一个候选；「客户端的错必须原样透传」（4xx 非 429）不换。旧的写法把两条规则
+                        // 用 `&& !` 拼起来，但它们在每个 int 上互斥 —— 那个 `!` 是惰性的，删掉不会有任何
+                        // 用例变红（铁律于是只活在测试里）。现在控制器读的是分类器本身，每个状态码恰好
+                        // 落在一个分支上，4xx 的原样透传是决策路径上的一等公民。
+                        boolean switchable = RelayAttempts.decision(status).failover();
                         if (hasNext && switchable) {
                             log.warn("渠道 {}（{}）返回 {}，尝试下一个候选渠道（第 {} 个候选失败）",
                                     channel.id(), channel.name(), status, index + 1);

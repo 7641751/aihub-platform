@@ -43,27 +43,72 @@ public final class RelayAttempts {
     }
 
     /**
-     * 上游这个状态码是否允许「换下一个候选渠道」。
+     * 上游响应的**分类结果**（见 {@link #decision(int)}）。三个分支对应三种收尾方式，没有第四种。
      *
-     * <p>只有 5xx 与 429。**4xx 不换**：401/403/404/422 是「这个请求本身有问题」，
-     * 换渠道也一样错，重试只会把同一个错误在多个上游重复计费一次。
+     * <p>{@code clientError} 与 {@code failover} 在**结构上**互斥（枚举常量决定，而不是两个恰好不重叠的
+     * {@code if}）：这正是「客户端的错绝不换渠道」这条铁律能被单点守住的原因。
      */
-    public static boolean shouldFailoverBeforeCommit(int upstreamStatus) {
-        return upstreamStatus >= 500 || upstreamStatus == 429;
+    public enum FailoverDecision {
+        /** 5xx 与 429：换下一个候选渠道；429 另外还要打熔断标记（由控制器负责）。 */
+        FAILOVER(true, false),
+        /** 400-499（429 除外）：客户端的错，换渠道一样错，原样透传给客户端。 */
+        PASS_THROUGH_CLIENT_ERROR(false, true),
+        /** 其余（2xx/3xx 等）：原样透传。 */
+        PASS_THROUGH_UPSTREAM_ERROR(false, false);
+
+        private final boolean failover;
+        private final boolean clientError;
+
+        FailoverDecision(boolean failover, boolean clientError) {
+            this.failover = failover;
+            this.clientError = clientError;
+        }
+
+        /** 是否允许「换下一个候选渠道」。 */
+        public boolean failover() {
+            return failover;
+        }
+
+        /** 是否是「客户端的错，必须原样透传、不得重试」。 */
+        public boolean clientError() {
+            return clientError;
+        }
+
+        /** 是否原样透传（= 不换渠道）。恒等于 {@code !failover()}。 */
+        public boolean passOn() {
+            return !failover;
+        }
     }
 
     /**
-     * 「客户端的错，必须原样透传、不得重试」的判据（429 除外，它是要切换的）。
+     * 把上游状态码分类成**唯一**的处置方式：只有 5xx 与 429 换渠道，4xx（429 除外）是客户端的错，
+     * 其余原样透传。
      *
-     * <p><b>它有生产调用方</b>：{@code ChatRelayController#tryCandidate} 的切换决策同时读本方法与
-     * {@link #shouldFailoverBeforeCommit(int)}（{@code 可切换 && ! 客户端的错}），因此这条铁律写在
-     * 真正决策的地方，而不是只活在测试里。两条规则彼此互斥（同一个状态码不可能既是「该切换」又是
-     * 「必须原样透传」），互斥性由 {@code RelayAttemptsTest} 逐条钉住 —— 若将来有人放宽
-     * {@link #shouldFailoverBeforeCommit}（例如把 408 也算进去），这里的 {@code !} 仍会把 4xx 挡在
-     * 切换之外。
+     * <p><b>为什么是一个枚举而不是两个布尔方法</b>（本轮评审的清理）：旧实现有
+     * {@code shouldFailoverBeforeCommit(s) = s >= 500 || s == 429} 与
+     * {@code isClientErrorThatMustNotBeRetried(s) = 400 <= s < 500 && s != 429} 两个方法，
+     * 控制器读的是 {@code 可切换 && ! 客户端的错}。这两条规则在**每一个 int** 上都互斥，因此
+     * 那个 {@code !} 是惰性的：删掉它不会有任何用例变红。也就是说「客户端的错不得重试」这条铁律
+     * 只活在测试里，而**不在**决策路径上 —— 一旦有人将来放宽可切换规则（例如把 408 也算进去），
+     * 那个多余的判断也救不了：真正的防线必须写在决策发生的地方。
+     *
+     * <p>塌成一个分类器之后，每个状态码恰好落在一个分支上，控制器的决策就是
+     * {@code decision(status).failover()} 这一读。{@code RelayAttemptsTest} 逐条覆盖 400-599
+     * 全区间（外加 2xx/3xx），因此每个分支都是 load-bearing 的。
+     *
+     * <p>行为与改造前**逐位相同**：5xx/429 换渠道，4xx（429 除外）原样透传，2xx/3xx 原样透传。
+     *
+     * @param upstreamStatus 上游返回的状态码（任何 {@code int} 都有定义，不会返回 {@code null}）
      */
-    public static boolean isClientErrorThatMustNotBeRetried(int upstreamStatus) {
-        return upstreamStatus >= 400 && upstreamStatus < 500 && upstreamStatus != 429;
+    public static FailoverDecision decision(int upstreamStatus) {
+        if (upstreamStatus >= 500 || upstreamStatus == 429) {
+            return FailoverDecision.FAILOVER;
+        }
+        if (upstreamStatus >= 400) {
+            // 429 已在上面被拿走，因此这里就是「4xx 且非 429」。
+            return FailoverDecision.PASS_THROUGH_CLIENT_ERROR;
+        }
+        return FailoverDecision.PASS_THROUGH_UPSTREAM_ERROR;
     }
 
     /**

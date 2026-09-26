@@ -24,7 +24,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 失败转移的**分类规则**是 M3 最容易写错的地方：哪些状态码该换渠道、哪些必须原样透传。
  * 规则本身是纯函数，因此可以在这里逐条钉死，而不必靠端到端测试去凑。
  *
- * <p>核心区分：
+ * <p>核心区分（由 {@link RelayAttempts#decision(int)} **一个**分类器承担，见
+ * {@link #failoverIsAllowedFor5xxAnd429AndNothingElseInTheErrorRange()}）：
  * <ul>
  *   <li><b>可切换</b>：连接失败/超时（{@code WebClientRequestException}）、上游 5xx、上游 429；</li>
  *   <li><b>不可切换</b>：上游 4xx（非 429）——那是客户端的错，换渠道一样错，重试只会放大；</li>
@@ -63,29 +64,55 @@ class RelayAttemptsTest {
         return new UpstreamProperties("http://127.0.0.1:1", null, "m");
     }
 
+    /**
+     * **每一条消息都要过分类器**：把「可切换」与「客户端的错必须原样透传」两条规则塌成
+     * **一个**判定，从而让两个分支都真的活在决策路径上。
+     *
+     * <p>改造前的写法是 {@code shouldFailoverBeforeCommit(status) && !isClientErrorThatMustNotBeRetried(status)}
+     * —— 那个 {@code !} 是**惰性的**：两条规则在每个 {@code int} 上互斥，删掉它不会有任何用例变红，
+     * 于是「客户端 4xx 绝不换渠道」这条铁律实际上只活在测试里，而不在控制器读的那行代码里。
+     * 现在控制器读的是 {@link RelayAttempts#decision(int)}，本用例把当时的全部状态逐条钉住。
+     */
     @Test
-    void failoverIsAllowedFor5xxAnd429() {
-        assertThat(RelayAttempts.shouldFailoverBeforeCommit(500)).isTrue();
-        assertThat(RelayAttempts.shouldFailoverBeforeCommit(502)).isTrue();
-        assertThat(RelayAttempts.shouldFailoverBeforeCommit(503)).isTrue();
-        assertThat(RelayAttempts.shouldFailoverBeforeCommit(429)).isTrue();
+    void failoverIsAllowedFor5xxAnd429AndNothingElseInTheErrorRange() {
+        for (int status = 400; status <= 599; status++) {
+            RelayAttempts.FailoverDecision decision = RelayAttempts.decision(status);
+            assertThat(decision)
+                    .as("分类器必须覆盖 %d（返回 null 意味着某个分支没人负责）", status)
+                    .isNotNull();
+
+            boolean expectedFailover = status >= 500 || status == 429;
+            assertThat(decision.failover())
+                    .as("状态 %d 的可切换性（只有 5xx 与 429 换渠道）", status)
+                    .isEqualTo(expectedFailover);
+
+            // 「客户端的错」与「可切换」在每一个 int 上都互斥 —— 这正是旧的 && ! 变成惰性判断的原因。
+            // 现在它们由同一个枚举分量派生，因此这条不变量是结构性的，而不是靠两条 if 恰好不重叠。
+            assertThat(decision.failover() && decision.clientError())
+                    .as("状态 %d 既「可切换」又「是客户端的错」—— 两条规则必须互斥", status)
+                    .isFalse();
+
+            if (expectedFailover) {
+                assertThat(decision.passOn()).as("状态 %d 必须换下一个候选", status).isFalse();
+            } else {
+                assertThat(decision.clientError())
+                        .as("400-499（429 除外）必须被认成「客户端的错，不得重试」：%d", status)
+                        .isEqualTo(status < 500);
+                assertThat(decision.passOn())
+                        .as("不可切换的状态必须原样透传：%d", status)
+                        .isTrue();
+            }
+        }
     }
 
+    /** 范围之外（2xx/3xx）同样必须原样透传：分类器是全函数，不是「只对错误码有意义」。 */
     @Test
-    void failoverIsRejectedForClientErrorsAndSuccess() {
-        assertThat(RelayAttempts.shouldFailoverBeforeCommit(400)).isFalse();
-        assertThat(RelayAttempts.shouldFailoverBeforeCommit(401)).isFalse();
-        assertThat(RelayAttempts.shouldFailoverBeforeCommit(403)).isFalse();
-        assertThat(RelayAttempts.shouldFailoverBeforeCommit(404)).isFalse();
-        assertThat(RelayAttempts.shouldFailoverBeforeCommit(422)).isFalse();
-        assertThat(RelayAttempts.shouldFailoverBeforeCommit(200)).isFalse();
-    }
-
-    @Test
-    void clientErrorsAreNotRetriedEvenThoughTheyAreErrors() {
-        assertThat(RelayAttempts.isClientErrorThatMustNotBeRetried(400)).isTrue();
-        assertThat(RelayAttempts.isClientErrorThatMustNotBeRetried(429)).as("429 是唯一要切换的 4xx").isFalse();
-        assertThat(RelayAttempts.isClientErrorThatMustNotBeRetried(500)).isFalse();
+    void successAndRedirectStatusesPassOnWithoutFailover() {
+        for (int status : new int[] {200, 201, 204, 301, 304, 399}) {
+            assertThat(RelayAttempts.decision(status).passOn()).as("状态 %d", status).isTrue();
+            assertThat(RelayAttempts.decision(status).failover()).as("状态 %d", status).isFalse();
+            assertThat(RelayAttempts.decision(status).clientError()).as("状态 %d", status).isFalse();
+        }
     }
 
     @Test

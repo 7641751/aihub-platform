@@ -51,14 +51,27 @@ public class UpstreamClientFactory {
 
     /**
      * M1 形状的遗留客户端：带 {@code aihub.upstream.api-key} 的默认 Authorization。
-     * **保留它**是为了让单渠道配置（含既有测试）继续按原样工作 —— 否则冷启动兜底路径
-     * 会丢掉上游密钥。
+     *
+     * <p><b>它没有生产调用方，只为测试而留</b>（本轮评审修正了这里一条过时的理由）：M3 起控制器一律走
+     * {@link #forChannel(ChannelDescriptor, boolean)} 并**逐请求**注入密钥，遗留兜底路径也一样 ——
+     * 它把哨兵渠道 `LegacyChannel` 交给 {@code forChannel}，密钥同样来自
+     * {@code aihub.upstream.api-key}。因此「删掉本方法会让冷启动兜底丢掉上游密钥」是**错的**；
+     * 真正还需要它的是那些按 M1 形状断言默认 Authorization 头的既有测试
+     * （{@code UpstreamClientFactoryTest} / {@code BlankMasterKeyStartupTest} 等）。同理，
+     * {@code UpstreamClientConfig} 在 M3 已不再把它的产物注册成 {@code WebClient} bean。
+     *
+     * <p>保留而不是删除的理由只有「测试仍在使用」这一条；新代码不要调用它 —— 想按渠道带密钥就用
+     * {@link #forChannel(ChannelDescriptor, boolean)}。
      *
      * <p><b>缓存键里放的是密钥的摘要，不是明文</b>：这张 map 的生存期与进程同长，把
      * {@code aihub.upstream.api-key} 的原文镶进 key 等于让一次 heap dump 就能捞出上游密钥
      * （它不进日志，但仍然留在内存里）。摘要保留了「不同密钥 → 不同客户端」这条语义，
      * 而发给上游的 {@code Authorization} 头照样是原文 —— 缓存身份与传输凭据是两件事。
+     *
+     * @deprecated 只为既有测试保留（无生产调用方）。新代码请用
+     *             {@link #forChannel(ChannelDescriptor, boolean)} 并逐请求注入密钥。
      */
+    @Deprecated(forRemoval = false)
     public WebClient legacy() {
         String key = "legacy|" + legacyProperties.baseUrl() + "|" + apiKeyDigest(legacyProperties.apiKey());
         return clients.computeIfAbsent(key, ignored -> build(legacyProperties.baseUrl(),
