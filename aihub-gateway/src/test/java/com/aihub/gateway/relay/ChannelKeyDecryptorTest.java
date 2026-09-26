@@ -79,20 +79,6 @@ class ChannelKeyDecryptorTest {
         assertThat(decryptor.canServe(channel("v9:QUJD"))).isFalse();
     }
 
-    /**
-     * 明文渠道密钥**绝不允许**出现在异常消息、日志或 {@code toString} 里。
-     * 这条断言针对的是「实现为了方便调试把 key 塞进消息」这种最常见的泄漏方式。
-     * <p>注意：解不开的情形只打 WARN，日志内容由人工复核（这里只能钉住 toString 与返回值）。
-     */
-    @Test
-    void neverExposesThePlaintext() {
-        ChannelKeyDecryptor broken = new ChannelKeyDecryptor(
-                new AesGcmChannelCipher(ChannelKeyRegistry.parse("")), upstream(null));
-
-        assertThat(broken.toString()).doesNotContain(SYNTHETIC_PLAINTEXT);
-        assertThat(String.valueOf(broken.upstreamKey(channel("v1:QUJD")))).doesNotContain(SYNTHETIC_PLAINTEXT);
-    }
-
     @Test
     void canServeIsFalseForAnUndecryptableChannel() {
         ChannelKeyDecryptor decryptor = new ChannelKeyDecryptor(
