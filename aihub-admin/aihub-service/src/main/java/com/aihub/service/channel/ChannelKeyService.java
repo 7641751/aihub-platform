@@ -17,8 +17,8 @@ import java.util.Optional;
  * <p><b>主密钥只来自环境变量</b>（{@code AIHUB_CHANNEL_MASTER_KEY} → {@code aihub.channel.master-key}），
  * 不落库、不进镜像、不打日志。本类**永不打印**主密钥或其 base64。
  *
- * <p>{@link #encrypt} 在无主密钥时**抛异常**（写入路径必须响亮地失败）；{@link #decrypt} 永不抛
- * （读路径不能因为配置事故把整个流程打断）。
+ * <p>{@link #encrypt} 在无主密钥时、以及明文为 {@code null}/空白时都**抛异常**（写入路径必须响亮地失败）；
+ * {@link #decrypt} 永不抛（读路径不能因为配置事故把整个流程打断）。
  *
  * <p><b>本类没有 logger，这是刻意的</b>：它每一次调用手上都同时握着明文与密文，一句
  * {@code log.debug("加密 {}", plaintext)} 就能让「明文渠道密钥从不入库/不进日志」这条铁律
@@ -43,12 +43,23 @@ public class ChannelKeyService {
         this.cipher = new AesGcmChannelCipher(registry);
     }
 
-    /** 加密一条渠道明文密钥。返回自描述密文（{@code v{n}:{base64}}）。 */
+    /**
+     * 加密一条渠道明文密钥。返回自描述密文（{@code v{n}:{base64}}）。
+     *
+     * @throws IllegalStateException    未配置主密钥（写入路径必须响亮地失败，而不是写坏数据）
+     * @throws IllegalArgumentException 明文为 {@code null} 或空白。这是**一定的调用方 bug**：
+     *                                  早先的实现把 {@code null} 映射成空串，于是「key 为空的渠道」
+     *                                  会被静默加密并落库。异常消息里**不含任何值**（它可能是一把真密钥）。
+     */
     public String encrypt(String plaintextChannelKey) {
         if (registry.isEmpty()) {
             throw new IllegalStateException(CONFIG_HINT);
         }
-        return cipher.encrypt(plaintextChannelKey == null ? "" : plaintextChannelKey);
+        if (plaintextChannelKey == null || plaintextChannelKey.isBlank()) {
+            throw new IllegalArgumentException(
+                    "渠道明文密钥不能为空：拒绝加密 null 或空白值（本异常不携带该值本身）");
+        }
+        return cipher.encrypt(plaintextChannelKey);
     }
 
     /** 解密（读路径：只用于「探测渠道」这类未来功能）；任何失败返回空而不是抛异常。 */

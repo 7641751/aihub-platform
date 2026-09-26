@@ -31,7 +31,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>另外两件事也在这里钉住（都是 Task 13 组装快照的直接依赖）：
  * <ul>
  *   <li><b>读取顺序</b>：{@code rate_limit_policy} 上没有唯一键（决策 17），「同维度取最后一条」
- *       靠的就是 {@code id} 升序 —— 因此断言 mapper 交回来的顺序与插入顺序一致；</li>
+ *       靠的就是 {@code id} 升序 —— 因此容器用例在**不加 ORDER BY** 的读取上断言相对 id 顺序
+ *       与插入顺序一致（否则断言的只是用例自己的 SQL 子句）；</li>
  *   <li><b>状态不被 DAO 过滤</b>：同一张表里塞一条 {@code INACTIVE}，它必须**出现**在这次读取里 ——
  *       ACTIVE 过滤是 Task 13 组装快照的责任（网关侧的 DTO 没有状态分量，见 Task 4 报告 §3），
  *       如果它悄悄挪进 DAO（或被误认为已在 DAO），停用行会被照用而没有任何用例变红。</li>
@@ -140,17 +141,19 @@ class ChannelConfigDaoIntegrationTest extends AbstractIntegrationTest {
         jdbcTemplate.update(POLICY_INSERT, 987654L, null, 15, 30, "INACTIVE");
         jdbcTemplate.update(POLICY_INSERT, 987654L, 4321L, 5, 10, "ACTIVE");
 
-        // 组装快照时读的是 selectList(无条件)：InnoDB 的全表扫描走聚簇索引 = id 升序，
-        // 「同维度取最后一条」正是建立在这个顺序上（决策 17）。这里把 orderByAsc 显式写出来，
-        // 只为让本用例的意图不依赖「读者知道 InnoDB 的扫描顺序」——被钉住的是 mapper 交回来的
-        // 行内容与相对顺序，不是某个 ORDER BY 子句。
-        List<RateLimitPolicyEntity> loaded = rateLimitPolicyMapper.selectList(
-                new LambdaQueryWrapper<RateLimitPolicyEntity>()
-                        .eq(RateLimitPolicyEntity::getTenantId, 987654L)
-                        .orderByAsc(RateLimitPolicyEntity::getId));
+        // 组装快照时读的就是 selectList(无条件)（无 WHERE、无 ORDER BY）。这里**刻意不加** orderByAsc：
+        // 一旦写上它，isSorted() / containsExactly(20, 15) 断言的只是本用例自己的 SQL 子句 ——
+        // 无论 mapper 真实交回什么顺序都恒绿，也就不是关于决策 17 的证据。
+        // 现在断言的是「DAO 在无序读取下**真实**交回来的相对 id 顺序」：InnoDB 全表扫描走聚簇索引
+        // = id 升序，这正是「同维度取最后一条」所依赖的前提（登记在 RateLimitPolicyMapper 的 javadoc 里）。
+        List<RateLimitPolicyEntity> loaded = rateLimitPolicyMapper.selectList(null).stream()
+                .filter(policy -> policy.getTenantId() != null && policy.getTenantId() == 987654L)
+                .toList();
 
-        assertThat(loaded).extracting(RateLimitPolicyEntity::getId).isSorted();
-        assertThat(loaded).hasSize(3);
+        assertThat(loaded).as("本用例插入的三行必须都被读回来（全表读取里的其余租户行不属于这里）").hasSize(3);
+        assertThat(loaded).extracting(RateLimitPolicyEntity::getId)
+                .as("无序读取（无 ORDER BY）下 mapper 交回来的相对 id 顺序 —— 决策 17 依赖它")
+                .isSorted();
 
         List<RateLimitPolicyEntity> tenantLevel = loaded.stream().filter(p -> p.getApiKeyId() == null).toList();
         List<RateLimitPolicyEntity> keyLevel = loaded.stream().filter(p -> p.getApiKeyId() != null).toList();
@@ -162,7 +165,8 @@ class ChannelConfigDaoIntegrationTest extends AbstractIntegrationTest {
                     assertThat(policy.getBurst()).isNotNull();
                     assertThat(policy.getStatus()).isNotNull();
                 });
-        assertThat(tenantLevel).extracting(RateLimitPolicyEntity::getQps).as("读取顺序 = 插入顺序 = id 升序（决策 17）")
+        assertThat(tenantLevel).extracting(RateLimitPolicyEntity::getQps)
+                .as("无序读取下的相对顺序 = 插入顺序 = id 升序（决策 17；顺序本身由上面的 isSorted 断言钉住）")
                 .containsExactly(20, 15);
         assertThat(tenantLevel.get(tenantLevel.size() - 1).getQps())
                 .as("「同维度取最后一条」落在后插入的那一行上")
