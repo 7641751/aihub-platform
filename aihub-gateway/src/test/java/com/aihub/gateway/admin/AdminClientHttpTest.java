@@ -48,6 +48,9 @@ class AdminClientHttpTest {
         assertThat(view).isPresent();
         assertThat(view.orElseThrow().keyId()).isEqualTo("ak_1");
         assertThat(view.orElseThrow().tenantId()).isEqualTo(7L);
+        // 决策 14 的字段可空：**缺失**时必须解成 null（而不是 0、缺省值或抛异常）。
+        // 本 fixture 有意不带 apiKeyId —— 它是「缺失」这一支的覆盖点。
+        assertThat(view.orElseThrow().apiKeyId()).isNull();
 
         FakeAdminServer.CapturedRequest request = admin.lastRequest();
         assertThat(request.method()).isEqualTo("POST");
@@ -57,6 +60,27 @@ class AdminClientHttpTest {
         // 真正的契约：admin 的 InternalAuthFilter 会用同一个 secret + 应用内路径复算签名。
         assertThat(InternalHmac.verify(SECRET, request.headers().get("x-internal-timestamp"),
                 "POST", PATH, request.headers().get("x-internal-signature"))).isTrue();
+    }
+
+    /**
+     * 决策 14 消费者侧的**另一半**：admin 的响应里带数值主键时，它必须真的被读进视图。
+     * <p>上面那条用例的 fixture 里根本没有 {@code apiKeyId}，只覆盖了「缺失 → null」这一支；
+     * 少了本条，把 JSON 键名写错（`apiKeyId` → `apiKeyID`）或把 {@code isNumber()} 判断写反
+     * 都不会有任何测试变红 —— 网关会静默把所有 key 的 {@code apiKeyId} 都当成 null，
+     * 限流的 key 级策略与计量的 api_key_id 随之失效。
+     */
+    @Test
+    void parsesTheNumericApiKeyIdWhenTheAdminSendsIt() {
+        admin.enqueueJson(200, """
+                {"code":"OK","message":"success","data":{"keyId":"ak_2","tenantId":7,\
+                "tenantName":"t","status":"ACTIVE","expireAt":null,"apiKeyId":42}}""");
+
+        Optional<ApiKeyView> view = client(SECRET).resolve(HASH).block();
+
+        assertThat(view).isPresent();
+        assertThat(view.orElseThrow().apiKeyId())
+                .as("响应里的数值 apiKeyId 必须被解析进视图")
+                .isEqualTo(42L);
     }
 
     @Test

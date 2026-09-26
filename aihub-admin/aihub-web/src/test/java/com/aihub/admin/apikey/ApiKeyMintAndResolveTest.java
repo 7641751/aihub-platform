@@ -96,13 +96,28 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
     @Test
     void expiredKeyResolvesButIsNotUsable() {
         ApiKeyService.IssuedKey issued = apiKeyService.mint("t-exp", "key-exp", Instant.now().minusSeconds(60));
+        String keyHash = ApiKeyHasher.hash(secretOf(issued));
+        String cacheKey = ApiKeyCacheCodec.CACHE_KEY_PREFIX + keyHash;
 
-        ApiKeyView view = apiKeyService.resolve(ApiKeyHasher.hash(secretOf(issued))).orElseThrow();
+        // 先证明 mint **真的**把载荷写进了 Redis。cache() 吞掉 RuntimeException（Redis 不可用时
+        // 降级回 MySQL 是有意的），因此「写缓存静默失败」不会以异常形式露面 —— 它只会让本用例
+        // 悄悄改走 loadFromDb，然后因为两条路径的值恰好相同而**依然全绿**。读出这条 entry
+        // 才把「来自缓存」与「来自 DB」两条路径区分开。
+        String cached = redisTemplate.opsForValue().get(cacheKey);
+        assertThat(cached)
+                .as("mint 必须真的写入 Redis，否则本用例证明不了 mint 写缓存这条路径")
+                .isNotNull();
+
+        ApiKeyView view = apiKeyService.resolve(keyHash).orElseThrow();
 
         assertThat(view.usable()).isFalse();
         // 决策 14 的**另一半**：本用例命中的是 mint 顺手写进 Redis 的那份载荷（不是回源），
         // 因此它钉的是 mint 路径 —— 只补 loadFromDb 会让「刚铸出来的 key」那一条路径静默丢了数值主键。
         assertThat(view.apiKeyId()).isEqualTo(dbIdOf(issued.keyId()));
+        // 解析结果必须**就是**缓存里那份载荷：否则上面的断言可能只是又一次走 loadFromDb 得来的。
+        assertThat(ApiKeyCacheCodec.decode(cached))
+                .as("resolve 必须真的从 mint 写入的缓存载荷返回")
+                .isEqualTo(view);
     }
 
     /**

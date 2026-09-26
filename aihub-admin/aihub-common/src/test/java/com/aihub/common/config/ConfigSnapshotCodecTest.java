@@ -42,6 +42,8 @@ class ConfigSnapshotCodecTest {
         assertThat(lines.get(1)).isEqualTo("C|11|deepseek-primary|https://api.deepseek.com|v1:QUJD|1|60000|ACTIVE|100|0");
         assertThat(lines.get(2)).isEqualTo("C|12|deepseek-backup|https://backup.example.com|v2:QUJD|2|30000|ACTIVE|300|0");
         assertThat(lines.get(3)).isEqualTo("R|deepseek-chat|11|100|0|ACTIVE");
+        // 第二条 R 行同样钉住：少了它，「丢掉/重排第二个路由」不会有任何断言变红。
+        assertThat(lines.get(4)).isEqualTo("R|deepseek-chat|12|300|0|ACTIVE");
         assertThat(lines.get(5)).isEqualTo("L|7||20|40");
         assertThat(lines.get(6)).isEqualTo("L|7|42|100|200");
     }
