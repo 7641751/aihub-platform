@@ -21,11 +21,24 @@
 
 **M2 到底做了什么**：用量捕获是**旁路观察者** —— 转发路径仍然是字节级直通（上游状态码 / `Content-Type` / 响应体字节一字不改），只是挂了一只只读的 `asByteBuffer()` 探针，把经过的字节复制进一个有界尾窗。非流式从整体 JSON 里读 `usage`；流式则在请求体里注入 `stream_options.include_usage`（**这是唯一被允许的请求体改写**），再从最后一帧读 `usage`。每个 `/v1/**` 请求由网关铸一个 UUID 写进响应头 `x-request-id`，`POST /v1/chat/completions` 同时把它当作计量事件的 `request_id`；幂等键是 `(request_id, created_at)`，两个值都由**网关**在请求开始时各生成一次（`created_at` 截断到毫秒）并随事件投递，消费端原样使用 —— 消费端若用自己的 `now()`，每次重投都会写成新的一行。事件经 RabbitMQ 用共享的分隔符文本 codec（不是 JSON：`aihub-common` 是零依赖的）投给 admin，由 admin 幂等落 `request_log`；**只有 admin 声明拓扑**，网关只发布。broker 不可用时网关先落内存队列（有界）、再落磁盘 spool，由定时任务重投，任何丢弃都会让 `dropped` 计数 +1 并打 ERROR（绝不静默丢弃）。`request_log` 的月分区由运行时维护：启动补齐 + 每日 03:10 UTC 前推 2 个月。另有 M1 的三处遗留修复：SSE 增量 flush 的可证伪断言、客户端断连计量、`retry-after` 与 `x-ratelimit-*` 透传，以及 `defaultModel` 为空的 NPE。
 
-**验收状态**：全量测试实测 **490 项通过 / 0 失败 / 0 错误 / 0 跳过**（aihub-common 56、aihub-web 92、aihub-gateway 342；`mvn -B clean test` → `BUILD SUCCESS`，含 Testcontainers 真容器用例）。M2 的真实上游端到端验收（Docker Compose 全栈 + 真实模型）结论：非流式与流式响应都带 `x-request-id`，两次请求在 `request_log` 各落一行且 token 数与上游响应体里的 `usage` **完全一致**，非流式那行 `ttft_ms` 为 `NULL`、流式那行为正数，行的 `request_id` 等于客户端看到的响应头、`created_at` 等于事件里的值，重放同一事件不产生第二行。
+**验收状态**：全量测试实测 **491 项通过 / 0 失败 / 0 错误 / 0 跳过**（aihub-common 56、aihub-web 92、aihub-gateway 343；`mvn -B clean test` → `BUILD SUCCESS`，含 Testcontainers 真容器用例）。M2 的真实上游端到端验收（Docker Compose 全栈 + 真实模型）结论：非流式与流式响应都带 `x-request-id`，两次请求在 `request_log` 各落一行且 token 数与上游响应体里的 `usage` **完全一致**，非流式那行 `ttft_ms` 为 `NULL`、流式那行为正数，行的 `request_id` 等于客户端看到的响应头、`created_at` 等于事件里的值，重放同一事件不产生第二行。
 
 **M3 到底做了什么**：`/v1/**` 现在先过**限流**再过**路由**。限流是 Redis + Lua 的令牌桶，策略按 **`tenant + api_key` 两个维度**选取（key 级覆盖 → 租户级回落 → 内置默认 `qps=10 / burst=20`），桶的状态键是 `aihub:ratelimit:{tenantId}:{sha256(secret)}`；超限回 OpenAI 形状的 `429 rate_limit_exceeded`，并带 `Retry-After` / `Retry-After-MS` / `RateLimit-Limit` / `RateLimit-Remaining`（**没有 `RateLimit-Reset`**：网关不写这个头，`ratelimit-reset` 在网关里只是透传白名单里的一个上游头名；且前两个头在**放行**响应上也有，不是「只在拒绝时」才出现）；**Redis 挂了降级成本机令牌桶，但仍然拒绝**（降级 ≠ 放行；多实例下放行量约为「策略 × 实例数」）。路由按 `model_route` 的 `priority` 分组（数字小的组先服务），组内按 `model_route.weight` 权重随机，`channel.status != ACTIVE` 或不可用的渠道被排除，熔断中的渠道排到最后而不是删除。每条渠道用自己的 base-url / 超时（`channel.timeout_ms` 只对非流式生效）与**自己解密出来的**密钥，凭据**逐请求**注入、绝不挂到共享客户端上。**故障转移**的规则只有两条：上游结果可切换（**429 与 5xx**；4xx 原样透传、不换）且响应**尚未提交**（`response.isCommitted()` 为假）—— 一旦有字节写回客户端就绝不再换，这就是「仅在未输出任何 token 时允许切换」的机器形式；一次请求最多试 3 条候选（首选 + 两条备用）。上游 **429 还会给该渠道打一个 30 秒的跨实例熔断标记**（Redis key `aihub:channel:circuit:{id}`；Redis 不可用时退化为本机表），5xx 与超时只做当次切换。**渠道密钥是 AES-GCM 密文**（`v{n}:{base64(nonce‖ciphertext+tag)}`，自描述版本）：admin 只下发密文，主密钥只在环境变量 `AIHUB_CHANNEL_MASTER_KEY` 里，**解密只发生在网关本地**，明文不跨网络、不进日志；轮换 = 环境变量里新旧两把并存 → 重加密 → 删旧密钥，密文自描述版本让回退安全。控制面配置通过 HMAC 签名的 `GET /internal/config/snapshot` 下发，网关侧是**三级读取两级缓存**（Caffeine 30 秒 → Redis 10 分钟 → admin），带 singleflight 合并回源、版本比对（本地命中也会探一次 Redis 版本）、回源失败后的 cooldown 限速，以及两级缓存都空时的**内存 last-good 快照**；快照完全没有时才回落到 `aihub.upstream.*` 合成的遗留单渠道。另外收口了 M2 的三处遗留：透传白名单补上 `retry-after-ms` 与 IETF `RateLimit-*`、超长 `model` 在计量事件里按码点截断（转发给上游的请求体逐字节不变）、`api_key_id` / `channel_id` 真正落进 `request_log`。**多渠道故障注入的验收**用 **WireMock**（`org.wiremock:wiremock:3.9.1`，仅 `aihub-gateway` 的 test 作用域、**进程内**起桩，不需要 Docker / broker / Redis）在 `WireMockChannelFaultInjectionTest` 里做 —— 那是设计文档 §10 / §12 的原文口径：几条命名桩分别注入 429 / 挂住超时 / 中途断流，验证自动切换与「已开始回写就不切换」。**这是 M3 唯一的 test 作用域新依赖，生产依赖零新增**（设计文档 §4.2 说「WireMock 在 M3 引入时再锁定版本」，落点就是这里）。
 
-**M3 验收状态（诚实说明）**：M3 的验收标准「WireMock 注入 429/超时，能自动切换」在**进程内**这一层已经完成并实测通过 —— `WireMockChannelFaultInjectionTest` 8 条用例（`mvn -B clean test -pl aihub-gateway -am "-Dtest=WireMockChannelFaultInjectionTest"` → `Tests run: 8, Failures: 0, Errors: 0`），它证明的是每条命名桩各自的注入与切换规则、熔断标记参与路由、以及「已提交之后绝不拼接备用渠道」。**compose 全栈上的数据面验收（真实 admin + gateway + MySQL + Redis + RabbitMQ 上的多渠道切换、Redis 熔断键、限流响应头、限流降级、admin 宕机继续按缓存路由）本轮未做**，由控制器在计划 Task 15 Step 5 执行；本 README 不声称它已经跑过。
+**M3 验收状态（诚实说明）**：M3 的验收标准「WireMock 注入 429/超时，能自动切换」在**进程内**这一层已经完成并实测通过 —— `WireMockChannelFaultInjectionTest` 8 条用例（`mvn -B clean test -pl aihub-gateway -am "-Dtest=WireMockChannelFaultInjectionTest"` → `Tests run: 8, Failures: 0, Errors: 0`），它证明的是每条命名桩各自的注入与切换规则、熔断标记参与路由、以及「已提交之后绝不拼接备用渠道」。
+
+**compose 全栈上的数据面验收是一次明确接受的缺口（本轮再次尝试仍然失败，不是「计划中」）**：M3 的 Task 15 Step 5 要求「**必须在发布的 compose 全栈上做**」真实 admin + gateway + MySQL + Redis + RabbitMQ 上的多渠道切换 / Redis 熔断键 / 限流响应头 / 限流降级 / admin 宕机继续按缓存路由。**它至今没有被跑过，M3 已收口且没有为此打任何勾。** 本轮复现的阻塞点是**一个前置条件缺失**：
+
+```text
+$ docker -H tcp://127.0.0.1:2375 compose up -d
+error while interpolating services.gateway.environment.AIHUB_CHANNEL_MASTER_KEY:
+required variable AIHUB_CHANNEL_MASTER_KEY is missing a value: set AIHUB_CHANNEL_MASTER_KEY in .env
+```
+
+- **缺什么**：本机 `.env` 里**没有** `AIHUB_CHANNEL_MASTER_KEY`（`docker-compose.yml` 对 admin 与 gateway 都写成 `${AIHUB_CHANNEL_MASTER_KEY:?...}` 必填插值，所以 `compose up` 在插值阶段就退出，一个容器都不会起）。它是**渠道密钥加解密**的主密钥：admin 是写路径、gateway 是请求路径，缺了它 admin 的 seeder 与 gateway 的解密都无从谈起。本仓库**不提供**这个值、也没有任何默认值（正确做法：它是部署方自己生成的秘密）。
+- **还有两个同样没有任何默认值的值**：`AIHUB_DEMO_SEED_PRIMARY_API_KEY` / `AIHUB_DEMO_SEED_STANDBY_API_KEY`（演示渠道的**明文**密钥，代码里刻意不留明文），以及 Step 5 第 1 步要求的「坏上游（只回 429 的夹具）+ 好上游」。
+- **怎么跑**（由你，部署方，来做 —— 这三项都必须是**你自己生成/提供**的值，见 `.env.example` 第 44–61 行的生成命令）：① 在 `.env` 里补 `AIHUB_CHANNEL_MASTER_KEY=v1:<base64 32 字节>`；② 设 `AIHUB_DEMO_SEED_ENABLED=true` 并补两个 demo 渠道明文密钥、两条 demo 上游 base-url；③ 起夹具后 `docker -H tcp://127.0.0.1:2375 compose up -d --build`，按计划 Task 15 Step 5 的 1–7 步执行（起服务 → 查 `channel`/`model_route` → 铸 key → 连发两次看切换与熔断 → 查 `aihub:channel:circuit:*` 与 `aihub:ratelimit:*` → 查 `request_log.channel_id` → 限流两维与降级 → `stop admin` 继续路由），把删掉 token 明文的真实输出写进 `.superpowers/sdd/m3-acceptance.md`。
+- **口径**：除此之外，M3 的多渠道故障转移与限流只有**进程内**证据（上面那 8 条 WireMock 用例 + Task 14 的真 Redis 容器测试）。把这条缺口当作事实读：**没有在任何真实 compose 全栈上验证过**。「坏上游夹具不存在」与「主密钥没配」都是环境前置条件，不是代码缺陷 —— 计划 Step 5 对这种情况的原话就是「报告 BLOCKED 并说明缺什么，不要伪造结果」。
 
 **复现口径（诚实说明）**：上面的数字与「`mvn -B test` 在本机全绿」都产自这台开发机：除了 Docker 守护进程，它还依赖两项**不在仓库里**的环境配置 —— 用户级 `~/.testcontainers.properties`（把 Testcontainers 指向 TCP 上的 Docker）以及本机 `.mvn/maven.config` 里的 JVM 参数。因此在一台干净机器上，需自行保证：Docker 可达，且 JDK 21+ 上允许 Mockito 的动态 agent 挂载（例如 `mvn -B test -DargLine="-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading"`）；这些**环境作用域**的 JVM 开关有意不进 `pom.xml`。`aihub-web` 的集成测试要真起容器，必须让 Testcontainers 找到 Docker（本机是 `DOCKER_HOST=tcp://127.0.0.1:2375`）；`aihub-gateway` 的测试**不需要** Docker，也不需要有 broker 在跑。
 
@@ -33,6 +46,8 @@
 ## M0/M1/M2/M3 已知边界
 
 以下是有意划出的范围边界与**尚未被验证的东西**，不是缺陷清单。带「未验证 / 未做」字样的条目请当作事实陈述读：它们没有被任何测试或真实环境证明过。
+
+- **M3 的 compose 全栈验收没有被跑过**（明确接受的缺口，见上面「M3 验收状态」那一段）：缺 `AIHUB_CHANNEL_MASTER_KEY` 等前置条件，`docker compose up` 在插值阶段就退出。M3 的多渠道故障转移 / 限流因此只有**进程内**证据。
 
 - `/healthz` 会返回组件明细且不鉴权，等控制面鉴权落地后会一并收紧。
 - 配额（预扣 / 实际校正 / 异步对账与账单）整体属于 M4；M3 做的是**限流**（QPS/burst），不是**余额记账**（详见下文 M3 的边界）。
@@ -248,7 +263,7 @@ docker -H tcp://127.0.0.1:2375 compose exec -T mysql sh -c 'mysql -uroot -p"$MYS
 mvn -B clean test
 ```
 
-当前实测（M3 收口时跑的一轮，`DOCKER_HOST=tcp://127.0.0.1:2375`，从 `clean` 开始）：`mvn -B clean test` → `BUILD SUCCESS`，**Tests run: 490, Failures: 0, Errors: 0, Skipped: 0**（aihub-common 56、aihub-web 92、aihub-gateway 343；M2 收口时是 **200**（aihub-common 21、aihub-web 47、aihub-gateway 132），M3 的 Task 14 收口时才到 481，481→490 的差额是 M3 的验收测试：WireMock 多渠道故障注入 8 条 + 一条「测试跑在 Netty 上」的守卫，本次收口再加 1 条「主配置的生产默认值」断言）。注意 Maven 的**进程退出码不可信**（本机见过 `BUILD SUCCESS` 却给出 `[exit code: 1]`），判定以 surefire 汇总 + `BUILD SUCCESS` 为准；另外 Surefire 对含 `@Nested` 的外层类会打印 `Tests run: 0`（`ModelsControllerTest` 就是这种），那种情况下以 XML / 合计为准。
+当前实测（M3 收口后修完复审遗留项的一轮，`DOCKER_HOST=tcp://127.0.0.1:2375`，从 `clean` 开始）：`mvn -B clean test` → `BUILD SUCCESS`，**Tests run: 491, Failures: 0, Errors: 0, Skipped: 0**（aihub-common 56、aihub-web 92、aihub-gateway 343；Testcontainers 的 MySQL 8.4 / Redis 7 / RabbitMQ 3.13 真的起了容器，Flyway `Successfully applied 1 migration`）。收口前那一轮（M3 的 Task 15）是 **490**（56 / 92 / 342），差额 1 条是本次新增的「主配置的生产默认值」断言（另有 1 条恒真的解密日志用例被删除、由 2 条真的能红的用例取代，因此条数恰好抵平）。再往前：M3 的 Task 14 收口时 481，481→490 是 M3 的验收测试（WireMock 多渠道故障注入 8 条 + 一条「测试跑在 Netty 上」的守卫）；**M2 收口时是 200**（aihub-common 21、aihub-web 47、aihub-gateway 132）。注意 Maven 的**进程退出码不可信**（本机见过 `BUILD SUCCESS` 却给出 `[exit code: 1]`），判定以 surefire 汇总 + `BUILD SUCCESS` 为准；另外 Surefire 对含 `@Nested` 的外层类会打印 `Tests run: 0`（`ModelsControllerTest` 就是这种），那种情况下以 XML / 合计为准。
 
 只跑 M3 的验收类（进程内 WireMock，**不需要 Docker**）：
 
