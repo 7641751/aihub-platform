@@ -3,6 +3,7 @@ package com.aihub.gateway.auth;
 import com.aihub.common.apikey.ApiKeyCacheCodec;
 import com.aihub.common.apikey.ApiKeyView;
 import com.aihub.gateway.admin.AdminClient;
+import com.aihub.gateway.admin.AdminResolution;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import org.slf4j.Logger;
@@ -14,7 +15,6 @@ import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
-import java.util.Optional;
 
 /**
  * 三级解析：Caffeine（本地，最快）→ Redis（跨实例共享）→ admin（真相源）。
@@ -42,9 +42,12 @@ public class ApiKeyResolver {
     private static final Scheduler REDIS_SCHEDULER = Schedulers.boundedElastic();
 
     /**
-     * 负缓存：同一个不存在的 key 不必每次都打 admin。usable() 为 false，调用方据此 401。
+     * 负缓存：同一个**确实不存在**的 key 不必每次都打 admin。usable() 为 false，调用方据此 401。
+     * <p><b>它只代表「权威否定」，不代表「解析不了」</b>（D1）：admin 说没有这把 key 才写它；
+     * 超时/传输失败/5xx/畸形一律不写（见 {@link #resolve(String)}）。这条区分是承重的 ——
+     * 把故障也写成 MISS 等于把一次瞬时故障变成 {@code localCacheTtl} 秒的固定 401。
      * <p><b>只存在于本地 Caffeine，不写 Redis。</b>admin 侧只把**命中**的 view 写进共享缓存，
-     * 从不写「不存在」这种载荷；解析器这边也只对非 MISS 结果调 {@code writeRedis}。既然两端
+     * 从不写「不存在」这种载荷；解析器这边也只对命中的结果调 {@code writeRedis}。既然两端
      * 都不写，Redis 里就不存在 MISS 载荷，读取侧也就没有可判的分支 —— 不要在这里凭空发明一个
      * 跨服务契约。
      * <p>与过滤器在空 {@code Mono} 上的兜底共用同一个实例（{@link ApiKeyView#UNUSABLE}），
@@ -70,6 +73,13 @@ public class ApiKeyResolver {
     /**
      * 解析结果保证非 null：不存在/不可用的 key 会得到 {@link #MISS}（{@code usable() == false}），
      * 而不是空 Mono —— 调用方只需判断一次，不必再处理「没有值」的分支。
+     *
+     * <p><b>写缓存的规则是 D1 的修复点</b>：只有**权威结论**才允许进本地缓存 ——
+     * 命中（{@link AdminResolution.Status#FOUND}）与 admin 明确说的「没有这把 key」
+     * （{@code NOT_FOUND}）都可以；而 {@link AdminResolution.Status#UNAVAILABLE}（超时 / 传输失败 /
+     * 5xx / 响应畸形）**一次都不写**。修前这三态被压成同一个 {@code MISS}，于是一次瞬时故障会被
+     * 负缓存放大成 {@code localCacheTtl}（默认 30 秒）的固定 401，连 Redis/控制面恢复了都还在拒。
+     * 对客仍然是 401（fail-closed 不变），变化的只有「这次结论值不值得记住」。
      */
     public Mono<ApiKeyView> resolve(String keyHash) {
         ApiKeyView cached = local.getIfPresent(keyHash);
@@ -85,36 +95,48 @@ public class ApiKeyResolver {
                     log.warn("Redis 读取异常，降级回源 admin: {}", ex.toString());
                     return Mono.empty();
                 })
+                // Redis 里的载荷是 admin 写进去的命中结果，因此这一级的命中同样是**权威结论**。
+                .map(AdminResolution::found)
                 .switchIfEmpty(Mono.defer(() -> resolveFromAdmin(keyHash)))
-                .map(view -> {
-                    // 命中与「确实不存在」（MISS）都写本地负缓存，行为与改前一致。
-                    local.put(keyHash, view);
-                    return view;
+                .map(resolution -> {
+                    if (resolution.isFound()) {
+                        local.put(keyHash, resolution.view());
+                        return resolution.view();
+                    }
+                    if (resolution.status() == AdminResolution.Status.NOT_FOUND) {
+                        // 权威否定：可以负缓存（M1 决策 —— 同一个不存在的 key 不必每次都打 admin）。
+                        local.put(keyHash, MISS);
+                    } else {
+                        log.warn("admin 回源故障：本次结果**不写入负缓存**（下一个请求会立刻重试 admin），"
+                                + "对客仍然是 fail-closed 401");
+                    }
+                    return MISS;
                 });
     }
 
     /**
-     * 第三级：admin 回源。异常与「不存在」都折算成 {@link #MISS}（usable=false → 调用方 401），
-     * 真正的命中才回填 Redis（与 admin 侧只写命中载荷的约定一致）。
-     * <p>Mono.defer 同时保证 adminClient.resolve 的**同步**抛错（例如空 internal secret 时
+     * 第三级：admin 回源。用 {@link AdminClient#resolveOutcome}（三态）而不是
+     * {@link AdminClient#resolve} —— 后者把「权威否定」与「故障」压成同一个 {@code empty}，
+     * 用它就分不出哪一次值得记住。
+     * <p>真正的命中才回填 Redis（与 admin 侧只写命中载荷的约定一致）。
+     * <p>Mono.defer 同时保证 adminClient 的**同步**抛错（例如空 internal secret 时
      * InternalHmac.sign 抛 IllegalStateException）也落进 onErrorResume。
      */
-    private Mono<ApiKeyView> resolveFromAdmin(String keyHash) {
-        return Mono.defer(() -> adminClient.resolve(keyHash))
+    private Mono<AdminResolution> resolveFromAdmin(String keyHash) {
+        return Mono.defer(() -> adminClient.resolveOutcome(keyHash))
                 .onErrorResume(ex -> {
-                    // 这一条兜的是「AdminClient 实现把异常抛出来了」（真实实现的传输/5xx 已在
+                    // 这一条兜的是「AdminClient 实现把异常抛出来了」（真实实现的传输/5xx/畸形已在
                     // AdminClient.Http 里分别打了 ERROR）。它同样**不是**「key 不存在」，
-                    // 所以按 ERROR 记录，与「key 不存在」的 debug 日志区分开。
-                    log.error("admin 回源抛出异常（非「key 不存在」），按「key 不存在」处理（fail-closed）: {}",
+                    // 所以按 ERROR 记录，并且同样不写负缓存。
+                    log.error("admin 回源抛出异常（非「key 不存在」），本次不写入负缓存、仍然 fail-closed 401: {}",
                             ex.toString());
-                    return Mono.just(Optional.empty());
+                    return Mono.just(AdminResolution.unavailable());
                 })
-                .map(maybeView -> {
-                    ApiKeyView view = maybeView.orElse(MISS);
-                    if (view != MISS) {
-                        writeRedis(keyHash, view);
+                .map(resolution -> {
+                    if (resolution.isFound()) {
+                        writeRedis(keyHash, resolution.view());
                     }
-                    return view;
+                    return resolution;
                 });
     }
 
