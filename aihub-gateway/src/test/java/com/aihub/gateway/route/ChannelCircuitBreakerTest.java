@@ -6,12 +6,16 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
 import java.time.Duration;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -135,6 +139,94 @@ class ChannelCircuitBreakerTest {
 
         assertThat(breaker.isOpen(42L)).isFalse();
         assertThat(breaker.localOpenCount()).isZero();
+    }
+
+    @Test
+    void keepsTheLocalMarkWhenRedisGoesDarkAfterASuccessfulWrite() {
+        ChannelCircuitBreaker breaker = breaker();
+        breaker.markOpen(42L);
+
+        breakRedis();
+
+        assertThat(breaker.isOpen(42L))
+                .as("写入成功的标记必须同时镜像到本机表：Redis 在这 30 秒内变哑时不能静默解除熔断")
+                .isTrue();
+    }
+
+    @Test
+    void redisFalsyAnswerOverridesAStaleLocalMark() {
+        ChannelCircuitBreaker breaker = breaker();
+        breakRedis();
+        breaker.markOpen(42L);
+        assertThat(breaker.isOpen(42L)).as("先确认本机表里确实有这个标记").isTrue();
+
+        // 用 doReturn 而不是 when：后者会真的调用 mock，而已有的桩正在抛异常。
+        doReturn(false).when(redis).hasKey("aihub:channel:circuit:42");
+
+        assertThat(breaker.isOpen(42L))
+                .as("Redis 一旦给出明确答案，它才是跨实例权威；本机表只在 Redis 无答案时被查阅")
+                .isFalse();
+        CircuitState fromRedis = breaker.state(42L);
+        assertThat(fromRedis.open()).isFalse();
+        assertThat(fromRedis.source()).isEqualTo(CircuitState.SOURCE_REDIS);
+        assertThat(fromRedis.degraded()).isFalse();
+    }
+
+    @Test
+    void degradedClosedReportsTheLocalSource() {
+        ChannelCircuitBreaker breaker = breaker();
+        breakRedis();
+
+        CircuitState degradedClosed = breaker.state(55L);
+
+        assertThat(degradedClosed.open()).isFalse();
+        assertThat(degradedClosed.source())
+                .as("Redis 从未被成功咨询过，不能把它报成 redis（指标侧要能区分「Redis 说健康」与「Redis 是黑的」）")
+                .isEqualTo(CircuitState.SOURCE_LOCAL);
+        assertThat(degradedClosed.degraded()).isTrue();
+    }
+
+    @Test
+    void anAnswerlessRedisAlsoDegradesToTheLocalMark() {
+        ChannelCircuitBreaker breaker = breaker();
+        breakRedis();
+        breaker.markOpen(42L);
+
+        // Redis 既不回 true 也不回 false（null = 「没有答案」），而不是抛异常。
+        // 用 doReturn 而不是 when：后者会真的调用 mock，而已有的桩正在抛异常。
+        doReturn(null).when(redis).hasKey("aihub:channel:circuit:42");
+
+        assertThat(breaker.isOpen(42L))
+                .as("null 是「Redis 没有答案」，必须降级到本机表，不能被折算成「Redis 说未熔断」")
+                .isTrue();
+        assertThat(breaker.state(42L).source()).isEqualTo(CircuitState.SOURCE_LOCAL);
+    }
+
+    @Test
+    void aSweptExpiryCannotEvictAConcurrentReMark() {
+        // 用假时钟当交错点：sweeper 询问时钟的那一刻，正是它已经判定「旧标记过期」、
+        // 即将删除的时候。此时让写方重打一个更晚的标记，就等价于一次并发 re-mark 的竞态
+        // （无需真起线程，因此不会 flaky）。
+        AtomicInteger clockCalls = new AtomicInteger();
+        AtomicReference<ChannelCircuitBreaker> self = new AtomicReference<>();
+        LongSupplier interleavingClock = () -> {
+            long now = clock.get();
+            if (clockCalls.incrementAndGet() == 2) { // 第 1 次是初始打标，第 2 次是 sweeper 的判定
+                self.get().markOpen(42L);
+            }
+            return now;
+        };
+        ChannelCircuitBreaker breaker = new ChannelCircuitBreaker(redis, interleavingClock);
+        self.set(breaker);
+        breakRedis();
+
+        breaker.markOpen(42L);
+        clock.addAndGet(30_001L);
+
+        assertThat(breaker.localOpenCount())
+                .as("剔除过期条目必须用双参数 remove(id, openedAt)：不能按 key 无条件删掉并发重打的更晚标记")
+                .isEqualTo(1);
+        assertThat(breaker.isOpen(42L)).isTrue();
     }
 
     @Test

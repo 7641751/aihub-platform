@@ -11,8 +11,19 @@ public record CircuitState(boolean open, String source) {
     public static final String SOURCE_REDIS = "redis";
     public static final String SOURCE_LOCAL = "local";
 
+    /** 「未熔断」且判断来自 Redis（跨实例权威）。 */
     public static CircuitState closed() {
-        return new CircuitState(false, SOURCE_REDIS);
+        return closed(SOURCE_REDIS);
+    }
+
+    /**
+     * 「未熔断」但判断来自指定来源。
+     *
+     * <p>降级路径（Redis 是黑的、从未被成功咨询过）必须用 {@link #SOURCE_LOCAL} 而不是
+     * {@link #SOURCE_REDIS}，否则指标侧无法把「Redis 说健康」与「Redis 是黑的」分开。
+     */
+    public static CircuitState closed(String source) {
+        return new CircuitState(false, source);
     }
 
     public static CircuitState open(String source) {

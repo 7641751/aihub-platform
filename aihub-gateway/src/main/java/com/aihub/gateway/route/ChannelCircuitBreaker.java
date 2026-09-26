@@ -23,10 +23,18 @@ import java.util.function.LongSupplier;
  * <p><b>Redis 不可用时退化为本机表</b>：{@code ConcurrentHashMap<channelId, openedAtMillis>}，
  * 判定仍按 30 秒。这是单机近似 —— 与限流的降级同一套哲学（不阻断数据面）。
  *
- * <p><b>本机表为什么是有界的</b>：它的键只有渠道 id，且只在本机「Redis 写失败」时才写入，
- * 因此条目数上界是**配置里存在的渠道条数**（由 admin 配置决定的一个小数字，与请求量无关）——
- * 不是「每个请求一个键」的无界增长。另外读判定与 {@link #localOpenCount()} 都会顺带剔除已过期条目，
- * 所以正常恢复后表会自然收缩，无需后台清理线程。
+ * <p><b>标记总是镜像到本机表，Redis 写成功也要镜像</b>：否则「Redis 接受了这次标记、随后在这
+ * 30 秒内变得不可读」就会出现最糟的组合 —— 本机表里什么都没有，判定静默变回「未熔断」，
+ * 流量又打回正在返回 429 的上游，正是降级表要防的那件事。
+ *
+ * <p><b>优先级：Redis 只要给出答案就以它为准</b>（跨实例权威），本机表**仅在 Redis 无答案时**
+ * （抛异常，或返回 {@code null}）被查阅。所以 Redis 明确回答「无此标记」时会覆盖本机表里的旧标记；
+ * 反之 Redis 变哑时本机表兜底。
+ *
+ * <p><b>本机表为什么是有界的</b>：它的键只有渠道 id，且只在打熔断标记时写入（每次 {@link #markOpen}
+ * 都镜像一笔，Redis 成功与否都写），因此条目数上界是**配置里存在的渠道条数**（由 admin 配置
+ * 决定的一个小数字，与请求量无关）——不是「每个请求一个键」的无界增长。另外读判定与
+ * {@link #localOpenCount()} 都会顺带剔除已过期条目，所以正常恢复后表会自然收缩，无需后台清理线程。
  *
  * <p>本类的所有方法**永不抛异常**：它跑在请求路径上，且熔断器自身的故障绝不能变成客户端 500。
  * 未知渠道默认「未熔断」（fail-open）：默认打开会让一次误标记把所有请求挡在门外。
@@ -61,19 +69,18 @@ public class ChannelCircuitBreaker {
         return isLocallyOpen(channelId);
     }
 
-    /** 上游 429 时调用。Redis 写失败就在本机记一笔（多实例下仍然能挡住本实例的重复打击）。 */
+    /** 上游 429 时由调用方调用。标记同时写入 Redis（跨实例权威）与本机降级表（Redis 变哑时的兜底）。 */
     public void markOpen(long channelId) {
-        boolean redisOk = false;
+        // 无条件镜像：Redis 这次写成功，也不代表这 30 秒内它一直可读。写失败只 WARN，绝不抛出。
+        localOpen.put(channelId, clockMillis.getAsLong());
         try {
             redis.opsForValue().set(key(channelId), OPEN_VALUE, OPEN_TTL);
-            redisOk = true;
         } catch (RuntimeException e) {
             log.warn("写入熔断标记失败（Redis 不可用），退化为本机熔断: {}", e.toString());
         }
-        if (!redisOk) {
-            localOpen.put(channelId, clockMillis.getAsLong());
-        }
-        log.warn("渠道 {} 熔断 {} 秒（上游返回 429）", channelId, OPEN_TTL.toSeconds());
+        // 只描述本方法确知的事实：调用方把该渠道标成了打开。本方法拿不到状态码，
+        // 因此不在这里断言「上游返回 429」——那是调用方（转发层）的上下文。
+        log.warn("渠道 {} 已标记熔断 {} 秒", channelId, OPEN_TTL.toSeconds());
     }
 
     /** 手动清除（测试与运维用；正常恢复靠 TTL）。 */
@@ -88,7 +95,15 @@ public class ChannelCircuitBreaker {
 
     /** 本机表里当前仍打开的数量（指标与测试用）。 */
     public int localOpenCount() {
-        localOpen.entrySet().removeIf(entry -> expired(entry.getValue()));
+        // 先取键快照，再用双参数 remove(id, openedAt)：只在值仍是当时看到的那一笔时才删。
+        // 单参数 remove(id) 会按 key 无条件删，可能淘汰掉并发写方刚刚重打的更晚标记（check-then-act）；
+        // 双参数形式把「值未变才删」写在调用点上，不依赖 JDK 对容器 removeIf 的内部实现。
+        for (Long channelId : localOpen.keySet().toArray(new Long[0])) {
+            Long openedAt = localOpen.get(channelId);
+            if (openedAt != null && expired(openedAt)) {
+                localOpen.remove(channelId, openedAt);
+            }
+        }
         return localOpen.size();
     }
 
@@ -98,7 +113,11 @@ public class ChannelCircuitBreaker {
         if (exists != null) {
             return exists ? CircuitState.open(CircuitState.SOURCE_REDIS) : CircuitState.closed();
         }
-        return isLocallyOpen(channelId) ? CircuitState.open(CircuitState.SOURCE_LOCAL) : CircuitState.closed();
+        // Redis 没给出答案：这次判断来自本机降级表。即便结论是「未熔断」，source 也必须报本机 ——
+        // 报成 redis 会让指标分不清「Redis 说健康」与「Redis 是黑的」。
+        return isLocallyOpen(channelId)
+                ? CircuitState.open(CircuitState.SOURCE_LOCAL)
+                : CircuitState.closed(CircuitState.SOURCE_LOCAL);
     }
 
     /**
@@ -107,8 +126,9 @@ public class ChannelCircuitBreaker {
      */
     private Boolean readRedisFlag(long channelId) {
         try {
-            Boolean exists = redis.hasKey(key(channelId));
-            return exists == null ? Boolean.FALSE : exists;
+            // 直接返回：null（本方法契约里的「无答案」）必须降级到本机表，
+            // 绝不能在这里被折算成「Redis 说未熔断」——那会跳过一次本机兜底。
+            return redis.hasKey(key(channelId));
         } catch (RuntimeException e) {
             log.debug("读取熔断标记失败（Redis 不可用），改查本机熔断表: {}", e.toString());
             return null;
