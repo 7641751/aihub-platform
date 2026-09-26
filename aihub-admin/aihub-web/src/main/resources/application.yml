@@ -19,7 +19,11 @@ spring:
     redis:
       host: ${SPRING_DATA_REDIS_HOST:127.0.0.1}
       port: ${SPRING_DATA_REDIS_PORT:6379}
-      timeout: 2s
+      # 500ms（D1）：admin 里**唯一**的 Redis 消费者是密钥缓存（ApiKeyService），而 resolve 那一跳
+      # 的预算是网关 AdminClientConfig.responseTimeout(3s)。原先的 2s 让「读缓存 + 回写缓存」两次
+      # 超时叠加就超过 3 秒 —— 网关于是把健康 admin 的回答当传输故障，valid key 变 401。
+      # 密钥缓存是可丢的派生数据：超时就回源 MySQL（真相源），比拖着网关的预算更划算。
+      timeout: 500ms
   rabbitmq:
     host: ${SPRING_RABBITMQ_HOST:127.0.0.1}
     port: ${SPRING_RABBITMQ_PORT:5672}
