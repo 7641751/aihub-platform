@@ -133,6 +133,12 @@ public class RouteResolver {
             healthyTier.addAll(weightedOrder(healthy));
             brokenTier.addAll(weightedOrder(broken));
         }
+        // 「全部候选都熔断」用 healthyTier 为空来判定，而**不是**再扫一遍 grouped —— 两者等价，
+        // 但依赖一条不明显的耦合：grouped 非空（上方已判）且每个组的渠道要么进 healthyTier
+        // 要么进 brokenTier，所以 healthyTier 为空 ⟺ 每个组都全熔断 ⟺ brokenTier 非空。
+        // 换句话说，这里的 allBroken 之所以正确，只因为 brokenTier 在「每组都熔断」时必然非空。
+        // 将来若改动分层逻辑（例如把熔断渠道从 brokenTier 里剔除、或按别的方式过滤），
+        // 这条等价关系就不再成立，必须改回对 grouped 的直接扫描。
         boolean allBroken = healthyTier.isEmpty();
         List<ChannelDescriptor> ordered = new ArrayList<>(healthyTier.size() + brokenTier.size());
         ordered.addAll(healthyTier);

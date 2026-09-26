@@ -1,6 +1,10 @@
 package com.aihub.gateway.admin;
 
 import com.aihub.common.apikey.ApiKeyView;
+import com.aihub.common.config.ChannelDescriptor;
+import com.aihub.common.config.ConfigSnapshot;
+import com.aihub.common.config.ModelRouteDescriptor;
+import com.aihub.common.config.RatePolicy;
 import com.aihub.common.internal.InternalHmac;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -11,6 +15,8 @@ import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -33,7 +39,24 @@ public interface AdminClient {
      */
     String RESOLVE_PATH = "/internal/api-keys/resolve";
 
+    /**
+     * 配置快照路径。与 {@code RESOLVE_PATH} 一样**必须是应用内路径**（不含 context path）：
+     * admin 的 {@code InternalAuthFilter} 用 {@code UrlPathHelper.getPathWithinApplication} 验签。
+     */
+    String CONFIG_SNAPSHOT_PATH = "/internal/config/snapshot";
+
     Mono<Optional<ApiKeyView>> resolve(String keyHash);
+
+    /**
+     * 拉取配置快照（渠道 + 路由 + 限流策略 + 版本号）。
+     *
+     * <p>**默认实现返回空**：这样所有既有的替换实现（测试里的 {@code keyHash -> Mono.just(...)}）
+     * 不必改一行就仍然编译通过；真实实现见 {@link Http}。
+     * 空 {@link Optional} 的语义是「控制面拿不到快照」，调用方据此走降级（决策 6）。
+     */
+    default Mono<Optional<ConfigSnapshot>> configSnapshot() {
+        return Mono.just(Optional.empty());
+    }
 
     /** 真实实现：相对路径 + HMAC 签名 + 响应解析。 */
     static AdminClient http(WebClient webClient, String internalSecret) {
@@ -79,6 +102,74 @@ public interface AdminClient {
                         ex.toString());
                 return Mono.just(Optional.empty());
             });
+        }
+
+        @Override
+        public Mono<Optional<ConfigSnapshot>> configSnapshot() {
+            // 与 resolve 同一套 fail-closed 纪律：签名/网络/非 2xx/畸形响应一律折算成「没有快照」，
+            // 由配置层决定继续用陈旧快照还是回落到遗留单渠道。绝不抛到请求路径上。
+            return Mono.defer(() -> {
+                String timestamp = String.valueOf(Instant.now().getEpochSecond());
+                String signature = InternalHmac.sign(internalSecret, timestamp, "GET", CONFIG_SNAPSHOT_PATH);
+
+                return webClient.get()
+                        .uri(CONFIG_SNAPSHOT_PATH)
+                        .header("X-Internal-Timestamp", timestamp)
+                        .header("X-Internal-Signature", signature)
+                        .exchangeToMono(response -> response.bodyToMono(String.class).defaultIfEmpty("")
+                                .map(body -> parseSnapshot(response.statusCode().value(), body)));
+            }).onErrorResume(ex -> {
+                log.error("admin 配置快照拉取失败（传输层异常），本次用缓存/遗留渠道继续服务: {}", ex.toString());
+                return Mono.just(Optional.empty());
+            });
+        }
+
+        /** 非 2xx / 缺 {@code data} / 字段畸形都折算成「没有快照」。 */
+        static Optional<ConfigSnapshot> parseSnapshot(int status, String body) {
+            if (status < 200 || status >= 300) {
+                log.error("admin 配置快照拉取失败（HTTP {}），本次用缓存/遗留渠道继续服务。响应体: {}",
+                        status, body);
+                return Optional.empty();
+            }
+            try {
+                JsonNode data = MAPPER.readTree(body).path("data");
+                if (data.isMissingNode() || data.isNull()) {
+                    log.debug("admin 配置快照：HTTP {} 响应无 data，按「没有快照」处理", status);
+                    return Optional.empty();
+                }
+                long version = data.path("version").asLong(0L);
+                long generatedAt = data.path("generatedAtEpochMilli").asLong(0L);
+                String defaultModel = data.path("defaultModel").isTextual()
+                        ? data.get("defaultModel").asText() : null;
+
+                List<ChannelDescriptor> channels = new ArrayList<>();
+                for (JsonNode node : data.path("channels")) {
+                    channels.add(new ChannelDescriptor(
+                            node.path("id").asLong(), node.path("name").asText(null),
+                            node.path("baseUrl").asText(null), node.path("apiKeyCipher").asText(null),
+                            node.path("keyVersion").asInt(0), node.path("timeoutMs").asInt(0),
+                            node.path("status").asText(null), node.path("weight").asInt(0),
+                            node.path("priority").asInt(0)));
+                }
+                List<ModelRouteDescriptor> routes = new ArrayList<>();
+                for (JsonNode node : data.path("routes")) {
+                    routes.add(new ModelRouteDescriptor(
+                            node.path("modelName").asText(null), node.path("channelId").asLong(),
+                            node.path("weight").asInt(0), node.path("priority").asInt(0),
+                            node.path("status").asText(null)));
+                }
+                List<RatePolicy> policies = new ArrayList<>();
+                for (JsonNode node : data.path("ratePolicies")) {
+                    policies.add(new RatePolicy(
+                            node.path("tenantId").isNumber() ? node.get("tenantId").asLong() : null,
+                            node.path("apiKeyId").isNumber() ? node.get("apiKeyId").asLong() : null,
+                            node.path("qps").asInt(0), node.path("burst").asInt(0)));
+                }
+                return Optional.of(new ConfigSnapshot(version, generatedAt, channels, routes, policies, defaultModel));
+            } catch (Exception e) {
+                log.error("admin 配置快照响应畸形，本次用缓存/遗留渠道继续服务: {}", e.toString());
+                return Optional.empty();
+            }
         }
 
         /** 非 2xx、缺 {@code data}、字段畸形都折算成「不存在」，绝不向上抛。 */

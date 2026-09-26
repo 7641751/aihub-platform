@@ -132,6 +132,11 @@ class RouteResolverTest {
     /**
      * 决策 10 的「最后手段」层同样必须**按权重随机**：全熔断时首选渠道不能永远由配置顺序决定，
      * 否则一条 weight=0 的渠道会永久压过 weight=1000 的渠道，relay 的首次尝试也就不再按权重分散。
+     *
+     * <p>{@code rounds} 从 4000 降到 600：每次 {@code candidates()} 在全熔断分支都会打一条 WARN
+     * （决策 10 要求 WARN + 计数器），4000 轮会往日志里灌几千行噪声。600 轮对 1:3 的权重、
+     * 25% 的期望比例来说，15%–35% 的带宽仍有 ~3 个标准差的余量，而修复前的行为是
+     * **100%**（配置顺序永远赢），因此判别力没有被削弱 —— 这一点由反向变异实测过。
      */
     @Test
     void distributesByWeightInsideTheAllBrokenTierToo() {
@@ -141,7 +146,7 @@ class RouteResolverTest {
                 List.of(channel(1L, "one"), channel(2L, "three")));
         RouteResolver resolver = resolver(snapshot, brokenOnly(1L, 2L), 20260923L);
         int firstCount = 0;
-        int rounds = 4_000;
+        int rounds = 600;
 
         for (int i = 0; i < rounds; i++) {
             if (resolver.candidates("m").get(0).id() == 1L) {
@@ -151,7 +156,7 @@ class RouteResolverTest {
 
         assertThat(firstCount)
                 .as("全熔断时最高优先级组内同样按权重随机（配置顺序不得成为永久首选）")
-                .isBetween((int) (rounds * 0.20), (int) (rounds * 0.30));
+                .isBetween((int) (rounds * 0.15), (int) (rounds * 0.35));
     }
 
     @Test
