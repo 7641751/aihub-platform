@@ -29,7 +29,7 @@ class RelayMeteringTest {
                 MockServerWebExchange.from(MockServerHttpRequest.post("/v1/chat/completions").build());
         if (tenantId != null) {
             exchange.getAttributes().put(ApiKeyAuthFilter.ATTRIBUTE_KEY_VIEW,
-                    new ApiKeyView("ak_1", tenantId, "demo", ApiKeyView.STATUS_ACTIVE, null));
+                    new ApiKeyView("ak_1", tenantId, "demo", ApiKeyView.STATUS_ACTIVE, null, 42L));
         }
         return exchange;
     }

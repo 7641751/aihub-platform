@@ -61,11 +61,11 @@ class ApiKeyAuthFilterTest {
         AdminClient adminClient() {
             return keyHash -> {
                 if (keyHash.equals(TestKeys.VALID_HASH)) {
-                    return Mono.just(Optional.of(new ApiKeyView("ak_valid", 7L, "t", "ACTIVE", null)));
+                    return Mono.just(Optional.of(new ApiKeyView("ak_valid", 7L, "t", "ACTIVE", null, 42L)));
                 }
                 if (keyHash.equals(TestKeys.EXPIRED_HASH)) {
                     return Mono.just(Optional.of(new ApiKeyView("ak_exp", 7L, "t", "ACTIVE",
-                            Instant.now().minusSeconds(60))));
+                            Instant.now().minusSeconds(60), 43L)));
                 }
                 return Mono.just(Optional.empty());
             };

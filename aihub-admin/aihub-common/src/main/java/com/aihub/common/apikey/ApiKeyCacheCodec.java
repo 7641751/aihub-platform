@@ -5,9 +5,13 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Redis 缓存载荷的紧凑编解码：{@code keyId|tenantId|tenantName|status|expireAtEpochSecond}。
- * 用自定义格式而不是 JSON，是因为 {@code aihub-common} 必须保持零依赖（不能引 Jackson），
- * 而这里的字段固定且都由本类写入。
+ * Redis 缓存载荷的紧凑编解码：{@code keyId|tenantId|tenantName|status|expireAtEpochSecond|apiKeyId}
+ * （第 6 段空串表示 null）。用自定义格式而不是 JSON，是因为 {@code aihub-common} 必须保持零依赖
+ * （不能引 Jackson），而这里的字段固定且都由本类写入。
+ *
+ * <p><b>段数是跨服务契约</b>：gateway 读 admin 写的载荷，任何一侧改了段数都会让另一侧
+ * {@code decode} 返回 {@code null}（缓存未命中 → 回源 → 重写）。这**不是**故障，是收敛行为，
+ * 因此不需要清 Redis；但改段数时必须同步 {@code ApiKeyToolingTest} 的固定向量。
  *
  * <p>编码只做两件事：{@code \} → {@code \\}，{@code |} → {@code \|}（顺序固定，先转义反斜杠）。
  * 于是「反斜杠成对出现」+「{@code \|} 是数据」是唯一合法形态，解码按同一约定**单趟左到右**扫描。
@@ -25,7 +29,11 @@ public final class ApiKeyCacheCodec {
     public static final String CACHE_KEY_PREFIX = "aihub:apikey:";
 
     private static final String DELIMITER = "|";
-    private static final int FIELD_COUNT = 5;
+    /**
+     * 载荷段数。M3 起是 6（新增 {@code apiKeyId}）；旧载荷会被 {@link #decode} 判为畸形
+     * → 缓存未命中 → 回源重写。这是**收敛行为**，不是故障，因此不需要清 Redis。
+     */
+    private static final int FIELD_COUNT = 6;
 
     private ApiKeyCacheCodec() {
     }
@@ -35,7 +43,8 @@ public final class ApiKeyCacheCodec {
                 + view.tenantId() + DELIMITER
                 + escape(view.tenantName()) + DELIMITER
                 + escape(view.status()) + DELIMITER
-                + (view.expireAt() == null ? "" : String.valueOf(view.expireAt().getEpochSecond()));
+                + (view.expireAt() == null ? "" : String.valueOf(view.expireAt().getEpochSecond())) + DELIMITER
+                + (view.apiKeyId() == null ? "" : String.valueOf(view.apiKeyId()));
     }
 
     /** 格式非法时返回 {@code null}，调用方应视作缓存未命中并回源，而不是抛错。 */
@@ -49,8 +58,10 @@ public final class ApiKeyCacheCodec {
         }
         try {
             String expireAt = parts.get(4);
+            String apiKeyId = parts.get(5);
             return new ApiKeyView(parts.get(0), Long.parseLong(parts.get(1)), parts.get(2), parts.get(3),
-                    expireAt.isEmpty() ? null : Instant.ofEpochSecond(Long.parseLong(expireAt)));
+                    expireAt.isEmpty() ? null : Instant.ofEpochSecond(Long.parseLong(expireAt)),
+                    apiKeyId.isEmpty() ? null : Long.valueOf(apiKeyId));
         } catch (RuntimeException e) {
             return null;
         }

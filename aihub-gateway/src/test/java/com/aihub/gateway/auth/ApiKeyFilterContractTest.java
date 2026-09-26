@@ -51,7 +51,7 @@ class ApiKeyFilterContractTest {
             new AuthProperties(true, Duration.ofSeconds(30), Duration.ofMinutes(5), "http://127.0.0.1:1");
 
     private static final ApiKeyView VALID_VIEW =
-            new ApiKeyView("ak_valid", 7L, "acme", ApiKeyView.STATUS_ACTIVE, null);
+            new ApiKeyView("ak_valid", 7L, "acme", ApiKeyView.STATUS_ACTIVE, null, 42L);
 
     private static final String VALID_SECRET = "valid-secret";
 

@@ -62,6 +62,9 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
         assertThat(resolved.get().keyId()).isEqualTo(issued.keyId());
         assertThat(resolved.get().tenantName()).isEqualTo("t-mint");
         assertThat(resolved.get().usable()).isTrue();
+        // 决策 14：数值主键必须真的来自 api_key.id。本用例前面已清掉缓存，因此这一行走的正是
+        // loadFromDb 回源路径 —— 少了它，loadFromDb 少填一个参数（或填错列）不会有任何测试变红。
+        assertThat(resolved.get().apiKeyId()).isEqualTo(dbIdOf(issued.keyId()));
         assertThat(apiKeyService.resolve(ApiKeyHasher.hash("wrong-secret"))).isEmpty();
 
         // 用例名里的安全不变量必须真的被验证：直接查库，只看落盘的 hash。
@@ -97,6 +100,39 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
         ApiKeyView view = apiKeyService.resolve(ApiKeyHasher.hash(secretOf(issued))).orElseThrow();
 
         assertThat(view.usable()).isFalse();
+        // 决策 14 的**另一半**：本用例命中的是 mint 顺手写进 Redis 的那份载荷（不是回源），
+        // 因此它钉的是 mint 路径 —— 只补 loadFromDb 会让「刚铸出来的 key」那一条路径静默丢了数值主键。
+        assertThat(view.apiKeyId()).isEqualTo(dbIdOf(issued.keyId()));
+    }
+
+    /**
+     * 决策 14 的**不兼容变更之所以不需要清 Redis**，全部依据就是这条收敛行为：Redis 里已经躺着的旧
+     * 5 段载荷必须被当成**缓存未命中**（而不是异常）→ 回源 MySQL → 就地重写成 6 段。
+     *
+     * <p>只在 codec 层面钉「返回 {@code null}」证明不了这一点：调用方一个 {@code requireNonNull}、
+     * 一次把 null 当故障记 ERROR、或者直接把 decode 结果丢进断言，都会让「收敛」变成「故障」。
+     * 所以这里从 {@code ApiKeyService.resolve} 这一层走一遍真实路径，并断言拿回来的是**真相源**的值
+     * （旧载荷里的 {@code ak_legacy}/{@code tenantId=9} 不得泄漏出来），以及条目真的被重写了。
+     */
+    @Test
+    void legacyFiveFieldCachePayloadIsAMissNotAnErrorAndIsRewrittenInPlace() {
+        ApiKeyService.IssuedKey issued = apiKeyService.mint("t-legacy", "key-legacy", null);
+        String keyHash = ApiKeyHasher.hash(secretOf(issued));
+        String cacheKey = ApiKeyCacheCodec.CACHE_KEY_PREFIX + keyHash;
+
+        // 覆盖 mint 写的 6 段载荷，模拟「上一版 admin 留下的」旧格式 entry。
+        redisTemplate.opsForValue().set(cacheKey, "ak_legacy|9|t-legacy|ACTIVE|1800000000");
+        assertThat(redisTemplate.opsForValue().get(cacheKey)).isEqualTo("ak_legacy|9|t-legacy|ACTIVE|1800000000");
+
+        // 不抛异常，且回源拿到真相源的值 —— 旧段数载荷被当作未命中，而不是被解成半成品。
+        ApiKeyView view = apiKeyService.resolve(keyHash).orElseThrow();
+        assertThat(view.keyId()).as("必须回源到 MySQL，而不是采信旧载荷").isEqualTo(issued.keyId());
+        assertThat(view.apiKeyId()).isEqualTo(dbIdOf(issued.keyId()));
+
+        // 条目被就地重写成 6 段：下一个请求不再回源。
+        assertThat(ApiKeyCacheCodec.decode(redisTemplate.opsForValue().get(cacheKey)))
+                .as("旧 5 段载荷必须已被 6 段载荷覆盖")
+                .isEqualTo(view);
     }
 
     /**
@@ -190,6 +226,11 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
 
     private String secretOf(ApiKeyService.IssuedKey issued) {
         return issued.token().substring(issued.token().indexOf('.') + 1);
+    }
+
+    /** {@code api_key.id}：决策 14 的数值主键真相源（网关限流与计量都要用它）。 */
+    private Long dbIdOf(String keyId) {
+        return jdbcTemplate.queryForObject("select id from api_key where key_id = ?", Long.class, keyId);
     }
 
     private HttpHeaders jsonHeaders() {

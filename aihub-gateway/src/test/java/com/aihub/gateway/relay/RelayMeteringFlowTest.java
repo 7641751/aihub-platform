@@ -98,7 +98,7 @@ class RelayMeteringFlowTest {
         @Primary
         AdminClient adminClient() {
             return keyHash -> keyHash.equals(VALID_HASH)
-                    ? Mono.just(Optional.of(new ApiKeyView("ak_flow", 7L, "demo", ApiKeyView.STATUS_ACTIVE, null)))
+                    ? Mono.just(Optional.of(new ApiKeyView("ak_flow", 7L, "demo", ApiKeyView.STATUS_ACTIVE, null, 42L)))
                     : Mono.just(Optional.empty());
         }
     }

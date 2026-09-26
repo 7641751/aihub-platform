@@ -109,7 +109,8 @@ public interface AdminClient {
                         data.path("tenantId").asLong(),
                         data.path("tenantName").asText(),
                         data.path("status").asText(),
-                        expireAt.isNull() || expireAt.isMissingNode() ? null : Instant.parse(expireAt.asText())));
+                        expireAt.isNull() || expireAt.isMissingNode() ? null : Instant.parse(expireAt.asText()),
+                        data.path("apiKeyId").isNumber() ? data.get("apiKeyId").asLong() : null));
             } catch (Exception e) {
                 log.error("admin 回源响应畸形（非「key 不存在」），按「key 不存在」处理（fail-closed）: {}",
                         e.toString());

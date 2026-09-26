@@ -66,7 +66,8 @@ public class ApiKeyService {
         entity.setExpireAt(expireAt);
         apiKeyMapper.insert(entity);
 
-        cache(keyHash, new ApiKeyView(keyId, tenant.getId(), tenantName, ApiKeyView.STATUS_ACTIVE, expireAt));
+        cache(keyHash, new ApiKeyView(keyId, tenant.getId(), tenantName, ApiKeyView.STATUS_ACTIVE, expireAt,
+                entity.getId()));
         log.info("已铸造 API Key keyId={} tenant={} name={}", keyId, tenantName, keyName);
         return new IssuedKey(keyId + "." + secret, keyId);
     }
@@ -90,7 +91,7 @@ public class ApiKeyService {
         TenantEntity tenant = tenantMapper.selectById(entity.getTenantId());
         String tenantName = tenant == null ? "" : tenant.getName();
         return Optional.of(new ApiKeyView(entity.getKeyId(), entity.getTenantId(), tenantName,
-                entity.getStatus(), entity.getExpireAt()));
+                entity.getStatus(), entity.getExpireAt(), entity.getId()));
     }
 
     private TenantEntity findOrCreateTenant(String tenantName) {

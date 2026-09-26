@@ -65,18 +65,19 @@ class ApiKeyToolingTest {
     @Test
     void cacheCodecRoundTripsANormalView() {
         ApiKeyView view = new ApiKeyView("ak_n60pawrjbxfj5oez", 42L, "acme", ApiKeyView.STATUS_ACTIVE,
-                Instant.ofEpochSecond(1_800_000_000L));
+                Instant.ofEpochSecond(1_800_000_000L), 42L);
 
         assertThat(ApiKeyCacheCodec.decode(ApiKeyCacheCodec.encode(view))).isEqualTo(view);
     }
 
     @Test
     void cacheCodecRoundTripsANullExpireAt() {
-        ApiKeyView view = new ApiKeyView("ak_n60pawrjbxfj5oez", 42L, "acme", ApiKeyView.STATUS_ACTIVE, null);
+        ApiKeyView view = new ApiKeyView("ak_n60pawrjbxfj5oez", 42L, "acme", ApiKeyView.STATUS_ACTIVE, null, 42L);
 
         String payload = ApiKeyCacheCodec.encode(view);
 
-        assertThat(payload).endsWith("|");
+        // 空的 expireAt 段后面紧跟数值主键段，因此固定向量是 `...|ACTIVE||42` 而不是以 `|` 结尾。
+        assertThat(payload).isEqualTo("ak_n60pawrjbxfj5oez|42|acme|ACTIVE||42");
         assertThat(ApiKeyCacheCodec.decode(payload)).isEqualTo(view);
     }
 
@@ -88,7 +89,7 @@ class ApiKeyToolingTest {
     void cacheCodecRoundTripsNamesContainingDelimiterAndBackslash() {
         for (String tenantName : List.of("ac|me", "ac\\me", "ac\\|me", "a|b\\\\c|d\\", "\\", "|", "||\\\\|")) {
             ApiKeyView view = new ApiKeyView("ak_" + tenantName, 7L, tenantName, ApiKeyView.STATUS_ACTIVE,
-                    Instant.ofEpochSecond(1_800_000_001L));
+                    Instant.ofEpochSecond(1_800_000_001L), 42L);
 
             String payload = ApiKeyCacheCodec.encode(view);
 
@@ -103,10 +104,29 @@ class ApiKeyToolingTest {
         assertThat(ApiKeyCacheCodec.decode(null)).isNull();
         assertThat(ApiKeyCacheCodec.decode("")).isNull();
         assertThat(ApiKeyCacheCodec.decode("not-a-key-view")).isNull();
-        assertThat(ApiKeyCacheCodec.decode("ak_x|42|acme|ACTIVE")).isNull();          // 只有 4 段
-        assertThat(ApiKeyCacheCodec.decode("ak_x|42|acme|ACTIVE|1|extra")).isNull();  // 有 6 段
-        assertThat(ApiKeyCacheCodec.decode("ak_x|not-a-long|acme|ACTIVE|")).isNull();
-        assertThat(ApiKeyCacheCodec.decode("ak_x|42|acme|ACTIVE|not-an-epoch")).isNull();
+        assertThat(ApiKeyCacheCodec.decode("ak_x|42|acme|ACTIVE")).isNull();               // 只有 4 段
+        assertThat(ApiKeyCacheCodec.decode("ak_x|42|acme|ACTIVE|1|42|extra")).isNull();    // 有 7 段
+        assertThat(ApiKeyCacheCodec.decode("ak_x|not-a-long|acme|ACTIVE||")).isNull();
+        assertThat(ApiKeyCacheCodec.decode("ak_x|42|acme|ACTIVE|not-an-epoch|")).isNull();
+        assertThat(ApiKeyCacheCodec.decode("ak_x|42|acme|ACTIVE||not-a-long")).isNull();
+    }
+
+    /** 第 6 段是数值主键：非空时必须严格往返，且载荷的字面量形态被钉死。 */
+    @Test
+    void cacheCodecRoundTripsTheNumericApiKeyId() {
+        ApiKeyView view = new ApiKeyView("ak_abc", 7L, "demo", ApiKeyView.STATUS_ACTIVE, null, 42L);
+
+        assertThat(ApiKeyCacheCodec.encode(view)).isEqualTo("ak_abc|7|demo|ACTIVE||42");
+        assertThat(ApiKeyCacheCodec.decode(ApiKeyCacheCodec.encode(view))).isEqualTo(view);
+    }
+
+    /**
+     * 旧载荷（5 段）必须被判为畸形 → 缓存未命中 → 回源 admin → 重写，而不是解出一个
+     * {@code apiKeyId = null} 的「半成品」—— 后者会让限流静默丢掉 key 级策略（决策 7 修订的那一维）。
+     */
+    @Test
+    void legacyFiveFieldPayloadsAreRejectedSoTheCacheConverges() {
+        assertThat(ApiKeyCacheCodec.decode("ak_abc|7|demo|ACTIVE|1800000000")).isNull();
     }
 
     // --- InternalHmac -----------------------------------------------------
@@ -198,10 +218,10 @@ class ApiKeyToolingTest {
         Instant future = Instant.now().plusSeconds(3600);
         Instant past = Instant.now().minusSeconds(3600);
 
-        assertThat(new ApiKeyView("ak_1", 1L, "t", ApiKeyView.STATUS_ACTIVE, null).usable()).isTrue();
-        assertThat(new ApiKeyView("ak_1", 1L, "t", ApiKeyView.STATUS_ACTIVE, future).usable()).isTrue();
-        assertThat(new ApiKeyView("ak_1", 1L, "t", ApiKeyView.STATUS_ACTIVE, past).usable()).isFalse();
-        assertThat(new ApiKeyView("ak_1", 1L, "t", "REVOKED", future).usable()).isFalse();
+        assertThat(new ApiKeyView("ak_1", 1L, "t", ApiKeyView.STATUS_ACTIVE, null, null).usable()).isTrue();
+        assertThat(new ApiKeyView("ak_1", 1L, "t", ApiKeyView.STATUS_ACTIVE, future, null).usable()).isTrue();
+        assertThat(new ApiKeyView("ak_1", 1L, "t", ApiKeyView.STATUS_ACTIVE, past, null).usable()).isFalse();
+        assertThat(new ApiKeyView("ak_1", 1L, "t", "REVOKED", future, null).usable()).isFalse();
     }
 
     /**
