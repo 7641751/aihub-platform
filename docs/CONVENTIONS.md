@@ -43,7 +43,9 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 
 ## 4. 数据面错误契约
 
-`/v1/**` 的错误一律是 OpenAI 兼容体（`GatewayErrors.serialize`），**不是** admin 的 `{code,message,data}` 信封：
+`/v1/**` **上由网关处理**的路径，错误一律是 OpenAI 兼容体（`GatewayErrors.serialize`），**不是** admin 的 `{code,message,data}` 信封：
+
+> **已知缺口（2026-09-26 的 compose 全栈验收实测；M1/M2 起就有的形状，M3 未改动）**：`/v1/**` 下**没有处理器**的路径 / 方法**不走**这套体，返回的是 Spring 默认错误体 `{"timestamp","path","status","error","requestId"}`（仍带 `x-request-id`，因为 `RequestIdFilter` 排在最前）：实测 `POST /v1/models` → `405`、`POST /v1/embeddings` → `404`、`GET /v1/nope` → `404`。所以「`/v1/**` 一律 OpenAI 形状」这句话**只对网关实际处理到的路径成立**；今天**没有**为 404/405 注册 OpenAI 形状的处理器，补上它属未来里程碑。未改动生产代码，本轮只登记事实。
 
 ```json
 {"error":{"message":"...","type":"...","param":null,"code":"..."}}
@@ -53,7 +55,7 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 
 | `code` | HTTP | `type` | 触发场景 | 由谁产出 |
 |---|---|---|---|---|
-| `invalid_api_key` | `401` | `invalid_request_error` | 缺 `Authorization`、格式不是 `Bearer <key_id>.<secret>`、key 不存在 / 已停用 / 已过期，以及**所有密钥来源都失败**（Redis 未命中且 admin 不可达 / 5xx，见第 5 节） | `ApiKeyAuthFilter` |
+| `invalid_api_key` | `401` | `invalid_request_error` | 缺 `Authorization`、格式不是 `Bearer <key_id>.<secret>`、key 不存在 / 已停用 / 已过期，以及**所有密钥来源都失败**（Redis 未命中且 admin 不可达 / 5xx，**或 resolve 这一跳超过网关给内部调用的 3 秒预算** —— admin 自身健康时也会发生，见第 5 节） | `ApiKeyAuthFilter` |
 | `rate_limit_exceeded` | `429` | `rate_limit_error` | 租户 / API Key 超过限流策略（`rate_limit_policy` 的 qps/burst）。**降级到本机令牌桶时同样回 429**（降级 ≠ 放行） | `RateLimitFilter` |
 | `model_not_found` | `404` | `invalid_request_error` | 请求的 `model` 在配置快照的 `model_route` 里没有任何可用候选（且没有遗留单渠道可回落） | `ChatRelayController` |
 | `upstream_unreachable` | `502` | `api_error` | 连不上上游（`WebClientRequestException`）；上游的**业务**错误状态码不走这里 | `ChatRelayController` |
@@ -66,7 +68,7 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - **`/v1/**` 目前没有全局 500 处理器**：网关自身未预期的异常落到 Spring WebFlux 的默认错误响应，形状由 `Accept` 决定（JSON 或 HTML 错误页），**不保证**是上面的 OpenAI 体。新增数据面错误码时请走 `GatewayErrors.write`，不要依赖默认处理。
 - **上表的 `internal_error` 行不可达**：`GatewayErrors.write` 先设置调用方给的状态码、再调用 `serialize`，因此 `serialize` 的 catch 分支（它才写 `internal_error`）**只会复用调用方原本的状态码**。结果是一个 `429`/`502`/`401` 状态码配一具 `{"code":"internal_error"}` 的兜底体 —— 「500 + internal_error」这个组合在代码里没有任何路径能产生。它不是待修的行为（兜底体的意义是「连错误体都编不出来时仍然给客户端一个合法 JSON」），但**不要**再把它当成一个可触发的错误码来写文档或告警规则。
 - admin 的 `{code,message,data}` 信封只属于 admin 自己的接口（含 `/internal/**` 的 401）。数据面不套用，admin 也不套用 OpenAI 形状。
-- **设计文档 §9 的「流开始前失败 → 统一错误体 `{"code","message"}`」已被取代**：`/v1/**` 的错误体**一律**是上面的 OpenAI 形状。M1 用官方 OpenAI Python SDK 验收过这条契约，给数据面套 admin 信封会让所有 SDK 的 `error.message` 取值路径同时失效 —— 那不是「按 spec 实现」，是回归。admin 与 `/internal/**` 仍然是 `{"code","message","data"}`。
+- **设计文档 §9 的「流开始前失败 → 统一错误体 `{"code","message"}`」已被取代**：`/v1/**` 上**由网关处理**的错误体是上面的 OpenAI 形状（**例外是「没有处理器」的 404/405**，见本节开头登记的已知缺口）。M1 用官方 OpenAI Python SDK 验收过这条契约，给数据面套 admin 信封会让所有 SDK 的 `error.message` 取值路径同时失效 —— 那不是「按 spec 实现」，是回归。admin 与 `/internal/**` 仍然是 `{"code","message","data"}`。
 - **`429` 是限流用户唯一该看的信号**：`rate_limit_exceeded` 附带 `Retry-After`（秒）、`Retry-After-MS`（毫秒，Azure 风格）与 IETF 的 `RateLimit-Limit` / `RateLimit-Remaining` 两类头（`limit, burst` 形状，见 6.6 节）。客户端退避请读 `Retry-After`，不要自己猜窗口。这些头**由网关自己的限流判定写入，不是「只在网关拒绝时」才出现**：放行响应同样带 `RateLimit-Limit` / `RateLimit-Remaining`（`RateLimitFilter.writeDecisionHeaders` 对放行与拒绝都写这两条），只有 `Retry-After` / `Retry-After-MS` 是拒绝专有。**网关不写 `RateLimit-Reset`** —— 令牌桶是惰性补充的，没有可上报的重置时刻；`ratelimit-reset` 在网关里只是透传白名单里的一个**上游**头名。上游返回的 `Retry-After` / `x-ratelimit-*` 属于透传白名单（第 3 节），两者语义相同、来源不同。
 
 ## 5. 内部接口约定（`/internal/**`）
@@ -80,6 +82,7 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - 共享密钥来自 `aihub.internal.secret`（环境变量 `AIHUB_INTERNAL_SECRET`），两端必须配同一个值；密钥为空时 `verify` 一律返回 `false`（fail-closed），admin 侧会在启动日志里大声告警但仍允许启动。
 - **改一处必须同时改另一处**：admin 的 `InternalAuthFilter` 与 gateway 的 `AdminClient.Http` 是这份契约的两端，任何一端改了路径、header 名、方法名或时间窗，另一端都要跟着改，并同步更新本节。
 - **「所有来源都失败」与「key 不存在」在客户端不可区分（有意为之）**：Redis 未命中且 admin 不可达 / 超时 / 5xx / 配置错时，gateway 一律按「key 不存在」处理并回 `401 invalid_api_key` —— 这是 fail-closed 的代价，平台级故障对每个客户端都表现为「你的 key 错了」。二者的区分只落在 gateway 日志上：admin 回源失败打 **ERROR**（并区分「key 不存在」与传输 / 5xx），真正的「key 不存在」只打 DEBUG。
+- **已知可用性缺口：Redis 不可用 + 鉴权缓存未命中时，健康 admin 的回源也会被 3 秒预算掐掉（2026-09-26 的 compose 全栈验收实测，三次独立复现；没有改动生产代码）**：Redis 停机时，admin 侧 `ApiKeyService.resolve` 的「读缓存 + 回写缓存」各要等一次 Redis 超时，于是 admin 的回答超过 gateway `AdminClientConfig` 给内部跳的 `responseTimeout(Duration.ofSeconds(3))`；gateway 把这条连接当传输失败、按上面的约定 fail-closed 回 `401 invalid_api_key`，并把这次的 MISS 写进本地负缓存（`aihub.auth.local-cache-ttl` 默认 30 秒），于是**连 Redis 恢复以后，同一把 key 还要等负缓存过期（约 30 秒）才回到 200**。日志形态固定：`ApiKeyResolver` 的「Redis 读取失败，降级回源 admin」WARN 之后**恰好 3.01 秒**是 `AdminClient$Http` 的 fail-closed ERROR。影响：全栈上「Redis 挂了 ⇒ 降级到本机桶、仍拒绝超额」**观察不到**，因为请求在鉴权这一步就结束了。**今天没有任何缓解措施**（除了等本地负缓存自然过期，没有别的自动恢复手段）；修复方向属**下一个里程碑**：给 resolve 那次内部跳更大的预算，或让 resolve 路径不依赖 Redis 在线。
 
 ## 6. API Key 约定
 
@@ -87,7 +90,7 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - 库中只存 `SHA-256(secret)` 的小写十六进制（64 字符，`key_hash CHAR(64)`），**永不存明文**；用 `ApiKeyHasher.hash` 计算，admin 与 gateway 共用这一份实现。
 - **明文只在铸造时打印一次**，之后无法取回；丢了只能重新铸一把。
 - 铸造走 `ApiKeyMintRunner`（本地 CLI 路径，默认关闭）：`--aihub.mint-key.enabled=true`（容器里是 `AIHUB_MINT_KEY_ENABLED=true`）配合 `--aihub.mint-key.tenant-name` / `--aihub.mint-key.name` / `--aihub.mint-key.valid-days`。**它不是 HTTP 接口** —— 公网上不存在造密钥的入口。
-- gateway 侧的解析顺序是 Caffeine（本地，30s）→ Redis（5m，key 用 `ApiKeyCacheCodec.CACHE_KEY_PREFIX`）→ admin 内部接口；任何一级故障都降级到下一级，**绝不能因为缓存故障而拒绝请求**。「是否可用」的判据只有一处：`ApiKeyView.usable()`。
+- gateway 侧的解析顺序是 Caffeine（本地，30s）→ Redis（5m，key 用 `ApiKeyCacheCodec.CACHE_KEY_PREFIX`）→ admin 内部接口；任何一级故障都降级到下一级，**绝不能因为缓存故障而拒绝请求**（⚠️ 但 2026-09-26 的全栈验收实测：**Redis 不可用 + 缓存未命中时这条约定不成立** —— admin 的回源撞上 3 秒内部跳预算，请求在鉴权处就 fail-closed 成 `401`，见第 5 节最后一条）。「是否可用」的判据只有一处：`ApiKeyView.usable()`。
 - **Redis 是鉴权的信任源，不只是缓存**：gateway 把 Redis 的命中当作**权威结果**，命中即放行、不再回查 MySQL；因此任何能写 `aihub:apikey:<sha256(secret)>` 的对端都能伪造出一把可用的 API Key。Redis 必须与控制面同等级隔离保护（网络、凭据、访问审计）。同样的原因，密钥的**吊销 / 停用不会立刻生效**，要等缓存过期：本机 Caffeine ≤30s、集群 Redis ≤5m。
 - `docker-compose.yml` 里的 Redis 是**本地开发**配置：无密码，宿主映射为 `127.0.0.1:6380:6379`（只有本机能连；容器之间仍走 `redis:6379`）。生产加固 —— `requirepass` 并把它接进两个服务的配置、以及网络隔离 —— **没有在 M3 做**（M3 已收口），与 README「已知边界」里那条同属**未来里程碑**的生产部署要求；M1 只做了最小收敛。
 - 不要新增第二套 key 格式或第二个哈希实现；控制台的签发 / 列表 / 吊销接口属于 M4。
@@ -222,8 +225,13 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
   本地命中也会做一次 **Redis 版本比对**（M3 没有 Pub/Sub 发布方，这是唯一的跨实例收敛手段）。
   同一次缺失由 **singleflight** 合并成一次回源；回源失败/超时后进入 **cooldown**（`aihub.config.refresh-cooldown`，
   默认 5 秒）以请求速率遏制控制面；两级缓存都空且 admin 不可达时，服务**内存里的 last-good 快照**
-  （永不过期，取版本更高的那个），最后才是遗留单渠道。**热生效延迟**因此是「本地 TTL 30 秒 + 版本比对」，
-  而不是推送。
+  （永不过期，取版本更高的那个），最后才是遗留单渠道。**热生效延迟不能按本机的 30 秒 TTL 来读 —— 共享 Redis 条目才是实际的上界**（2026-09-26 的
+  compose 全栈验收实测，`.superpowers/sdd/m3-acceptance.md` 第 7 节）：本地副本 30 秒过期之后，网关读到的
+  是 Redis 里那份**同版本的旧快照**（version 相等 → 采用它），只有共享条目也消失（`snapshotTtl` 默认
+  **10 分钟**到期、或 Redis 不可用）才会回源 admin。实测：改 `channel.base_url` 后 **101 秒**新快照仍
+  不可见（用一条只读的 `probe-model` 路由做探针），删掉 `aihub:config:snapshot` 之后 **15 秒**内才收敛。
+  **部署含义：只要共享条目还在，控制面的一次变更最长要约 10 分钟才到达数据面**，除非运维刷新或删除该
+  条目 —— M3 没有主动刷新共享条目的手段，按「30 秒热生效」操作会等错时间。
 - **`GET /v1/models` 的冷缓存读可能回源一次**：它读的是同一个 `ConfigClient`，缓存冷/过期时会**同步**
   回源 admin（有 5 秒上界），因此这个端点的首字节延迟在冷启动时可能达到秒级。生产默认
   `aihub.ratelimit.enabled=true`，请求链在限流过滤器里已经被切到 `boundedElastic`；**网关测试的默认是
