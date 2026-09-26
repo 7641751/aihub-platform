@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientRequestException;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -101,5 +102,54 @@ class UpstreamClientFactoryTest {
         assertThatThrownBy(() -> client.post().uri("/v1/chat/completions").bodyValue("{}")
                 .retrieve().bodyToMono(String.class).block(Duration.ofSeconds(5)))
                 .isInstanceOf(WebClientRequestException.class);
+    }
+
+    /**
+     * 遗留客户端的缓存键**不得**把明文密钥带进内存：那张 map 的生存期与进程同长，
+     * 一次 heap dump 就能把上游密钥整串捞出来。键改成 {@code (baseUrl, 密钥摘要)}，
+     * 而发给上游的 {@code Authorization} 头仍然是原文 —— 两者不能混为一谈。
+     */
+    @Test
+    void legacyCacheKeyNeverEmbedsThePlaintextApiKey() {
+        String secret = "sk-legacy-plaintext-must-not-be-a-map-key";
+        UpstreamClientFactory factory = new UpstreamClientFactory(legacy(secret));
+
+        WebClient client = factory.legacy();
+
+        assertThat(factory.cachedClientKeys())
+                .as("缓存键里出现明文密钥就是一个可被 heap dump 捞出的泄漏")
+                .noneMatch(key -> key.contains(secret))
+                // 摘要仍然必须真的区分不同的密钥，否则「键里没有明文」会退化成「所有密钥共用一个客户端」。
+                .anyMatch(key -> key.contains(sha256Hex(secret).substring(0, 8)));
+        assertThat(factory.cachedClients()).isEqualTo(1);
+
+        upstream.enqueueJson(200, FakeUpstream.completionJson());
+        client.post().uri("/v1/chat/completions").bodyValue("{}").retrieve().bodyToMono(String.class).block();
+
+        assertThat(upstream.lastRequest().headers())
+                .as("键换了，发给上游的密钥不能跟着变")
+                .containsEntry("authorization", "Bearer " + secret);
+    }
+
+    /** 同一 base-url + 同一密钥仍然命中同一个客户端；换密钥必须换客户端（否则会串号）。 */
+    @Test
+    void legacyClientsAreStillCachedByBaseUrlAndKeyIdentity() {
+        UpstreamClientFactory factory = new UpstreamClientFactory(legacy("key-one"));
+
+        assertThat(factory.legacy()).isSameAs(factory.legacy());
+        assertThat(factory.cachedClients()).isEqualTo(1);
+
+        WebClient other = new UpstreamClientFactory(legacy("key-two")).legacy();
+
+        assertThat(other).isNotSameAs(factory.legacy());
+    }
+
+    static String sha256Hex(String value) {
+        try {
+            var digest = java.security.MessageDigest.getInstance("SHA-256");
+            return java.util.HexFormat.of().formatHex(digest.digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 }

@@ -8,8 +8,13 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.netty.http.client.HttpClient;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.util.HexFormat;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -48,11 +53,40 @@ public class UpstreamClientFactory {
      * M1 形状的遗留客户端：带 {@code aihub.upstream.api-key} 的默认 Authorization。
      * **保留它**是为了让单渠道配置（含既有测试）继续按原样工作 —— 否则冷启动兜底路径
      * 会丢掉上游密钥。
+     *
+     * <p><b>缓存键里放的是密钥的摘要，不是明文</b>：这张 map 的生存期与进程同长，把
+     * {@code aihub.upstream.api-key} 的原文镶进 key 等于让一次 heap dump 就能捞出上游密钥
+     * （它不进日志，但仍然留在内存里）。摘要保留了「不同密钥 → 不同客户端」这条语义，
+     * 而发给上游的 {@code Authorization} 头照样是原文 —— 缓存身份与传输凭据是两件事。
      */
     public WebClient legacy() {
-        String key = "legacy|" + legacyProperties.baseUrl() + "|" + legacyProperties.apiKey();
+        String key = "legacy|" + legacyProperties.baseUrl() + "|" + apiKeyDigest(legacyProperties.apiKey());
         return clients.computeIfAbsent(key, ignored -> build(legacyProperties.baseUrl(),
                 Duration.ofSeconds(120), legacyProperties.apiKey()));
+    }
+
+    /**
+     * 密钥摘要（十六进制 SHA-256），空密钥用一个明确的哨兵。
+     * <p>{@link MessageDigest} 不是线程安全的，因此每次调用新建一个实例（这不在请求路径上：
+     * 只发生在缓存 miss 时）。
+     */
+    private static String apiKeyDigest(String apiKey) {
+        if (!StringUtils.hasText(apiKey)) {
+            return "no-key";
+        }
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(apiKey.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 是 JDK 必须实现的算法，走不到这里；兜底不把明文放回 key。
+            return "unhashed";
+        }
+    }
+
+    /** 已缓存客户端的键（测试与巡检用）。**不含任何明文密钥** —— 这正是本类要守的性质。 */
+    public Set<String> cachedClientKeys() {
+        return Set.copyOf(clients.keySet());
     }
 
     public int cachedClients() {

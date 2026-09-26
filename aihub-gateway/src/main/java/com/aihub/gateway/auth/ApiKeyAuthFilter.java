@@ -30,6 +30,12 @@ public class ApiKeyAuthFilter implements WebFilter {
     public static final String ATTRIBUTE_KEY_VIEW = "aihub.apiKeyView";
 
     /**
+     * 本次请求密钥的 SHA-256 存放位置。M3 的限流用它当桶的第二维（{@code tenant + api_key}）。
+     * 存**哈希**而不是 secret：它本来就已经算出来了，而且哈希能安全地进日志/指标（secret 不能）。
+     */
+    public static final String ATTRIBUTE_KEY_HASH = "aihub.apiKeyHash";
+
+    /**
      * 守备范围。**必须**用 {@link PathPattern}，不能用 {@code path.startsWith("/v1/")} 这种字符串前缀：
      * {@code getPath().value()} 是请求行里的**原始（未解码）**路径，而 handler mapping 按**解码后**的
      * 路径匹配、并且会剥掉 path parameter。两者不一致就产生绕过 ——
@@ -78,13 +84,17 @@ public class ApiKeyAuthFilter implements WebFilter {
         }
 
         // 哈希实现只有一份：com.aihub.common.apikey.ApiKeyHasher（admin 铸造端用的也是它）。
-        return resolver.resolve(ApiKeyHasher.hash(secret))
+        // 哈希同时是 M3 限流桶的第二维，因此在这里（而不是在限流器里）算一次并写进属性：
+        // 限流器不该拿到 secret，也不该再算一遍。
+        String keyHash = ApiKeyHasher.hash(secret);
+        return resolver.resolve(keyHash)
                 .switchIfEmpty(Mono.just(UNRESOLVED))
                 .flatMap(view -> {
                     if (!view.usable()) {
                         return unauthorized(exchange, INVALID_KEY_MESSAGE);
                     }
                     exchange.getAttributes().put(ATTRIBUTE_KEY_VIEW, view);
+                    exchange.getAttributes().put(ATTRIBUTE_KEY_HASH, keyHash);
                     return chain.filter(exchange);
                 });
     }

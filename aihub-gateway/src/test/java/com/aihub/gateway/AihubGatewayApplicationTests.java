@@ -53,6 +53,12 @@ class AihubGatewayApplicationTests {
         assertThat(environment.getProperty("management.endpoint.health.show-details")).isEqualTo("always");
         // 同时确认测试自己的那一行也合并在内（两份配置真的叠加，而不是二选一）。
         assertThat(environment.getProperty("management.health.redis.enabled")).isEqualTo("false");
+        // 限流的开关同样只写在测试资源里（M3 Task 9）：绝大多数网关测试只关心转发与鉴权，
+        // 不该为每个请求先撞一次「Redis 指向不存在端口」的超时。端到端验证限流的
+        // RateLimitWiringTest 用 @DynamicPropertySource 显式打开它，因此这条为 false 是前提而不是泄漏。
+        assertThat(environment.getProperty("aihub.ratelimit.enabled")).isEqualTo("false");
+        // 主配置里的默认值仍然是「开」，且键名一致 —— 否则上面那条 false 可能只是「两边都没有这个键」。
+        assertThat(environment.getProperty("aihub.ratelimit.max-local-buckets")).isEqualTo("100000");
         // rabbit 健康指示器的开关同样只写在主配置里，且是「网关测试不需要活 broker」的前提：
         // 没有它，healthzReturnsUp 会静默依赖一个正在跑的 RabbitMQ（本机恰好有一个时全绿，
         // CI / 别的机器上随机红）。

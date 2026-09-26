@@ -53,6 +53,11 @@ aihub:
     local-ttl: 30s
     snapshot-ttl: 10m
     max-local-snapshot-sources: 300
+  # 数据面限流（仅 /v1/**）。默认开：限流是保护上游的手段，不该靠部署时记得打开。
+  # 关掉它 = 完全不做判定（过滤器直接放行），桶的本机容量上界仍然保留。
+  ratelimit:
+    enabled: ${AIHUB_RATELIMIT_ENABLED:true}
+    max-local-buckets: 100000
   auth:
     enabled: ${AIHUB_AUTH_ENABLED:true}
     local-cache-ttl: 30s

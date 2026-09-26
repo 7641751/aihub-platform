@@ -83,6 +83,15 @@ public final class LocalRateLimiter {
         return (int) buckets.estimatedSize();
     }
 
+    /**
+     * 已跟踪的桶的**完整键**（含 {@link #KEY_PREFIX}），只给测试看：桶布局（尤其是「前缀只有一层」）
+     * 是控制器评审的验收点（G4），而它对任何外部行为都不可见。返回的是快照，不暴露内部 map。
+     */
+    java.util.Set<String> trackedKeys() {
+        buckets.cleanUp();
+        return java.util.Set.copyOf(buckets.asMap().keySet());
+    }
+
     /** 清空所有桶（测试用；生产没有任何调用点）。 */
     public void clear() {
         buckets.invalidateAll();
