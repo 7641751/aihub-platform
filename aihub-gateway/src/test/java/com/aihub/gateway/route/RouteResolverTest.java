@@ -5,6 +5,8 @@ import com.aihub.common.config.ConfigSnapshot;
 import com.aihub.common.config.ModelRouteDescriptor;
 import com.aihub.gateway.config.LegacyChannel;
 import com.aihub.gateway.upstream.UpstreamProperties;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -41,6 +43,13 @@ class RouteResolverTest {
                 RandomGeneratorFactory.of("L64X128MixRandom").create(seed));
     }
 
+    /** 带注册表的测试接缝（brief 的 3 参数构造器仍原样保留）。 */
+    private static RouteResolver resolver(ConfigSnapshot snapshot, ChannelCircuitBreaker breaker, long seed,
+                                          MeterRegistry registry) {
+        return new RouteResolver(() -> snapshot, breaker,
+                RandomGeneratorFactory.of("L64X128MixRandom").create(seed), registry);
+    }
+
     /** 永不熔断的替身：只覆盖 isOpen，其余方法不被本类使用。 */
     private static ChannelCircuitBreaker noCircuit() {
         return new ChannelCircuitBreaker(null, System::currentTimeMillis) {
@@ -67,9 +76,12 @@ class RouteResolverTest {
 
     @Test
     void picksTheLowestPriorityNumberGroupFirst() {
+        // 权重刻意**反着配**：高优先级的 id=2 只有 weight=1，低优先级的 id=1 有 weight=1000。
+        // 若实现只做一次「忽略 priority 的全局权重抽取」，首位几乎必然是 id=1，这条用例就会红；
+        // 因此它真正钉住的是「priority 压过 weight」，而不是两种排法都凑巧给出 [2, 1]。
         ConfigSnapshot snapshot = snapshot(List.of(
-                new ModelRouteDescriptor("m", 1L, 1, 5, "ACTIVE"),
-                new ModelRouteDescriptor("m", 2L, 1000, 0, "ACTIVE")),
+                new ModelRouteDescriptor("m", 1L, 1000, 5, "ACTIVE"),
+                new ModelRouteDescriptor("m", 2L, 1, 0, "ACTIVE")),
                 List.of(channel(1L, "low-priority-number"), channel(2L, "primary")));
 
         assertThat(resolver(snapshot, noCircuit(), 7L).candidates("m"))
@@ -115,6 +127,31 @@ class RouteResolverTest {
         assertThat(candidates).as("全熔断也必须给出候选（best-effort）").isNotEmpty();
         assertThat(candidates).extracting(ChannelDescriptor::id).contains(1L, 2L);
         assertThat(candidates.get(0).id()).as("仍然优先最高优先级的组").isEqualTo(1L);
+    }
+
+    /**
+     * 决策 10 的「最后手段」层同样必须**按权重随机**：全熔断时首选渠道不能永远由配置顺序决定，
+     * 否则一条 weight=0 的渠道会永久压过 weight=1000 的渠道，relay 的首次尝试也就不再按权重分散。
+     */
+    @Test
+    void distributesByWeightInsideTheAllBrokenTierToo() {
+        ConfigSnapshot snapshot = snapshot(List.of(
+                new ModelRouteDescriptor("m", 1L, 100, 0, "ACTIVE"),
+                new ModelRouteDescriptor("m", 2L, 300, 0, "ACTIVE")),
+                List.of(channel(1L, "one"), channel(2L, "three")));
+        RouteResolver resolver = resolver(snapshot, brokenOnly(1L, 2L), 20260923L);
+        int firstCount = 0;
+        int rounds = 4_000;
+
+        for (int i = 0; i < rounds; i++) {
+            if (resolver.candidates("m").get(0).id() == 1L) {
+                firstCount++;
+            }
+        }
+
+        assertThat(firstCount)
+                .as("全熔断时最高优先级组内同样按权重随机（配置顺序不得成为永久首选）")
+                .isBetween((int) (rounds * 0.20), (int) (rounds * 0.30));
     }
 
     @Test
@@ -228,6 +265,69 @@ class RouteResolverTest {
         List<Long> second = ids(resolver(snapshot, noCircuit(), 999L).candidates("m"));
 
         assertThat(first).isEqualTo(second);
+    }
+
+    /**
+     * 决策 10 要求全熔断分支「WARN + **计数器**」：API 只返回 {@code List<ChannelDescriptor>}，
+     * 里面没有任何熔断标记，调用方**无法**自己认出这种情况，所以计数只能在这里做。
+     */
+    @Test
+    void countsTheAllBrokenFallbackInTheRegistry() {
+        MeterRegistry registry = new SimpleMeterRegistry();
+        ConfigSnapshot snapshot = snapshot(List.of(
+                new ModelRouteDescriptor("m", 1L, 100, 0, "ACTIVE"),
+                new ModelRouteDescriptor("m", 2L, 100, 1, "ACTIVE")),
+                List.of(channel(1L, "broken"), channel(2L, "standby")));
+        RouteResolver resolver = resolver(snapshot, brokenOnly(1L, 2L), 7L, registry);
+
+        resolver.candidates("m");
+        resolver.candidates("m");
+
+        assertThat(registry.counter(RouteResolver.ALL_BROKEN_METRIC).count())
+                .as("全熔断分支每次调用都计数（决策 10 的计数器）").isEqualTo(2.0);
+
+        // 反例：健康路径不该碰到这个计数器，否则「全站熔断」这个告警信号会被日常流量淹没。
+        MeterRegistry healthyRegistry = new SimpleMeterRegistry();
+        resolver(snapshot, noCircuit(), 7L, healthyRegistry).candidates("m");
+
+        assertThat(healthyRegistry.counter(RouteResolver.ALL_BROKEN_METRIC).count())
+                .as("非全熔断路径不得计数").isZero();
+    }
+
+    /** 同一个 (model, channel) 出现两行 ACTIVE 路由时，渠道不能被放进候选两次（否则权重被双计）。 */
+    @Test
+    void deduplicatesRepeatedModelChannelRows() {
+        ConfigSnapshot snapshot = snapshot(List.of(
+                new ModelRouteDescriptor("m", 1L, 1000, 0, "ACTIVE"),
+                new ModelRouteDescriptor("m", 2L, 1, 0, "ACTIVE"),
+                new ModelRouteDescriptor("m", 1L, 1, 0, "ACTIVE")),
+                List.of(channel(1L, "heavy"), channel(2L, "thin")));
+        RouteResolver resolver = resolver(snapshot, noCircuit(), 20260923L);
+        int headIsOne = 0;
+        int rounds = 1_000;
+
+        for (int i = 0; i < rounds; i++) {
+            if (resolver.candidates("m").get(0).id() == 1L) {
+                headIsOne++;
+            }
+        }
+
+        assertThat(resolver.candidates("m")).as("重复的 (model, channel) 行不得把渠道放进候选两次")
+                .hasSize(2);
+        assertThat(headIsOne).as("保留第一次出现的 weight=1000，而不是最后一行的 weight=1")
+                .isGreaterThan((int) (rounds * 0.90));
+    }
+
+    /** 冷启动时 supplier 可能还没有快照（返回 null）：必须退化为空快照，而不是让请求路径 NPE。 */
+    @Test
+    void nullSnapshotFallsBackToTheEmptySnapshot() {
+        RouteResolver resolver = new RouteResolver(() -> null, noCircuit(),
+                RandomGeneratorFactory.of("L64X128MixRandom").create(7L));
+
+        assertThat(resolver.candidates("m")).isEmpty();
+        assertThatThrownBy(() -> resolver.primary("m"))
+                .isInstanceOf(RouteSelectionException.class)
+                .hasMessageContaining("m");
     }
 
     private static List<Long> ids(List<ChannelDescriptor> channels) {
