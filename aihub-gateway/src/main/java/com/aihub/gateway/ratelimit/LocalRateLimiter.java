@@ -20,8 +20,15 @@ import java.util.function.LongSupplier;
  * <p>并发正确性来自 {@link java.util.concurrent.ConcurrentMap#compute} 的**单键原子性**：
  * 「读状态 → 判定 → 写状态」在同一个 compute 里完成，因此同一 key 的并发请求不会超发。
  *
- * <p><b>缺省状态与 Lua 侧一致</b>：新 key 用 {@code (0, 0)} 起步，等价于 Lua 脚本里
- * {@code HGET … or '0'} 把不存在的 Hash 读成 0 —— 两侧「第一次请求会发生什么」因此相同。
+ * <p><b>没见过的 key 以满桶起步，与 Lua 侧是同一条规则</b>：{@code state == null}（本进程从未见过这个
+ * key；Lua 侧是 {@code HGET} 取不到字段）直接按**满桶**判定，而**不是**折成 {@code (0, 0)} 再靠
+ * {@code elapsed * qps} 补出来 —— 后者在 {@code qps = 0} 时永远补不出令牌，会把「允许 burst 次突发」
+ * 退化成「一次都不放行」。因此 {@code null} 与 {@code (0, 0)} 是**两个不同的状态**：前者是「没见过的
+ * key」（满桶），后者是一个真实存在的空桶（0 个令牌）。
+ *
+ * <p><b>TTL 到期或被 Caffeine 逐出之后，桶会再次变成「没见过的 key」，因而又是满桶起步</b>：这是
+ * **有意为之**的宽松方向误差（宁可多放行，也不误伤刚过期的正常客户端），也正是空闲 TTL 取得宽裕的
+ * 原因 —— {@code RateLimitScript.idleTtlMillis} 的下限是 60 秒，正常取「放空一个满桶所需时间」的 20 倍。
  */
 public final class LocalRateLimiter {
 
@@ -62,7 +69,8 @@ public final class LocalRateLimiter {
         RateLimitDecision decision = decisionHolder[0];
         if (decision == null) {
             // compute 理论上必然被调用；为「永不为 null」这条契约兜底（宁可放行也不抛）。
-            return RateLimitDecision.allowed(Math.max(burst, 1), qps, Math.max(burst, 1),
+            // limit 与正常路径口径一致：也是钳位后的 rate，不把原始 qps 透出去。
+            return RateLimitDecision.allowed(Math.max(burst, 1), Math.max(qps, 0), Math.max(burst, 1),
                     RateLimitDecision.Source.LOCAL);
         }
         return new RateLimitDecision(decision.allowed(), decision.remaining(), decision.retryAfterMs(),

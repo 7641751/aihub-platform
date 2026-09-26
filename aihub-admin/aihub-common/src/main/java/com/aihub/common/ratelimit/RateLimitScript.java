@@ -24,7 +24,7 @@ package com.aihub.common.ratelimit;
  *
  * <p><b>脚本的算术与 Java 纯算术（{@code com.aihub.gateway.ratelimit.TokenBucket}）必须逐字一致</b>：
  * 两侧都只用整数毫令牌、同一个「补满→封顶→扣减/退避」公式。gateway 侧的
- * {@code ScriptArithmeticTest} 用同一张字面量向量表交叉钉住这两份实现（见该测试的类注释）。
+ * {@code TokenBucketScriptConformanceTest} 用同一张字面量向量表交叉钉住这两份实现（见该测试的类注释）。
  */
 public final class RateLimitScript {
 
@@ -49,6 +49,13 @@ public final class RateLimitScript {
      * {@code or '0'} 当作 0 再靠 {@code elapsed * qps} 补。理由与 {@code TokenBucket} 的类注释
      * 完全一样：{@code qps = 0} 时「从 0 补」永远补不出令牌，会把「允许 burst 次突发」退化成
      * 「一次都不放行」；而且「补得满补不满」会取决于时钟的绝对值。两侧必须是同一条规则。
+     *
+     * <p><b>时钟回拨没有单独的分支</b>：脚本**曾经**写过 {@code if elapsed < 0 then lastRefill = now end}，
+     * 但那是死代码 —— 该变量在计算 {@code elapsed} 之后再没被读过，而基准时刻是最后那次
+     * {@code HSET … 'k', now} **无条件**写进去的。于是「回拨时不补充、基准前移到 now」这条规则
+     * 由两个真实生效的地方共同承载：判定处的守卫 {@code if elapsed > 0 and qps > 0 then}（负的
+     * {@code elapsed} 因此不补充、令牌原样保留），加上那次无条件的 {@code HSET}。这与
+     * {@code TokenBucket} 的纯算术（{@code nextState} 恒定写回 {@code now}）逐字一致。
      */
     public static final String SCRIPT = """
             local tokens = redis.call('HGET', KEYS[1], 't')
@@ -69,9 +76,6 @@ public final class RateLimitScript {
             local elapsed = now - lastRefill
             if elapsed > 0 and qps > 0 then
               tokens = math.min(capacity, tokens + elapsed * qps)
-            end
-            if elapsed < 0 then
-              lastRefill = now
             end
             local allowed = 0
             local remaining = 0

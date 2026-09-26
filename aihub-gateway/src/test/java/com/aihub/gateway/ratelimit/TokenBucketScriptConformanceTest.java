@@ -135,7 +135,11 @@ class TokenBucketScriptConformanceTest {
         assertThat(script).contains("local capacity = burst * 1000");
         assertThat(script).contains("if elapsed > 0 and qps > 0 then");
         assertThat(script).contains("tokens = math.min(capacity, tokens + elapsed * qps)");
-        assertThat(script).contains("if elapsed < 0 then");
+        // 时钟回拨（elapsed < 0）：上面那道 `elapsed > 0` 的守卫保证**不补充**；而「基准前移到 now」
+        // 由下面那次**无条件**的 HSET 承载（脚本里原先另写的 `if elapsed < 0 then ... end` 是死代码：
+        // lastRefill 在算出 elapsed 之后再没被读过），因此不再有单独的断言钉它。
+        assertThat(script).as("不得出现只为 elapsed < 0 而写、却影响不到 HSET 的死分支")
+                .doesNotContain("elapsed < 0 then");
         assertThat(script).contains("if tokens >= 1000 then");
         assertThat(script).contains("tokens = tokens - 1000");
         assertThat(script).contains("remaining = math.floor(tokens / 1000)");
@@ -145,7 +149,8 @@ class TokenBucketScriptConformanceTest {
         assertThat(script).as("qps=0 与 qps>0 的两条退避分支").contains("retryAfter = 3600000");
         assertThat(script).as("退避不得为 0：与 Java 侧的 Math.max(1L, …) 对齐")
                 .contains("if retryAfter < 1 then retryAfter = 1 end");
-        assertThat(script).contains("redis.call('HSET', KEYS[1], 't', tokens, 'k', now)");
+        assertThat(script).as("HSET 无条件把基准时刻写成 now —— 时钟回拨时「基准前移」就是靠它生效的")
+                .contains("redis.call('HSET', KEYS[1], 't', tokens, 'k', now)");
         assertThat(script).contains("redis.call('PEXPIRE', KEYS[1], ARGV[4])");
         assertThat(script).contains("return {allowed, remaining, retryAfter}");
     }

@@ -16,14 +16,23 @@ class TokenBucketTest {
 
     @Test
     void freshBucketStartsFull() {
-        // 新桶 = 空状态（令牌 0、时间戳 0）→ 立即按 qps 补满到 burst。
-        RateLimitDecision decision = TokenBucket.tryConsume(new TokenBucket.State(0L, 0L), 10_000L, 10, 20);
+        // 新桶是 state == null（本进程从没见过这个 key；Lua 侧是 HGET 取不到字段），必须**直接**
+        // 满桶起步，而不是「一个 (0, 0) 空状态靠 elapsed * qps 补出来」：注入的时钟从 1000ms 起、
+        // qps=10 时，一个 (0, 0) 的桶只能补到 10 个令牌 —— 只有真·新桶才会给出 remaining=19。
+        RateLimitDecision decision = TokenBucket.tryConsume(null, 1_000L, 10, 20);
 
         assertThat(decision.allowed()).isTrue();
-        assertThat(decision.remaining()).as("补满 20 个、用掉 1 个 → 余 19").isEqualTo(19);
+        assertThat(decision.remaining()).as("满桶 20 个、用掉 1 个 → 余 19").isEqualTo(19);
         assertThat(decision.limit()).isEqualTo(10);
         assertThat(decision.burst()).isEqualTo(20);
         assertThat(decision.source()).isEqualTo(RateLimitDecision.Source.REDIS);
+
+        // 对照：同一时刻、同一策略下的「见过的空桶」不是新桶 —— 它只能补到 10 个（余 9）。
+        assertThat(TokenBucket.tryConsume(new TokenBucket.State(0L, 0L), 1_000L, 10, 20).remaining())
+                .as("(0, 0) 是见过的空桶，不能与新桶混为一谈").isEqualTo(9);
+        // 更极端的对照：qps=0 时空桶永远补不出令牌，只有新桶仍允许 burst 次突发。
+        assertThat(TokenBucket.tryConsume(new TokenBucket.State(0L, 0L), 1_000L, 0, 20).allowed())
+                .as("新桶与空桶的分界在 qps=0 时最明显").isFalse();
     }
 
     @Test

@@ -1,5 +1,7 @@
 package com.aihub.gateway.ratelimit;
 
+import com.aihub.common.ratelimit.RateLimitScript;
+
 /**
  * 令牌桶的**纯算术**。Redis Lua 脚本（{@link RateLimitScript} 里的 {@code SCRIPT}）与 Redis 不可用
  * 时的本机实现（{@link LocalRateLimiter}）都遵守它，因此「补充速率 / 封顶 / 退避时间」在降级前后
@@ -92,8 +94,16 @@ public final class TokenBucket {
 
     /**
      * 按「补充 + 封顶」算出消费前的令牌数。新桶（{@code null}）直接是满桶：这条规则与 Lua 脚本里
-     * 的 {@code if not tokens or not lastRefill then tokens = capacity; lastRefill = now end} 一一对应，
-     * 两侧因此不会在「第一次请求」上分叉。
+     * 下面这段一一对应（{@code HGET} 取不到字段时走 {@code else}），两侧因此不会在「第一次请求」上分叉：
+     * <pre>{@code
+     * if tokens and lastRefill then
+     *   tokens = tonumber(tokens)
+     *   lastRefill = tonumber(lastRefill)
+     * else
+     *   tokens = capacity
+     *   lastRefill = now
+     * end
+     * }</pre>
      */
     private static long effectiveTokens(State state, long nowMillis, int capacity, int rate) {
         long capacityMilli = (long) capacity * MILLI;
