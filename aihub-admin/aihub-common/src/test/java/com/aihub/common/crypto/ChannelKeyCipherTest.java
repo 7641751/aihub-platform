@@ -28,16 +28,38 @@ class ChannelKeyCipherTest {
     private static final String PLAINTEXT = "sk-channel-plaintext-synthetic";
 
     /**
-     * 固定向量（评审 Fix 1）：由提交 {@code f64cf27} 的实现加密一次生成后**粘贴为字面量**，
-     * 不是被测代码现算的。主密钥是 {@link #b64Key(int) b64Key(2)}，明文即 {@link #PLAINTEXT}。
+     * 固定向量 1（评审 Fix 1；二轮 Fix 1 把它**做不到**的事写清楚）：由提交 {@code f64cf27} 的实现加密
+     * 一次生成后**粘贴为字面量**，不是被测代码现算的。主密钥是 {@link #b64Key(int) b64Key(2)}，
+     * 明文即 {@link #PLAINTEXT}，body 58 字节（12 nonce + 30 明文 + 16 tag）→ 80 字符、以 {@code ==} 结尾。
      *
-     * <p>为什么必须有它：本类其余用例的期望值全部由被测实现推导，改掉 base64 字母表、把 nonce 挪到
-     * 密文后面、或把 tag 从 128 位改成别的位数，12 条用例会**全绿**，而数据库里已经躺着的
-     * {@code channel.api_key_cipher} 行会永久解不开（admin 写入的密文 gateway 读不出来）。
-     * 这条字面量把「今天的格式」冻住，让那种漂移变成红灯。
+     * <p>为什么必须有它：本类其余用例的期望值全部由被测实现推导，把 nonce 挪到密文后面、或把 tag 从
+     * 128 位改成别的位数，那些用例会**全绿**，而数据库里已经躺着的 {@code channel.api_key_cipher} 行
+     * 会永久解不开（admin 写入的密文 gateway 读不出来）。这条字面量把「今天的格式」冻住。
+     *
+     * <p><b>它单独挡不住字母表漂移（二轮评审实测）</b>：本向量的 body **既不含 {@code +} 也不含
+     * {@code /}**，而这两套字母表在只含 {A–Z a–z 0–9} 的 body 上完全一致；把生产代码的
+     * {@code getEncoder()} / {@code getDecoder()} 换成 {@code getUrlEncoder()} / {@code getUrlDecoder()}，
+     * **只靠这一条向量会全绿**，但 body 含 {@code +} 或 {@code /} 的存量行会永久失解。
+     * 字母表那一半由 {@link #PLUS_AND_SLASH_PAYLOAD} 负责 —— 两条向量合起来才是完整的格式冻结点。
      */
     private static final String FIXED_PAYLOAD =
             "v2:DFHTeYKoS0LymUfJRLwmRhPFfua62zGa4USHz54SP6XCgxrD8zO50YS69atCxaYxEo5w79CyGZb1GA==";
+
+    /**
+     * 固定向量 2（二轮评审 Fix 1）：与 {@link #FIXED_PAYLOAD} 同源（{@code b64Key(2)} + {@link #PLAINTEXT}），
+     * 但它的 body **同时含 {@code +} 与 {@code /}** —— 标准 base64 字母表里那两个非 URL-safe 字符。
+     *
+     * <p>为什么必须有它：这是**唯一**能发现「标准 base64 换成 URL-safe base64」的用例。实测
+     * {@code getUrlDecoder()} 对含 {@code +} 或 {@code /} 的 body 抛 {@code IllegalArgumentException}
+     * （{@code decrypt} 把它折算成空），于是**存量行中 body 含这两个字符的那些会永久不可解**；而
+     * {@link #FIXED_PAYLOAD} 的 body 落在两套字母表的交集里，同一种漂移下它照样绿。
+     *
+     * <p>来源：仓库树之外的**离线 scratch 程序**（与生产同布局的 AES/GCM/NoPadding、12 字节 nonce、
+     * 128 位 tag）搜索得到后粘贴为字面量 —— nonce 十六进制 {@code e187c6498d5051b6831cbe0b}，
+     * 第 4 个候选命中，未落进仓库、未进提交。
+     */
+    private static final String PLUS_AND_SLASH_PAYLOAD =
+            "v2:4YfGSY1QUbaDHL4LPRBYpugHhjy/IjNVWO635z2/scNLl0n5XE06Y0JI5Ww1GU6Sv9YoS5+0HlvIsw==";
 
     /** 32 字节（AES-256）的合成主密钥。 */
     private static String b64Key(int seed) {
@@ -103,10 +125,18 @@ class ChannelKeyCipherTest {
     }
 
     /**
-     * 评审 Fix 1：用**字面量**钉住载荷格式，而不是用实现现算期望值。三件事各钉一处：
-     * ① 硬编码密文能解回硬编码明文（base64 字母表/填充、nonce 在前、tag 在后）；
+     * 评审 Fix 1 + 二轮 Fix 1：用**字面量**钉住载荷格式，而不是用实现现算期望值。三件事各钉一处：
+     * ① 硬编码密文能解回硬编码明文（nonce 在前、tag 在后、填充形态）；
      * ② 版本标签是载荷的一部分；
      * ③ 解码后长度 = 12 (nonce) + 明文长度 + 16 (GCM tag)，把 nonce 与 tag 的字节数**独立于实现**钉死。
+     *
+     * <p>两条向量的分工：本条（body 不含 {@code +}/{@code /}）钉布局、长度与版本标签；
+     * {@link #pinnedVectorWithPlusAndSlashPinsTheStandardBase64Alphabet}（body 同时含这两个字符）
+     * 钉**标准** base64 字母表。缺任意一条，就有一种漂移能全绿通过。
+     *
+     * <p><b>本类不覆盖的方向（不要当成已冻结）</b>：把 {@code +}/{@code /} 映射到同样字符的自定义
+     * 字母表漂移（例如只重排 A–Z 的表）；填充字符的省略与否 —— 两条向量只走**解码**方向，而 JDK 解码器
+     * 容忍缺失 padding，所以向量自身对「编码器是否补 {@code =}」不设防。
      */
     @Test
     void pinnedPayloadVectorFreezesTheCiphertextFormat() {
@@ -118,6 +148,33 @@ class ChannelKeyCipherTest {
         assertThat(FIXED_PAYLOAD).as("版本标签必须仍在载荷里").startsWith("v2:");
         assertThat(AesGcmChannelCipher.labelOf(FIXED_PAYLOAD)).isEqualTo("v2");
         assertThat(Base64.getDecoder().decode(FIXED_PAYLOAD.substring(FIXED_PAYLOAD.indexOf(':') + 1)))
+                .as("body = 12 字节 nonce + 明文 + 16 字节 GCM tag")
+                .hasSize(12 + PLAINTEXT.getBytes(StandardCharsets.UTF_8).length + 16);
+    }
+
+    /**
+     * 二轮评审 Fix 1：把**标准** base64 字母表也钉死，而不只是钉住「某一套 base64」。
+     *
+     * <p>反证（实测，见报告 §9）：把 {@code AesGcmChannelCipher} 的 {@code getEncoder()} /
+     * {@code getDecoder()} 临时换成 {@code getUrlEncoder()} / {@code getUrlDecoder()}，本用例**变红**
+     * （{@code decrypt} 返回空 {@link Optional}），而 {@link #pinnedPayloadVectorFreezesTheCiphertextFormat}
+     * 仍**是绿的** —— 那正是上一轮冻结留下的缺口。最后一条断言是「防止向量被换成无害 body」的哨兵：
+     * 不含 {@code +}/{@code /} 的 body 在这两套字母表下取值相同，会让本用例失去鉴别力。
+     */
+    @Test
+    void pinnedVectorWithPlusAndSlashPinsTheStandardBase64Alphabet() {
+        AesGcmChannelCipher cipher = new AesGcmChannelCipher(registry(1, 2));
+
+        assertThat(PLUS_AND_SLASH_PAYLOAD)
+                .as("本向量必须同时含 + 与 /，否则覆盖不到标准字母表")
+                .contains("+").contains("/");
+        assertThat(cipher.decrypt(PLUS_AND_SLASH_PAYLOAD))
+                .as("固定向量必须仍能解回硬编码明文（字母表漂移会让存量密文不可解）")
+                .contains(PLAINTEXT);
+        assertThat(PLUS_AND_SLASH_PAYLOAD).as("版本标签必须仍在载荷里").startsWith("v2:");
+        assertThat(AesGcmChannelCipher.labelOf(PLUS_AND_SLASH_PAYLOAD)).isEqualTo("v2");
+        assertThat(Base64.getDecoder()
+                .decode(PLUS_AND_SLASH_PAYLOAD.substring(PLUS_AND_SLASH_PAYLOAD.indexOf(':') + 1)))
                 .as("body = 12 字节 nonce + 明文 + 16 字节 GCM tag")
                 .hasSize(12 + PLAINTEXT.getBytes(StandardCharsets.UTF_8).length + 16);
     }
@@ -267,6 +324,10 @@ class ChannelKeyCipherTest {
      * {@code new ChannelKeyRegistry(Map.of(1, new byte[16]))} 构造成功，而且 16 字节会被 JDK 当成
      * AES-128 **静默接受**（实测 encrypt 返回了一个合法的 16 字节密钥密文）；31 字节则在 encrypt 时
      * 抛出与篡改无法区分的 "AES-GCM 运算失败"，decrypt 静默返回空。两者都是坏数据/坏诊断。
+     *
+     * <p>二轮 Fix 2：{@link ChannelKeyRegistry#MAX_VERSIONS} 的上限同样由构造器守住，而此前只有
+     * {@link #registryRefusesMoreVersionsThanTheCap} 走的是 {@code parse}。这里补一条「9 个**合法**
+     * 32 字节版本直接构造必须抛」，否则删掉构造器里的上限判断，整个套件仍然全绿。
      */
     @Test
     void constructorRejectsAnInvalidMasterKeyTable() {
@@ -283,6 +344,14 @@ class ChannelKeyCipherTest {
         withNullKey.put(1, null);
         assertThatThrownBy(() -> new ChannelKeyRegistry(withNullKey))
                 .as("null 密钥不得构造出表").isInstanceOf(IllegalArgumentException.class);
+
+        Map<Integer, byte[]> tooManyVersions = new LinkedHashMap<>();
+        for (int version = 1; version <= 9; version++) {
+            tooManyVersions.put(version, Base64.getDecoder().decode(b64Key(version)));
+        }
+        assertThatThrownBy(() -> new ChannelKeyRegistry(tooManyVersions))
+                .as("版本数上限（8）必须由构造器自己守住，而不是只靠 parse")
+                .isInstanceOf(IllegalArgumentException.class);
 
         assertThat(new ChannelKeyRegistry(Map.of(1, new byte[32])).has(1))
                 .as("合法表仍可构造").isTrue();
