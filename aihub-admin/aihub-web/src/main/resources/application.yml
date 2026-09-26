@@ -54,6 +54,24 @@ aihub:
   # 渠道主密钥（AES-256，只来自环境变量；不落库、不进镜像、不打日志）。生成方法见 .env.example。
   channel:
     master-key: ${AIHUB_CHANNEL_MASTER_KEY:}
+  # 开发专用演示数据（两条同模型渠道 + 一条租户级限流策略 + 一条 key 级限流策略）。默认关闭：它是写入路径，
+  # 不该在生产启动时自动改数据；真渠道的 base-url / 密钥必须由运维提供。
+  # 打开方式见 README / .env.example：AIHUB_DEMO_SEED_ENABLED=true + 主密钥 + 两条渠道的明文密钥。
+  demo-seed:
+    enabled: ${AIHUB_DEMO_SEED_ENABLED:false}
+    model: ${AIHUB_DEMO_SEED_MODEL:demo-model}
+    tenant: ${AIHUB_DEMO_SEED_TENANT:demo}
+    primary-base-url: ${AIHUB_DEMO_SEED_PRIMARY_BASE_URL:http://host.docker.internal:11434}
+    standby-base-url: ${AIHUB_DEMO_SEED_STANDBY_BASE_URL:http://host.docker.internal:11434}
+    # 演示渠道的明文密钥：**只来自环境变量，刻意没有默认值**（默认值等于把明文密钥提交进代码库）。
+    # 未提供时 seeder 启动失败并给出指引，绝不写一条解不开/空的密文。
+    primary-api-key: ${AIHUB_DEMO_SEED_PRIMARY_API_KEY:}
+    standby-api-key: ${AIHUB_DEMO_SEED_STANDBY_API_KEY:}
+    qps: 20
+    burst: 40
+    # 决策 7（修订）：key 级策略（覆盖租户级）也要能被端到端演示，因此比租户级更严格。
+    key-qps: 5
+    key-burst: 10
   internal:
     secret: ${AIHUB_INTERNAL_SECRET:}
   apikey:
