@@ -4,6 +4,11 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.reactive.AutoConfigureWebTestClient;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.web.context.WebServerApplicationContext;
+import org.springframework.boot.web.embedded.netty.NettyReactiveWebServerFactory;
+import org.springframework.boot.web.embedded.netty.NettyWebServer;
+import org.springframework.boot.web.reactive.server.ReactiveWebServerFactory;
+import org.springframework.context.ApplicationContext;
 import org.springframework.core.env.Environment;
 import org.springframework.test.web.reactive.server.WebTestClient;
 
@@ -20,6 +25,9 @@ class AihubGatewayApplicationTests {
 
     @Autowired
     private Environment environment;
+
+    @Autowired
+    private ApplicationContext context;
 
     @Test
     void healthzReturnsUp() {
@@ -79,5 +87,33 @@ class AihubGatewayApplicationTests {
                 .as("测试 classpath 上不允许再出现同名的 application.yml（它会整体取代主配置）；"
                         + "本地若只是 target/test-classes 里的旧残留，先跑 mvn clean")
                 .doesNotContain("test-classes");
+    }
+
+    /**
+     * <b>测试环境必须跑在生产用的那个 Web 服务器上</b>（Netty），而不是「classpath 上第一个成立的候选」。
+     *
+     * <p>Boot 3.5.16 的 {@code ReactiveWebServerFactoryAutoConfiguration} 按
+     * Tomcat → Jetty → Undertow → Netty 的顺序 {@code @Import} 四个候选，每个都是
+     * {@code @ConditionalOnMissingBean}：只要 classpath 上先有一个成立的，Netty 就被跳过。
+     * M3 引入 WireMock（{@code wiremock-jetty12}）后 Jetty 的 servlet 与 server 类进了测试 classpath，
+     * 于是整个网关测试套件静默改跑「Servlet 模式下的 Jetty」——
+     * 在 Servlet 的写回路径上，响应正常结束时的 async 完成回调会取消写-flush 处理器，
+     * 让中继把**每一次成功响应**都误记成客户端断连（{@code CANCELLED/client_disconnected}），
+     * 既有用例实测红 5 条。
+     *
+     * <p>修复是显式的：测试 classpath 上用 {@link com.aihub.gateway.testsupport.NettyWebServerTestAutoConfiguration}
+     * 注册一个 {@code NettyReactiveWebServerFactory}。这条断言把「修复还在」变成可执行的 ——
+     * 谁删掉那个自动配置（或再引入一个自带 servlet 容器的测试依赖），这里立刻红，
+     * 而不是等到某次「计量状态莫名变成 CANCELLED」的排查。
+     */
+    @Test
+    void theGatewayTestContextRunsOnNettyNotOnAServletContainer() {
+        assertThat(context.getBean(ReactiveWebServerFactory.class))
+                .as("Boot 选中的反应式服务器工厂必须是 Netty（生产用的那个）；"
+                        + "Jetty/Tomcat 会把响应写回路径换成 servlet 的，计量状态会因此失真")
+                .isInstanceOf(NettyReactiveWebServerFactory.class);
+        assertThat(((WebServerApplicationContext) context).getWebServer())
+                .as("真正跑起来的服务器也必须是 Netty")
+                .isInstanceOf(NettyWebServer.class);
     }
 }
