@@ -20,10 +20,15 @@ public record ApiKeyView(String keyId, long tenantId, String tenantName, String 
     public static final String STATUS_ACTIVE = "ACTIVE";
 
     /**
-     * 「不可用」的**唯一**哨兵：解析不到密钥、密钥不存在、以及调用方（过滤器）遇到空 {@code Mono}
-     * 的兜底，都用这一个实例。
+     * 「不可用视图」的**唯一**哨兵：{@code usable()} 恒为 false，需要「一个不可用的视图」的调用方
+     * （{@code aihub-common} 侧，以及将来任何需要此表达的调用方）都用这一个实例。
      *
-     * <p>它存在的意义是让「不可用」有单一表达：{@code usable()} 为 false，于是所有调用方只需判断
+     * <p><b>（D4 起）gateway 的鉴权过滤器不再用它。</b>那里改用
+     * {@code AdminResolution.unavailable()} 表达「我们**判不了**这把 key 是否有效」—— 因为
+     * 「判不了」根本**不是一种视图**（它不是关于这把 key 的结论，而是关于我们自己能否得出结论），
+     * 用视图类型去表达它会让「权威地判定不可用」（对客 401）与「判不了」（对客 503）在类型上无法区分。
+     *
+     * <p>它存在的意义仍然是让「不可用」有单一表达：{@code usable()} 为 false，于是所有调用方只需判断
      * {@code usable()} 一次。之前 gateway 侧有两个各自 {@code new} 出来的同形实例（解析器的 MISS 与
      * 过滤器的 UNRESOLVED）；今天它们恰好都是 {@code status="MISSING"} 才等价，一旦将来
      * {@code usable()} 的判据从 {@code status} 改成别的（例如认实例身份），两份哨兵就会分裂成
