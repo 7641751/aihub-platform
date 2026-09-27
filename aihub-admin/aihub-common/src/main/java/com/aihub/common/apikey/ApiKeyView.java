@@ -20,19 +20,23 @@ public record ApiKeyView(String keyId, long tenantId, String tenantName, String 
     public static final String STATUS_ACTIVE = "ACTIVE";
 
     /**
-     * 「不可用视图」的**唯一**哨兵：{@code usable()} 恒为 false，需要「一个不可用的视图」的调用方
-     * （{@code aihub-common} 侧，以及将来任何需要此表达的调用方）都用这一个实例。
+     * 「不可用视图」的**唯一**哨兵：{@code status="MISSING"}，故 {@code usable()} 恒为 false。
+     * 它留在共享类型（{@code aihub-common}，零依赖、JDK-only）上。
      *
-     * <p><b>（D4 起）gateway 的鉴权过滤器不再用它。</b>那里改用
-     * {@code AdminResolution.unavailable()} 表达「我们**判不了**这把 key 是否有效」—— 因为
-     * 「判不了」根本**不是一种视图**（它不是关于这把 key 的结论，而是关于我们自己能否得出结论），
-     * 用视图类型去表达它会让「权威地判定不可用」（对客 401）与「判不了」（对客 503）在类型上无法区分。
+     * <p>它历史上存在，是为了让 gateway 侧两处不再各自 {@code new} 一个同形哨兵（解析器的 MISS 与
+     * 过滤器的 UNRESOLVED）：当时两份哨兵靠 {@code status="MISSING"} 恰好等价，一旦 {@code usable()}
+     * 的判据从 {@code status} 改成别的（例如认实例身份），就会分裂成两种行为；统一到共享类型之后，
+     * 「不可用」只有一份表达，调用方只需判断 {@code usable()} 一次。
      *
-     * <p>它存在的意义仍然是让「不可用」有单一表达：{@code usable()} 为 false，于是所有调用方只需判断
-     * {@code usable()} 一次。之前 gateway 侧有两个各自 {@code new} 出来的同形实例（解析器的 MISS 与
-     * 过滤器的 UNRESOLVED）；今天它们恰好都是 {@code status="MISSING"} 才等价，一旦将来
-     * {@code usable()} 的判据从 {@code status} 改成别的（例如认实例身份），两份哨兵就会分裂成
-     * 两种行为。放在这里（{@code aihub-common}，零依赖、JDK-only）后，两侧共用同一份 notion。
+     * <p><b>（D4 起）gateway 侧不再引用它。</b>gateway 那侧要表达的是「我们**判不了**这把 key 是否有效」，
+     * 而那根本**不是一种视图** —— 它不是关于这把 key 的结论，而是关于我们自己能否得出结论 —— 所以那里
+     * 改用 {@code AdminResolution.unavailable()}（对客 {@code 503 service_unavailable}），从而与
+     * 「权威地判定不可用」（对客 401）在类型上可区分。真正需要「一个不可用的视图」的
+     * {@code aihub-common} 侧调用方，或将来任何需要此表达的调用方，仍然**可以**用这一个实例。
+     *
+     * <p><b>现状登记</b>：本常量目前**没有生产调用方**（{@code grep -rn UNUSABLE} 只剩它自己的声明与
+     * {@code aihub-common} 的测试），因此是清理候选 —— 要么后续删除它，要么给它一个真实调用方；
+     * 两者都超出本次改动的范围，故本常量**保留、不改值、不改修饰符**。
      */
     public static final ApiKeyView UNUSABLE = new ApiKeyView("", 0L, "", "MISSING", null, null);
 

@@ -225,14 +225,14 @@ class ApiKeyToolingTest {
     }
 
     /**
-     * 「不可用」在共享类型上只有一份表达：{@link ApiKeyView#UNUSABLE}，{@code usable()} 恒为 false。
-     * 改前 gateway 侧各自 {@code new} 了一个同形实例（解析器的 MISS 与过滤器的 UNRESOLVED），
-     * 靠 {@code status="MISSING"} 恰好等价；一旦 {@code usable()} 的判据换成别的（例如认实例身份），
-     * 两份哨兵就会分裂成两种行为。
+     * 「不可用视图」在共享类型上只有一份表达：{@link ApiKeyView#UNUSABLE}，{@code usable()} 恒为 false。
+     * 它历史上是为了让 gateway 侧两处不再各自 {@code new} 一个同形实例（解析器的 MISS 与过滤器的
+     * UNRESOLVED）而存在的 —— 当时两份哨兵靠 {@code status="MISSING"} 恰好等价，一旦
+     * {@code usable()} 的判据换成别的（例如认实例身份），就会分裂成两种行为。
      *
-     * <p>（D4 起）gateway 的鉴权过滤器**不再**用它当「空 {@code Mono}」的兜底：那里改用
-     * {@code AdminResolution.unavailable()}，因为「判不了这把 key 是否有效」不是一种视图。
-     * 本用例只钉这个哨兵自身的性质，与那条口径无关。
+     * <p>（D4 起）gateway 侧**不再引用它**：那里改用 {@code AdminResolution.unavailable()}，
+     * 因为「判不了这把 key 是否有效」不是一种视图。该常量目前没有生产调用方；本用例只钉它自身的
+     * 性质，与那条口径无关。
      */
     @Test
     void unusableSentinelIsASingleSharedInstance() {
