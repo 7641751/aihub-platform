@@ -8973,6 +8973,14 @@ docker -H tcp://127.0.0.1:2375 compose exec -T mysql sh -c 'mysql -uroot -p"$MYS
    无限放行），网关日志里出现「已降级为本地令牌桶」。`docker compose start redis` 后恢复共享桶。
 6. **admin 挂掉验收**：`docker compose stop admin` 后发请求 —— 网关**继续按缓存的快照路由**（不 503）；
    冷缓存的新 key 仍然是 401（fail-closed，M1 的既有行为）。
+
+   > **D4 更新（2026-09-27）**：第 6 条的「冷缓存的新 key 仍然是 401」已被取代 —— 自 D4 起，
+   > 网关**判不了**这把 key 是否有效（admin 不可达 / 超时 / 5xx / 畸形 / 内部签名失败）时对客是
+   > `503 service_unavailable`（`api_error`），**不是** 401；401 只留给「admin **权威地**说没有这把 key」
+   > （以及 `usable()==false` 的权威视图）。两者**都是拒绝**（请求都到不了限流 / 路由 / 上游）。
+   > 第 5 条的「`stop redis` 后必须继续被限流（429）」**不变**：D1 之后 admin 会在预算内从 MySQL 回答，
+   > 所以 Redis 停机时仍然应当是 429，而**不是** 503 —— 这两条判据今天正好互为对照。
+   > 见 `docs/CONVENTIONS.md` §4/§5。
 7. 把上述命令与真实输出（**删掉 token 明文**）写进 `.superpowers/sdd/m3-acceptance.md`。
 
 若控制器无法提供「坏上游」夹具（例如本机没有任何上游），**报告 BLOCKED 并说明缺什么**，不要伪造结果。
