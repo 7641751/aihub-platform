@@ -20,6 +20,7 @@ import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -61,9 +62,10 @@ class ApiKeyFilterContractTest {
     private static final ApiKeyView VALID_VIEW =
             new ApiKeyView("ak_valid", 7L, "acme", ApiKeyView.STATUS_ACTIVE, null, 42L);
 
-    /** admin **权威地**说「没有这把 key」—— 与「解析不了」是两回事，对客是 401。 */
+    /** 视图是 admin 的**权威结论**，但按 {@code ApiKeyView.usable()} 判定已过期 —— 对客仍然是 401，不是 503。 */
     private static final ApiKeyView EXPIRED_VIEW =
-            new ApiKeyView("ak_expired", 7L, "acme", "DISABLED", null, 42L);
+            new ApiKeyView("ak_expired", 7L, "acme", ApiKeyView.STATUS_ACTIVE,
+                    Instant.now().minusSeconds(60), 42L);
 
     private static final String VALID_SECRET = "valid-secret";
 
@@ -147,8 +149,12 @@ class ApiKeyFilterContractTest {
 
     /**
      * 映射的红线之三：admin **权威地**给了一份视图，但视图本身 {@code usable() == false}
-     * （已过期 / 已停用）—— 那是「我们**决定了**这把 key 无效」，仍然是
-     * {@code 401 invalid_api_key}，**不是** 503。
+     * —— 那是「我们**决定了**这把 key 无效」，仍然是 {@code 401 invalid_api_key}，**不是** 503。
+     *
+     * <p>本用例是**过期**那一支：{@code status} 是 {@code ACTIVE}（admin 的权威结论就是「这把 key 存在」），
+     * 只是 {@code expireAt} 已经过去，于是 {@code usable()} 为 false。因此本用例在过滤器契约层
+     * 覆盖了 {@code usable()} 的过期判据（此前只有集成级的
+     * {@code ApiKeyAuthFilterTest.expiredApiKeyIsRejected} 覆盖它）。
      *
      * <p>这条同时钉住「503 不是 usable()==false 的通配」：把 {@code FOUND} 分支也改成 503，
      * 本用例变红。
