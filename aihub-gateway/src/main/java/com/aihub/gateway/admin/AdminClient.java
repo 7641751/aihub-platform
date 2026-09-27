@@ -29,9 +29,10 @@ import java.util.Optional;
  * <p>约定：{@link #resolve} **不抛异常**。admin 不可达/超时/返回非 2xx/响应体畸形一律折算成
  * {@link Optional#empty()}（视作「这个 key 不存在」）。网络故障与垃圾数据都不该让客户端拿到 500。
  *
- * <p><b>但「视作不存在」只适用于对客表现，不适用于缓存</b>：{@link #resolve} 把故障与权威否定
- * <b>压成了同一个 {@code empty}</b>，调用方无法分辨。解析路径因此必须用
- * {@link #resolveOutcome}（三态）—— 故障进负缓存就是 D1。
+ * <p><b>但「视作不存在」只适用于 M1 的兼容形状，不适用于解析路径</b>：{@link #resolve} 把故障与
+ * 权威否定 <b>压成了同一个 {@code empty}</b>，调用方无法分辨。解析路径因此必须用
+ * {@link #resolveOutcome}（三态）—— 故障进负缓存就是 D1；而「故障对客回 503 而不是 401」
+ * （D4）同样只有分辨得出三态才做得到。
  */
 @FunctionalInterface
 public interface AdminClient {
@@ -54,7 +55,8 @@ public interface AdminClient {
     /**
      * 与 {@link #resolve} **同一跳**，但把「admin 权威地说没有这把 key」与「解析不了（平台故障）」
      * 分开（见 {@link AdminResolution}）。解析路径必须用这个而不是 {@link #resolve}：只有这里
-     * 才分得清「权威否定」与「我们不知道」，而只有前者可以进负缓存。
+     * 才分得清「权威否定」与「我们不知道」—— 前者可以进负缓存、对客 401，后者两者都不行
+     * （不进缓存、对客 503，D4）。
      *
      * <p><b>默认实现把 {@code empty} 当作权威否定</b>（即与 {@link #resolve} 完全同义）。这样
      * 所有既有的函数式替身（测试里的 {@code keyHash -> Mono.just(Optional.empty())}）一行都不用改
@@ -85,6 +87,10 @@ public interface AdminClient {
 
         private static final Logger log = LoggerFactory.getLogger(Http.class);
         private static final ObjectMapper MAPPER = new ObjectMapper();
+
+        /** 平台故障的对客口径（D4）：不进负缓存、不谎报成「key 不存在」，见 {@link AdminResolution}。 */
+        private static final String FAULT_LOGGED_AS =
+                "本次不写入负缓存、对客 fail-closed 回 503 service_unavailable（结论未知，不是「key 不存在」）";
 
         private final WebClient webClient;
         private final String internalSecret;
@@ -124,10 +130,11 @@ public interface AdminClient {
                                 .map(body -> parseOutcome(response.statusCode().value(), body)));
             }).onErrorResume(ex -> {
                 // 传输层失败（连不上 / 超时 / 签名抛错）**不是**「key 不存在」，是 admin 侧故障。
-                // fail-closed 的对客表现与坏 key 完全一致（401 invalid_api_key），所以这行 ERROR
-                // 是运维侧唯一的区分信号：admin 全挂时它会持续出现，而单个坏 key 不会。
-                // 从 D1 起它还必须**不写负缓存** —— 否则一次瞬时故障会被本地负缓存放大成 30 秒的固定 401。
-                log.error("admin 回源失败（传输层异常，非「key 不存在」），本次不写入负缓存、仍然 fail-closed 401: {}",
+                // 对客是 503 service_unavailable（D4：不把平台故障谎报成「你的 key 错了」），
+                // 所以这行 ERROR 是运维侧唯一的区分信号：admin 全挂时它会持续出现，
+                // 而单个坏 key 不会（那条只打 DEBUG）。从 D1 起它还必须**不写负缓存** ——
+                // 否则一次瞬时故障会被本地负缓存放大成 30 秒的固定拒绝。
+                log.error("admin 回源失败（传输层异常，非「key 不存在」），" + FAULT_LOGGED_AS + ": {}",
                         ex.toString());
                 return Mono.just(AdminResolution.unavailable());
             });
@@ -220,10 +227,10 @@ public interface AdminClient {
                     return AdminResolution.notFound();
                 }
                 // 5xx / 401 / 403，以及「路径写错」这类没有 NOT_FOUND 信封的 404：都是**平台故障**。
-                // 客户端仍然只看到 401 invalid_api_key（与坏 key 不可区分，见 CONVENTIONS 第 4/5 节），
+                // 客户端看到的是 503 service_unavailable（D4，登记在 CONVENTIONS 第 4/5 节），
                 // 但结论未知 ⇒ 不写负缓存，故障清除后下一个请求立刻重试。
                 log.error("admin 回源失败（HTTP {}，服务不可用或配置错误，非「key 不存在」），"
-                        + "本次不写入负缓存、仍然 fail-closed 401。响应体: {}", status, body);
+                        + FAULT_LOGGED_AS + "。响应体: {}", status, body);
                 return AdminResolution.unavailable();
             }
             try {
@@ -243,7 +250,7 @@ public interface AdminClient {
                         expireAt.isNull() || expireAt.isMissingNode() ? null : Instant.parse(expireAt.asText()),
                         data.path("apiKeyId").isNumber() ? data.get("apiKeyId").asLong() : null));
             } catch (Exception e) {
-                log.error("admin 回源响应畸形（非「key 不存在」），本次不写入负缓存、仍然 fail-closed 401: {}",
+                log.error("admin 回源响应畸形（非「key 不存在」），" + FAULT_LOGGED_AS + ": {}",
                         e.toString());
                 return AdminResolution.unavailable();
             }
