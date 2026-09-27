@@ -2,6 +2,7 @@ package com.aihub.gateway.auth;
 
 import com.aihub.common.apikey.ApiKeyView;
 import com.aihub.gateway.admin.AdminClient;
+import com.aihub.gateway.admin.AdminResolution;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
 import org.springframework.core.Ordered;
@@ -38,9 +39,16 @@ import static org.mockito.Mockito.when;
  * {@code ApiKeyAuthFilterTest} 的 {@code @Primary} 假 adminClient 是类级的、socket 客户端也看不见
  * exchange 属性。两者关注点不同，合在一起只会互相绑手绑脚。
  *
- * <p>这里钉住四件事，改前都只是「今天恰好对」：空 Mono 兜底 401（Finding B）、成功时的
+ * <p>这里钉住四件事，改前都只是「今天恰好对」：空 Mono 兜底（Finding B）、成功时的
  * {@link ApiKeyAuthFilter#ATTRIBUTE_KEY_VIEW}（Finding E）、过滤器顺序（Finding D）、
  * 以及 Redis 阻塞 I/O 落在线程池而非 event loop 上（Finding A）。
+ *
+ * <p><b>（D4 起）空 Mono 兜底是对客 503</b>：空 Mono = 「判不了」，与
+ * {@code AdminResolution.UNAVAILABLE} 同一条诊断通道，见
+ * {@link #emptyResolverResultIsStillRejectedAsServiceUnavailable}；三态 → 状态码的完整映射由
+ * {@code authoritativeMissIsStillAnsweredAs401InvalidApiKey} /
+ * {@code controlPlaneFaultIsAnsweredAs503ServiceUnavailable} /
+ * {@code unusableViewFromAnAuthoritativeFoundIsStillAnsweredAs401} 三条钉住。
  *
  * <p>Finding A 的观测对象有一次是**发后不管**的异步调用，所以那两条断言必须先等观测点发生
  * （{@link #awaitObserved}），否则断言本身就是在赌调度顺序。
@@ -53,18 +61,24 @@ class ApiKeyFilterContractTest {
     private static final ApiKeyView VALID_VIEW =
             new ApiKeyView("ak_valid", 7L, "acme", ApiKeyView.STATUS_ACTIVE, null, 42L);
 
+    /** admin **权威地**说「没有这把 key」—— 与「解析不了」是两回事，对客是 401。 */
+    private static final ApiKeyView EXPIRED_VIEW =
+            new ApiKeyView("ak_expired", 7L, "acme", "DISABLED", null, 42L);
+
     private static final String VALID_SECRET = "valid-secret";
 
     /**
      * 契约：{@code ApiKeyResolver} 永不返回空 Mono。这里**故意**打破契约（替身返回
-     * {@code Mono.empty()}）：请求本来会通过过滤器，必须仍然拿到 401 + OpenAI 错误体 ——
-     * 既不是 200（放行），也不是「没有状态码就挂住」。
+     * {@code Mono.empty()}）：空 Mono 意味着我们**判不了**这把 key 是否有效，因此请求必须拿到
+     * 503 + {@code service_unavailable} + OpenAI 错误体（{@code api_error}）——
+     * 既不是 200（放行），也不是「没有状态码就挂住」，更不是把平台故障谎报成
+     * 401「你的 key 是错的」。{@code 503} 与 {@code 401} 一样是**拒绝**：下游链一样到不了。
      *
      * <p>把 {@code ApiKeyAuthFilter} 里的 {@code .switchIfEmpty(Mono.just(UNRESOLVED))} 删掉，
      * 本用例会以「响应状态码为 null / 链从未被调用」变红，而不是超时挂死。
      */
     @Test
-    void emptyResolverResultIsStillRejectedAsInvalidApiKey() {
+    void emptyResolverResultIsStillRejectedAsServiceUnavailable() {
         ApiKeyResolver emptyResolver = mock(ApiKeyResolver.class);
         when(emptyResolver.resolve(anyString())).thenReturn(Mono.empty());
         ApiKeyAuthFilter filter = new ApiKeyAuthFilter(PROPERTIES, emptyResolver);
@@ -73,9 +87,85 @@ class ApiKeyFilterContractTest {
 
         filter.filter(exchange, downstream(reachedDownstream)).block(Duration.ofSeconds(5));
 
+        assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(bodyOf(exchange)).contains("\"code\":\"service_unavailable\"");
+        assertThat(bodyOf(exchange)).contains("\"type\":\"api_error\"");
+        assertThat(reachedDownstream.get()).as("空 Mono 绝不能被放行到下游链").isNull();
+    }
+
+    /**
+     * 映射的红线之一：{@link AdminResolution.Status#NOT_FOUND}（admin **权威地**说没有这把 key）
+     * 必须仍然是 {@code 401 invalid_api_key} —— 本轮**只**把「结论未知」改成 503，
+     * 不能顺手把所有失败都改成 503（那会让「你的 key 是错的」这个诊断信号消失）。
+     * 下游链同样到不了。
+     */
+    @Test
+    void authoritativeMissIsStillAnsweredAs401InvalidApiKey() {
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(PROPERTIES,
+                resolverReturning(AdminResolution.notFound()));
+        MockServerWebExchange exchange = exchange("Bearer ak_valid." + VALID_SECRET);
+        AtomicReference<ServerWebExchange> reachedDownstream = new AtomicReference<>();
+
+        filter.filter(exchange, downstream(reachedDownstream)).block(Duration.ofSeconds(5));
+
         assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
         assertThat(bodyOf(exchange)).contains("\"code\":\"invalid_api_key\"");
-        assertThat(reachedDownstream.get()).as("空 Mono 绝不能被放行到下游链").isNull();
+        assertThat(bodyOf(exchange)).contains("\"type\":\"invalid_request_error\"");
+        assertThat(reachedDownstream.get()).as("权威否定同样是拒绝，不能放行到下游链").isNull();
+    }
+
+    /**
+     * 映射的红线之二（本轮的**全部**改动就在这里）：{@link AdminResolution.Status#UNAVAILABLE}
+     * （超时 / 传输失败 / 5xx / 畸形 / 签名失败 = 我们**判不了**）必须回
+     * {@code 503 service_unavailable} + {@code api_error}。
+     *
+     * <p>判别力：把过滤器里的 {@code UNAVAILABLE} 分支改回 401（见
+     * {@code .superpowers/sdd/fault503-falsify.log}），本用例立刻变红。
+     *
+     * <p><b>这不是削弱鉴权</b>：503 仍然是拒绝 —— 下游链、限流器、路由器、上游全都没被触到，
+     * 客户端也拿不到 200。变的只是诊断通道：以前平台故障伪装成「你的 key 错了」。
+     * 因此响应体里**不许**出现 {@code invalid_api_key}。
+     */
+    @Test
+    void controlPlaneFaultIsAnsweredAs503ServiceUnavailable() {
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(PROPERTIES,
+                resolverReturning(AdminResolution.unavailable()));
+        MockServerWebExchange exchange = exchange("Bearer ak_valid." + VALID_SECRET);
+        AtomicReference<ServerWebExchange> reachedDownstream = new AtomicReference<>();
+
+        filter.filter(exchange, downstream(reachedDownstream)).block(Duration.ofSeconds(5));
+
+        assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        String body = bodyOf(exchange);
+        assertThat(body).contains("\"code\":\"service_unavailable\"");
+        assertThat(body).contains("\"type\":\"api_error\"");
+        assertThat(body).as("平台故障不许再谎报成「你的 key 是错的」")
+                .doesNotContain("invalid_api_key");
+        assertThat(reachedDownstream.get())
+                .as("503 也是拒绝：请求绝不能继续走到限流 / 路由 / 上游").isNull();
+    }
+
+    /**
+     * 映射的红线之三：admin **权威地**给了一份视图，但视图本身 {@code usable() == false}
+     * （已过期 / 已停用）—— 那是「我们**决定了**这把 key 无效」，仍然是
+     * {@code 401 invalid_api_key}，**不是** 503。
+     *
+     * <p>这条同时钉住「503 不是 usable()==false 的通配」：把 {@code FOUND} 分支也改成 503，
+     * 本用例变红。
+     */
+    @Test
+    void unusableViewFromAnAuthoritativeFoundIsStillAnsweredAs401() {
+        ApiKeyAuthFilter filter = new ApiKeyAuthFilter(PROPERTIES,
+                resolverReturning(AdminResolution.found(EXPIRED_VIEW)));
+        MockServerWebExchange exchange = exchange("Bearer ak_valid." + VALID_SECRET);
+        AtomicReference<ServerWebExchange> reachedDownstream = new AtomicReference<>();
+
+        filter.filter(exchange, downstream(reachedDownstream)).block(Duration.ofSeconds(5));
+
+        assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(bodyOf(exchange)).contains("\"code\":\"invalid_api_key\"");
+        assertThat(bodyOf(exchange)).contains("\"type\":\"invalid_request_error\"");
+        assertThat(reachedDownstream.get()).as("不可用视图同样是拒绝").isNull();
     }
 
     /**
@@ -166,6 +256,16 @@ class ApiKeyFilterContractTest {
         }
         assertThat(observed.get()).as("%s 在 5 秒内没有发生", what).isNotNull();
         return observed.get();
+    }
+
+    /**
+     * 替身 {@link ApiKeyResolver}，直接给出一个**三态结论** —— 这是钉「三态 → 对客状态码」映射
+     * 最直接的驱动方式：不起 Spring 上下文、不碰 socket、不需要 Redis。
+     */
+    private static ApiKeyResolver resolverReturning(AdminResolution resolution) {
+        ApiKeyResolver resolver = mock(ApiKeyResolver.class);
+        when(resolver.resolve(anyString())).thenReturn(Mono.just(resolution));
+        return resolver;
     }
 
     /**

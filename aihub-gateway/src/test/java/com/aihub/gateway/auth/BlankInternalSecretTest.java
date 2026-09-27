@@ -20,8 +20,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 出厂默认配置（{@code aihub.internal.secret} 为空串）下的 fail-closed 行为。
  *
  * <p>空 secret 会让 {@code InternalHmac.sign} 抛 {@code IllegalStateException}（{@code SecretKeySpec}
- * 不接受空 key）。那一刻的异常**必须**被折算成 401 + OpenAI 错误体，绝不能变成 500 ——
- * 这正是「任何一级不可用都降级、绝不因基础设施问题给客户端 500」的约定。
+ * 不接受空 key）。那是**平台配置故障**：我们**无法判定**这把 key 是否有效，所以它必须被折算成
+ * {@code 503 service_unavailable} + OpenAI 错误体（{@code api_error}），绝不能变成 {@code 500}。
+ *
+ * <p><b>503 不是 500，而且仍然是拒绝</b>：它是网关自己产出的、有明确语义的数据面错误码
+ * （「我们暂时判不了」），不是「网关自身崩了」；请求同样走不到限流 / 路由 / 上游，客户端同样拿不到
+ * {@code 200}。变的只是诊断通道 —— 以前平台故障伪装成 401「你的 key 是错的」，客户端会去改密钥；
+ * 现在它诚实地告诉客户端「稍后重试」，OpenAI SDK 对 5xx 有内建重试，能做出正确反应。
  *
  * <p>这里刻意**不**提供 {@code @Primary} 假 {@code AdminClient}：要验证的就是真实回源实现，
  * 假 bean 会把唯一的真实现挡住（这也正是当初漏掉该缺陷的原因）。
@@ -57,16 +62,20 @@ class BlankInternalSecretTest {
         registry.add("spring.data.redis.port", () -> "1");
     }
 
+    /**
+     * 空 {@code aihub.internal.secret} = **平台配置故障**（网关判不了这把 key），
+     * 对客是 {@code 503 service_unavailable} + {@code api_error}；上游一次都不许被触到。
+     */
     @Test
-    void unknownKeyWithBlankInternalSecretIsRejectedAsInvalidApiKey() throws Exception {
+    void unknownKeyWithBlankInternalSecretIsAnsweredAsAServiceFault() throws Exception {
         upstream.clearLastRequest();
 
         HttpResponse<String> response = post("Bearer ak_unknown.some-secret");
 
-        assertThat(response.statusCode()).isEqualTo(401);
-        assertThat(response.body()).contains("\"code\":\"invalid_api_key\"");
-        assertThat(response.body()).contains("\"type\":\"invalid_request_error\"");
-        assertThat(upstream.lastRequest()).isNull();
+        assertThat(response.statusCode()).isEqualTo(503);
+        assertThat(response.body()).contains("\"code\":\"service_unavailable\"");
+        assertThat(response.body()).contains("\"type\":\"api_error\"");
+        assertThat(upstream.lastRequest()).as("503 仍然是拒绝：上游一次都不许被触到").isNull();
     }
 
     private HttpResponse<String> post(String authorization) throws Exception {

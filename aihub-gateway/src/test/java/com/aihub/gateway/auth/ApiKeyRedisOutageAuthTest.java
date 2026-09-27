@@ -4,6 +4,7 @@ import com.aihub.gateway.admin.AdminClient;
 import com.aihub.gateway.ratelimit.RateLimitFilter;
 import com.aihub.gateway.testsupport.FakeAdminServer;
 import com.aihub.gateway.testsupport.FakeUpstream;
+import com.aihub.gateway.trace.RequestIdFilter;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -38,10 +39,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 与它那 3 秒预算。Redis 指向死端口（本仓库既有的「Redis 不可用」构造法），因此鉴权缓存必然未命中，
  * 请求必然落在这条路上。
  *
- * <p><b>不削弱鉴权</b>：故障期间仍然 401（fail-closed 是既有且已登记的决策，本类不推翻它）；
- * 本类钉的是「故障**不是**『key 不存在』」—— 它不得进入负缓存，因此故障清除后同一把 key
- * 必须**立刻**恢复，而不是等约 30 秒的负缓存过期。真正不存在的 key 照旧被拒，并且照旧被负缓存
- * （第 2 条用例就是这条红线的哨兵）。
+ * <p><b>不削弱鉴权</b>：故障期间回 {@code 503 service_unavailable}（**同样是拒绝** —— 请求一样
+ * 走不到限流器与上游）；本类钉的是「故障**不是**『key 不存在』」—— 它不得进入负缓存，
+ * 因此故障清除后同一把 key 必须**立刻**恢复，而不是等约 30 秒的负缓存过期。真正不存在的 key
+ * 照旧被拒（{@code 401 invalid_api_key}），并且照旧被负缓存（第 2 条用例就是这条红线的哨兵）。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class ApiKeyRedisOutageAuthTest {
@@ -115,6 +116,11 @@ class ApiKeyRedisOutageAuthTest {
      *
      * <p>RED 证据（修前）：第二个请求拿到 401、且 admin 只被调用过 1 次 —— 那一次的**故障**
      * 被负缓存了，于是故障早就清除了、key 也一直有效，客户端仍要吃约 30 秒的 401。
+     *
+     * <p><b>（D4 起）故障期间的对客是 503 service_unavailable</b>：故障 = 「我们判不了」，
+     * 不再是 401（那是「我们决定了这把 key 无效」）。断言同时钉住 OpenAI 错误体
+     * （{@code api_error}）与 {@code x-request-id} 的存在 —— 后者让拿到 503 的客户端仍能报一条
+     * 可排查的请求 id。
      */
     @Test
     void faultedResolveIsNotNegativeCachedSoTheKeyWorksImmediatelyAfterTheFaultClears() throws Exception {
@@ -127,8 +133,14 @@ class ApiKeyRedisOutageAuthTest {
         HttpResponse<String> duringFault = get("/v1/models", bearer(secret));
 
         assertThat(duringFault.statusCode())
-                .as("故障期间仍然 fail-closed 回 401 —— 这条既有决策本类不推翻")
-                .isEqualTo(401);
+                .as("故障期间回 503 service_unavailable：我们判不了这把 key，不是「你的 key 是错的」"
+                        + "（503 同样是拒绝，请求走不到限流 / 路由 / 上游）")
+                .isEqualTo(503);
+        assertThat(duringFault.body()).contains("\"code\":\"service_unavailable\"");
+        assertThat(duringFault.body()).contains("\"type\":\"api_error\"");
+        assertThat(duringFault.headers().firstValue(RequestIdFilter.HEADER))
+                .as("503 也必须带 x-request-id，否则客户端报障时没有任何可排查的线索")
+                .isPresent();
         assertThat(admin.requestCountForPath(AdminClient.RESOLVE_PATH))
                 .as("前提检查：第一次请求确实回源了 admin（否则本用例证明不了任何事）")
                 .isEqualTo(1);
@@ -143,6 +155,30 @@ class ApiKeyRedisOutageAuthTest {
                 .isEqualTo(2);
         assertThat(afterFault.statusCode())
                 .as("故障清除后同一把 key 必须立刻恢复，而不是被负缓存锁死约 30 秒（local-cache-ttl）")
+                .isEqualTo(200);
+    }
+
+    /**
+     * 「故障没有被记住」的**客户端可见**版本：故障清除后的第一个请求不许再是 {@code 503}。
+     *
+     * <p>与上面那条断言「admin 被调用 2 次」是同一个事实的两面：那条说的是服务端行为，
+     * 这条说的是客户端看得见的状态码。两者都要有 —— 只断言回源次数的话，一个
+     * 「回源了但仍然回 503」的实现照样能绿。
+     */
+    @Test
+    void theFirstRequestAfterTheFaultClearsIsNoLongerAServiceUnavailable() throws Exception {
+        String secret = "d1-fault-then-not-remembered";
+
+        admin.enqueueStalledJsonForPath(AdminClient.RESOLVE_PATH, 200, VALID_VIEW_ENVELOPE,
+                BEYOND_GATEWAY_INTERNAL_HOP_BUDGET_MILLIS);
+        assertThat(get("/v1/models", bearer(secret)).statusCode())
+                .as("前提检查：故障确实生效了（没有 503 就证明不了「故障没被记住」）")
+                .isEqualTo(503);
+
+        admin.enqueueJsonForPath(AdminClient.RESOLVE_PATH, 200, VALID_VIEW_ENVELOPE);
+
+        assertThat(get("/v1/models", bearer(secret)).statusCode())
+                .as("故障结论绝不能被记住：控制面一恢复，第一个请求就必须不再是 503")
                 .isEqualTo(200);
     }
 
@@ -210,10 +246,15 @@ class ApiKeyRedisOutageAuthTest {
      * 限流器根本没被走到，所以「降级到本机令牌桶、仍然拒绝超额」这句话在真实全栈上没有证据。
      *
      * <p><b>故障只允许发生一次</b>：第一次回源迟到 3.5 秒（= 真实 admin 被自己的 Redis 超时拖慢
-     * 的形状），之后 admin 立刻给出正确视图。于是「故障期间 401」是允许的（fail-closed 不变），
-     * 但**第二个 401 就是缺陷** —— 它意味着那次故障被缓存成了「这把 key 不存在」。
-     * 修前实测就是第二个请求仍然是 401（见 {@link #faultedResolveIsNotNegativeCachedSoTheKeyWorksImmediatelyAfterTheFaultClears}
+     * 的形状），之后 admin 立刻给出正确视图。于是「故障期间 503 service_unavailable」是允许的
+     * （判不了 ⇒ 诚实地说不确定），但**任何一次 401 都是缺陷** —— 401 的含义是「我们决定了这把 key
+     * 无效」，而本用例里的 key 一直有效，故障也只发生过一次。修前实测就是第二个请求仍然是 401
+     * （见 {@link #faultedResolveIsNotNegativeCachedSoTheKeyWorksImmediatelyAfterTheFaultClears}
      * 的 RED），因此本用例在修前必然变红；「降级 = 放行所有人」的实现则永远打不到 429。
+     *
+     * <p><b>（D4 起）不变量升级</b>：允许出现的状态码只有
+     * {@code 503}（仅限故障生效期间）、{@code 200}、{@code 429} —— **从头到尾不许出现任何 401**。
+     * 修前版本只禁「第二个 401」，因此一个「每 N 个请求偶然 401 一次」的实现能滑过去。
      */
     @Test
     void afterATransientFaultOverLimitRequestsAreStillLimitedInsteadOfRejectedAsBadCredentials()
@@ -229,28 +270,42 @@ class ApiKeyRedisOutageAuthTest {
         HttpResponse<String> rejected = null;
         for (int attempt = 1; attempt <= MAX_ATTEMPTS && rejected == null; attempt++) {
             HttpResponse<String> response = get("/v1/models", bearer(secret));
+            int status = response.statusCode();
 
-            if (response.statusCode() == 401) {
+            assertThat(status)
+                    .as("第 %s 个请求是 401 —— 一次瞬时故障被当成了「这把 key 不存在」，"
+                            + "于是有效 key 被反复拒绝（修前实测：第二个请求 401，且 admin 只被调用过 1 次）",
+                            attempt)
+                    .isNotEqualTo(401);
+
+            if (status == 503) {
                 assertThat(faultAlreadyObserved)
-                        .as("第 %s 个请求仍然是 401 —— 一次瞬时故障被缓存成了「这把 key 不存在」，"
-                                + "于是它被反复拒绝（修前实测：第二个请求 401，且 admin 只被调用过 1 次）", attempt)
+                        .as("第 %s 个请求仍然是 503 —— 一次瞬时故障被缓存成了「判不了」，"
+                                + "于是控制面早就恢复了客户端还在被拒", attempt)
                         .isFalse();
                 faultAlreadyObserved = true;
                 continue;
             }
 
-            assertThat(response.statusCode())
+            assertThat(faultAlreadyObserved)
+                    .as("第 %s 个请求拿到了 %s，但它排在 503 之前 —— 故障只在第一次回源上，"
+                            + "第一个请求不可能被放行", attempt, status)
+                    .isTrue();
+            assertThat(status)
                     .as("第 %s 个请求：Redis 挂了也只能是「放行」或「限流」，"
                             + "绝不能是「你的 key 是错的」", attempt)
                     .isIn(200, 429);
             assertThat(response.headers().firstValue(RateLimitFilter.LIMIT_HEADER))
                     .as("第 %s 个请求：限流头是「判定确实由限流器做出」的证据", attempt)
                     .isPresent();
-            if (response.statusCode() == 429) {
+            if (status == 429) {
                 rejected = response;
             }
         }
 
+        assertThat(faultAlreadyObserved)
+                .as("前提检查：%s 次请求里必须真的出现过一次故障（503）", MAX_ATTEMPTS)
+                .isTrue();
         assertThat(rejected)
                 .as("降级 ≠ 放行：Redis 不可用时必须在 %s 次内打到限额（内置默认 qps=10 / burst=20）",
                         MAX_ATTEMPTS)
