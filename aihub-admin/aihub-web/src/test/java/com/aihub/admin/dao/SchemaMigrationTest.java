@@ -29,7 +29,7 @@ class SchemaMigrationTest extends AbstractIntegrationTest {
     private ConfigVersionMapper configVersionMapper;
 
     @Test
-    void flywayAppliesExactlyOneMigration() {
+    void flywayAppliesExactlyTwoMigrations() {
         // D1：M4 有意引入第二条迁移（审计表 / request_log 索引 / config_version）。
         // 断言语义从「恰好 1 条」升级为「恰好这 2 条」：护栏要保的是「没人能悄悄加迁移」，
         // 而不是「永远只有 1 条」—— 现在任何人再加迁移都必须**显式**改这里。
@@ -58,12 +58,21 @@ class SchemaMigrationTest extends AbstractIntegrationTest {
 
     @Test
     void v2CreatesTheAuditTableAndTheTwoRequestLogIndexes() {
-        // 审计表可写可读（顺带证明列名与实体映射一致）
+        // 审计表可写可读：插入后能按主键读回同一行。
+        // 下面额外回读 tenantId/actorType/targetType/targetId 这四个**多词**列 —— 只回读 action
+        // 那种单词列证明不了列名映射（下划线转驼峰开着关着结果都一样），多词列才钉得住它。
         AuditLogEntity row = new AuditLogEntity();
+        row.setTenantId(1L);
         row.setActorType("SYSTEM"); row.setActor("system");
         row.setAction("MIGRATION_TEST"); row.setTargetType("CHANNEL");
+        row.setTargetId("42");
         auditLogMapper.insert(row);
-        assertThat(auditLogMapper.selectById(row.getId()).getAction()).isEqualTo("MIGRATION_TEST");
+        AuditLogEntity read = auditLogMapper.selectById(row.getId());
+        assertThat(read.getAction()).isEqualTo("MIGRATION_TEST");
+        assertThat(read.getTenantId()).isEqualTo(1L);
+        assertThat(read.getActorType()).isEqualTo("SYSTEM");
+        assertThat(read.getTargetType()).isEqualTo("CHANNEL");
+        assertThat(read.getTargetId()).isEqualTo("42");
 
         // 两个索引真实存在（查 information_schema 而不是读 SQL 文件）
         assertThat(indexNamesOf("request_log"))

@@ -31,8 +31,8 @@ import org.springframework.stereotype.Component;
  *
  * <p><b>为什么不是 Flyway 迁移</b>（决策 12）：迁移脚本是**一次性、不可回滚、随代码分发的**
  * 数据变更，而演示渠道依赖环境（base-url、密钥）。更硬的约束是
- * {@code SchemaMigrationTest.flywayAppliesExactlyOneMigration} 断言恰好 1 条迁移 ——
- * 加迁移就必须改那条断言，那是在削弱护栏而不是加功能。
+ * {@code SchemaMigrationTest} 把迁移集合（version + description）**逐条显式钉住** ——
+ * 加迁移就必须**有意**改那条断言，护栏因此是显式的，而不是被削弱。
  *
  * <p><b>幂等</b>：按名字 / 按 (模型, 渠道) / 按 (租户, 维度) 判断「已存在就跳过」，因此重复启动
  * 不会产生重复行。
