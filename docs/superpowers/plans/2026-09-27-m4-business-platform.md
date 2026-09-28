@@ -122,6 +122,7 @@ M4 新增/修改的文件（`改` = 修改既有文件；**依赖变更只有一
 | `.../service/console/ConsoleClaims.java` | 新增：令牌载荷 record（userId / tenantId / role / issuedAt / expiresAt） |
 | `.../service/console/ConsoleTokenService.java` | 新增：签发/校验令牌的薄封装（读 `aihub.console.*` 配置） |
 | `.../service/audit/AuditService.java` | 新增：写 `audit_log`（与业务同事务，D8） |
+| `.../service/audit/AuditAction.java` | 新增：动作常量（`TENANT_CREATE` / `API_KEY_DISABLE` / `CHANNEL_ROTATE_KEY` / `LOGIN_FAILURE` / `RECONCILE_REPORT` …）—— Task 7 创建（F7c：这张表此前漏了它） |
 | `.../service/tenant/TenantAdminService.java` | 新增：租户 CRUD |
 | `.../service/apikey/ApiKeyAdminService.java` | 新增：铸造（复用 `ApiKeyHasher`）、列表、吊销/停用 + 显式 `DEL`（D11） |
 | `.../service/channel/ChannelAdminService.java` | 新增：渠道 CRUD（写入时 AES-GCM 加密、轮换重加密） |
@@ -302,6 +303,12 @@ assertThat(applied).extracting(r -> String.valueOf(r.get("description")))
 3. 新增两条用例（见 Step 3）。
 
 **预期用例数**：该类现有 **4** 条，加新增 2 条 = **6** 条（Step 2 的期望值以此为准）。
+
+> ⚠️ **RED 的顺序（否则 Step 2 抓不到红）**：Step 1 里不要把脚本和断言一次写完。按这个次序做：
+> ① **先只改 `SchemaMigrationTest`**（迁移断言 + 表清单），**暂不创建** `V2__m4_console.sql`，跑一次，
+> 抓下 **`expected size: 2 but was: 1`**；② **然后**再创建 `V2__m4_console.sql`，跑一次，
+> 抓下 **`allTwelveTablesExist` 的 `containsExactlyInAnyOrder` 红**（多了 `audit_log` 与 `config_version`）；
+> ③ 最后补实体/Mapper 与新用例。两次红都是判别性的，而且顺序反了就没有红可抓（评审核实过这一点）。
 
 - [ ] **Step 2: 跑它确认失败**
 
@@ -853,8 +860,9 @@ public class ConfigSubscriber implements MessageListener {
 
 - [ ] **Step 4: 跑它确认通过**
 
-Run: `mvn -B -pl aihub-gateway -am test "-Dtest=ConfigInvalidateContractTest,ConfigSubscriberTest,ConfigCacheTest,ConfigClientTest"`
+Run: `mvn -B -pl aihub-gateway -am test "-Dtest=ConfigInvalidateContractTest,ConfigSubscriberTest,ConfigCacheTest"`
 Expected: 全绿 + `BUILD SUCCESS`；再跑一次整个网关模块 `mvn -B -pl aihub-gateway -am test` 确认**没有 Docker、没有活 Redis**也能全绿（基线 350）。
+> ⚠️ **`ConfigClientTest` 不存在**（这个模块只有 `ConfigCacheTest`，本任务也没有创建 `ConfigClientTest`）。而且 `.mvn/maven.config` 设了 `-Dsurefire.failIfNoSpecifiedTests=false`，所以把一个不存在的类名写进 `-Dtest` 会**打印 BUILD SUCCESS 却静默跳过** —— 正是全局约束里点名的那口陷阱（F5）。契约用例放在 `ConfigInvalidateContractTest` 里就够，不要再引用不存在的类。
 
 - [ ] **Step 5: 提交**
 
@@ -863,7 +871,7 @@ git add aihub-gateway/src/main/java/com/aihub/gateway/config/ \
         aihub-gateway/src/main/resources/application.yml \
         aihub-gateway/src/test/java/com/aihub/gateway/config/ \
         aihub-gateway/src/test/resources/application.properties
-git commit -m "fix(config): honour the invalidation broadcast and drop local+shared caches and the water mark"
+git commit -m "fix(config): honour the invalidation broadcast, drop local+shared caches and RAISE the water mark"
 ```
 
 **验收判据：** 收到一条失效消息后，网关的下一次读取**必须回源 admin**，并且共享条目**被删**、写入水位**抬到消息里的版本**（**不是**清掉/重置）；坏消息不触发失效也不抛异常；测试环境不因缺 Redis 而变红。
@@ -1046,6 +1054,8 @@ git commit -m "feat(console): add the HS256 console token with a server-pinned a
   - `ConsoleProperties`：`secret`（`aihub.console.secret`）、`tokenTtl`（默认 `2h`）
   - `ConsoleAuthFilter`：`@Order(Ordered.LOWEST_PRECEDENCE - 100)`，只守 `/api/**`
   - 请求属性 `ConsoleAuthFilter.ATTRIBUTE_CLAIMS = "aihub.consoleClaims"`
+  - **`ConsoleAuthController` 同时提供一个 `GET /api/ping`**（返回 `{"code":"OK","message":"success","data":{"userId":…,"tenantId":…,"role":…}}`，取自 `ATTRIBUTE_CLAIMS`）。它存在的唯一理由是**给本任务的鉴权用例一个真实存在的靶子**：`/api/**` 在 Task 6 里只有登录一个映射，而 Task 8 的 `/api/tenants` 还没写出来（F3）
+  - ⚠️ **本任务的两个正向用例不许引用 `/api/tenants`**（那是 Task 8 的）：带令牌 200 的那一半打 `GET /api/ping`；`VIEWER` 只读角色的对照也用 `GET /api/ping`（200）与 `POST /api/ping`（403，写方法被拒 —— 拦在过滤器里，和具体控制器无关）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1066,7 +1076,8 @@ void aBlankConsoleSecretFailsClosedWithConfigurationError() {
 
 @Test
 void viewerRoleMayReadButNotWrite() {
-    // GET  /api/tenants → 200；POST /api/tenants → 403 + code=FORBIDDEN（admin 信封，不是 Spring 默认体）
+    // GET  /api/ping → 200（**不是** /api/tenants：那是 Task 8 的，见 Interfaces 里的 F3 说明）
+    // POST /api/ping → 403 + code=FORBIDDEN（admin 信封，不是 Spring 默认体）
 }
 
 @Test
@@ -1464,7 +1475,7 @@ git commit -m "feat(console): model route and rate-limit policy CRUD with dimens
 
 ---
 
-## Task 11: 渠道探测 + 请求日志/账单查询
+## Task 11: 渠道探测 + 请求日志/账单/审计查询
 
 **Files:**
 - Create: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/BillingDailyEntity.java`
@@ -1487,6 +1498,7 @@ git commit -m "feat(console): model route and rate-limit policy CRUD with dimens
   - `GET /api/billing/daily?from=&to=`（按 `tenant_id` + `stat_date` 范围）
   - **`GET /api/audit?tenantId=&from=&to=&page=&size=`** + `AuditQueryService.page(...) : Page<AuditLogView>`
     —— **审计是 §12 的 M4 交付物之一，光有写入路径不算交付**（评审点名）。查询同样强制 tenant + 时间范围、分页有上界；`AuditLogView` **不含** `detail` 里的敏感内容（写入侧已经保证不含，这里只做只读回显）。
+  - ⚠️ **`RequestLogView` 与 `AuditLogView` 都是嵌套在各自 service 里的 `record`**（`RequestLogQueryService.RequestLogView` / `AuditQueryService.AuditLogView`），**不额外建文件** —— 所以本任务的 `git add` 不需要再加路径（F2：否则「Files 说要新建两个 view」与「add 清单里没有」会互相矛盾）。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1521,6 +1533,7 @@ git add aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/BillingDailyEnt
         aihub-admin/aihub-service/src/main/java/com/aihub/service/log/RequestLogQueryService.java \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/log/AuditQueryService.java \
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/AuditController.java \
+        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ChannelController.java \
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/LogQueryController.java \
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/BillingController.java \
         aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ProbeAndQueryIntegrationTest.java
@@ -1553,7 +1566,7 @@ git commit -m "feat(console): channel probe, request-log paging and daily billin
   - `QuotaPeriod.of(long epochMillis) : String`（UTC 的 `YYYYMM`）、`QuotaPeriod.nextPeriodStartMillis(String period) : long`
   - `QuotaDecision(boolean allowed, long remainingTokens, long remainingRequests)`（`-1` 表示该维度不限）
   - `QuotaScript.parse(List<?>)` **必须用 `((Number) raw.get(i)).longValue()`**（Spring Data Redis 的 `DefaultRedisScript<..., List>` 回来的是 `List<Long>`/`Number`，直接强转 `Long` 在某些驱动/版本下会 `ClassCastException`），并且**返回形状不是 3 个元素时抛 `IllegalStateException`**（不是返回 null —— 那会被当成"Redis 不可用"）
-  - **限额值的上界校验**：`QuotaScript` 的 ARGV 走 Lua 的 double，**超过 2^53 会丢整数精度**。`QuotaAdminService.update` 必须拒绝 `token_limit`/`request_limit > 9_007_199_254_740_992`（`INVALID_PARAM`），并有一条用例（见 E.4-(a)）
+  - **限额值的上界校验（F4：这条要求必须自带用例，不能只写在附录里）**：`QuotaScript` 的 ARGV 走 Lua 的 double，**超过 2^53 会丢整数精度**。因此在 `aihub-common` 里加一个纯函数 `QuotaScript.assertWithinRange(long limit) : void`（`limit > 9_007_199_254_740_992L` 时抛 `IllegalArgumentException`；**等于 2^53 是允许的** —— 边界只在这里定义一次，别在两处各写一个 `>`/`>=`），`QuotaAdminService.update` 调用它并把异常折成 `BizException(INVALID_PARAM, …)`；**用例写在 `QuotaContractTest` 里**（纯函数、不需要数据库），即该类的 `Tests run` 从 3 变成 **4**
   - `QuotaScript.SCRIPT : String`、`QuotaScript.keys(long tenantId, String period) : List<String>`、`QuotaScript.args(long estimatedTokens, long tokenLimit, long requestLimit, long ttlMillis) : List<String>`、`QuotaScript.parse(List<?> raw) : QuotaDecision`
   - `QuotaAdminService.getOrCreate(long tenantId, String period)`、`QuotaAdminService.update(long tenantId, String period, long tokenLimit, long requestLimit)`（用 `quota.version` 做乐观锁）
 
@@ -1663,7 +1676,7 @@ return {1, remainingTokens, remainingRequests}
 
 - [ ] **Step 4: 跑它确认通过并提交**
 
-Run: `mvn -B -pl aihub-admin/aihub-common -am test "-Dtest=QuotaContractTest"` → `Tests run: 3, Failures: 0`
+Run: `mvn -B -pl aihub-admin/aihub-common -am test "-Dtest=QuotaContractTest"` → `Tests run: 4, Failures: 0`（F4：第 4 条就是 `assertWithinRange` 的边界用例）
 Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=QuotaPreDeductionIntegrationTest"` → 全绿
 
 ```bash
@@ -1691,7 +1704,7 @@ git commit -m "feat(quota): add the atomic pre-deduction contract and the quota 
 - Create: `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaLimiter.java`、`RedisQuotaLimiter.java`
 - Create: `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaCorrector.java`（校正钩子；`ChatRelayController` 在 `doFinally` 里拿到的那个 `MeteringEvent` 直接喂给它）
 - Create: `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaConfigProperties.java`、`QuotaConfig.java`
-- Modify: `aihub-gateway/src/main/java/com/aihub/gateway/relay/ChatRelayController.java`（拿到 usage 后校正）
+- Modify: `aihub-gateway/src/main/java/com/aihub/gateway/relay/ChatRelayController.java`（**在 `doFinally` 里、`meteringPublisher.publish(event)` 之后调用 `quotaCorrector.correct(event)`** —— controller 自己看不到 `usage`，别写成「拿到 usage 后校正」，见本节 Step 3 的说明）
 - Modify: `aihub-gateway/src/main/resources/application.yml`、`aihub-gateway/src/test/resources/application.properties`
 - Test: `aihub-gateway/src/test/java/com/aihub/gateway/quota/QuotaFilterTest.java`
 - Test: `aihub-gateway/src/test/java/com/aihub/gateway/quota/QuotaDegradeTest.java`
@@ -1725,6 +1738,17 @@ void redisDownAllowsTheRequestAndCountsADegrade() {      // D7：配额 fail-ope
     // spring.data.redis.port=1 + 真实过滤器链
     assertThat(post("/v1/chat/completions", smallBody()).statusCode()).isEqualTo(200);
     assertThat(meterRegistry.counter("aihub.quota.degraded").count()).isEqualTo(1.0);
+}
+
+@Test
+void anUnexpectedScriptShapeCountsScriptErrorNotDegrade() {   // F6 / E.4-(a)
+    // 让 Lua 返回一个**非预期形状**（例如 2 个元素，或元素不是数字）：stub 掉 QuotaScript.SCRIPT 的返回，
+    // 或直接让 QuotaScript.parse 抛 IllegalStateException。
+    // 断言：请求**仍然放行**（配额是记账，不能因为脚本坏了就拒绝付费客户），
+    //       但计数落在 aihub.quota.script_error 上，**aihub.quota.degraded 保持 0**。
+    assertThat(post("/v1/chat/completions", smallBody()).statusCode()).isEqualTo(200);
+    assertThat(meterRegistry.counter("aihub.quota.script_error").count()).isEqualTo(1.0);
+    assertThat(meterRegistry.counter("aihub.quota.degraded").count()).isZero();
 }
 
 @Test
@@ -1795,6 +1819,8 @@ private static ServerWebExchange withCachedBody(ServerWebExchange exchange, byte
 ```
 
 `reserveAndContinue`：取 `ApiKeyAuthFilter.ATTRIBUTE_KEY_VIEW` 里的 `tenantId`/`apiKeyId` → `QuotaResolver` 选额度（`quota` 表按 `tenant_id + period`，**没有行或 `token_limit == 0` 表示不限**，D15）→ `QuotaEstimator.estimate(body, maxTokens)`（**复用 `TokenEstimator`**）→ `RedisQuotaLimiter.reserve(...)` → 拒绝则 `GatewayErrors.write(..., TOO_MANY_REQUESTS, "insufficient_quota", "insufficient_quota", …)`；允许则把 `QuotaReservation` 放进 exchange 属性后 `chain.filter(...)`。Redis 异常时**放行** + `aihub.quota.degraded` 计数 + 限流过的 WARN（D7）。
+
+> ⚠️ **两种「没生效」必须分开计数（F6 / E.4-(a)）**：`QuotaScript.parse` 抛出的 **`IllegalStateException`（脚本返回形状不对）要单独落 `aihub.quota.script_error` + 放行**，**绝不能**被那个宽泛的 `catch (Exception e) → degraded++` 吞掉 —— 合成一个计数器，等于让「Lua 脚本写错了」永远藏在「Redis 挂了」后面，而那两件事的处置完全不同（前者是缺陷，要立刻修；后者是设计好的降级）。
 
 **校正点在哪：`ChatRelayController` 自己看不到 `usage`**（评审已核实：`UsageCapture` 是 `RelayMetering` 的内部物，usage 只在 `metering.toEvent(signal)` 被物化，而那一句在 `doFinally` 里，见 `ChatRelayController:203`）。所以本任务**新增**一个 gateway bean `QuotaCorrector`（`com.aihub.gateway.quota.QuotaCorrector`），并把那一处从：
 
@@ -1887,6 +1913,7 @@ git commit -m "feat(quota): add the HMAC-signed internal reserve fallback"
 - Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/QuotaReconciliationService.java`
 - Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/QuotaReconciliationJob.java`
 - Modify: `aihub-admin/aihub-service/src/main/java/com/aihub/service/metering/MeteringSchedulingConfig.java`（注册 `@Scheduled(cron = "${aihub.quota.reconcile-cron:0 0 2 * * *}")`）
+- Modify: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/BillingDailyMapper.java`（**加 `recomputeDaily(from, to)`** —— 这个文件是 Task 11 建的，本任务改它；**必须进本任务的 `git add`**，否则 Step 3 的提交里没有那个方法、而服务层已经在调它 = **提交出来的树编译不过**，违反全局约束的「每个任务的提交必须让整个反应堆编译通过」）
 - Modify: `aihub-admin/aihub-web/src/main/resources/application.yml`
 - Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/quota/QuotaReconciliationTest.java`
 
@@ -1948,6 +1975,7 @@ Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am tes
 ```bash
 git add aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/ \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/metering/MeteringSchedulingConfig.java \
+        aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/BillingDailyMapper.java \
         aihub-admin/aihub-web/src/main/resources/application.yml \
         aihub-admin/aihub-web/src/test/java/com/aihub/admin/quota/QuotaReconciliationTest.java
 git commit -m "feat(quota): add the 02:00 reconciliation job that recomputes billing_daily and reports deviations"
@@ -2247,3 +2275,23 @@ Task 6/8/9/10/11 ─> Task 16 (管理台静态页)
 | 5. N12：Task 7 的全表计数断言 | 断言改成**增量**（先记基线、再断言回滚后没有新增），不再依赖执行顺序 |
 
 于是第三轮复评的检查面变成「这 7 处是否真的在正文里 + 有没有引入新矛盾」。**注意：F.2 与 F.4 本身不构成"需求所在地"** —— 如果第三轮发现某条又只落在附录里，那就是同一类缺陷的重犯。
+
+### F.5 第三轮复评的处置（发现编号 F1–F7 指**第三轮**的编号，不是本附录的字母）
+
+第三轮（窄口径）的结论是 **Ready to execute Task 1**，同时指出「Task 1 之后并不 execution-clear」：
+**7 条里 6 条是"要求已经在正文、坏的是暂存清单/测试顺序/没写的用例"**。已逐条修：
+
+| 编号 | 问题 | 处置 |
+|---|---|---|
+| F1 | Task 15 要给 Task 11 建的 `BillingDailyMapper` 加 `recomputeDaily`，但那个文件既不在 Task 15 的 Files 也不在 `git add` 里 → **提交出来的树编译不过**（服务层已在调它） | Files 加 `Modify: BillingDailyMapper.java`（并写明不 stage 的后果），`git add` 补该路径 |
+| F2 | Task 11 声明 Modify `ChannelController.java`（加 `probe`）但没 stage；`RequestLogView`/`AuditLogView` 的归属也没说 | `git add` 补 `ChannelController.java`；并明确**两个 view 是嵌套在各自 service 里的 record、不额外建文件**，所以 add 清单不需要新路径 |
+| F3 | Task 6 的两个正向用例打不存在的 `GET /api/ping` 与 Task 8 才有的 `GET /api/tenants` → **Task 6 按字面执行不了**（与已修的 `/console/index.html` 属同一类） | `ConsoleAuthController` **增加一个 `GET /api/ping`**（返回 claims），两个用例都改打它（`VIEWER` 的 403 用 `POST /api/ping`，拦在过滤器里），并显式写「不许引用 `/api/tenants`」 |
+| F4 | 「限额 > 2^53 → `INVALID_PARAM`」要求自带用例，但用例不存在、`Tests run: 3` 也把它排除在外 | 上界规则做成 `aihub-common` 的纯函数 **`QuotaScript.assertWithinRange(long)`**（等于 2^53 允许，边界只定义一次），用例进 `QuotaContractTest` → `Tests run: 4` |
+| F5 | Task 4 的 `-Dtest` 里写了**不存在**的 `ConfigClientTest`，而 Surefire 被配置成"没匹配也成功" → **假绿** | 从命令里删掉它，并把这条陷阱写在原地（F5 就是全局约束里点名的那一口） |
+| F6 | `aihub.quota.script_error` 只有要求、没有 Step 3 的实现句子与测试 → 实现者自然的 `catch (Exception) → degraded++` 会把两个计数器合并（正是 E.4-(a) 警告的事） | Step 1 加用例 `anUnexpectedScriptShapeCountsScriptErrorNotDegrade`（放行 + `script_error=1` + `degraded=0`）；Step 3 明确 `parse` 抛 `IllegalStateException` 走 `script_error`，**不许被宽泛 catch 吞掉** |
+| F7 | 三处小疵：Task 4 的提交信息写 "drop … the water mark"（读起来像"把水位删了"，与正文相反）；Task 11 的 H1 漏了 `/api/audit`；aihub-service 的 File Structure 表漏了 `AuditAction.java` | 三处都改（提交信息改成 "RAISE the water mark"；H1 补 `/audit`；表里补 `AuditAction.java`） |
+| Task 1 的 RED 顺序 | Step 1 若把脚本与断言一次写完，Step 2 就**没有红可抓**（2 条迁移 ✓、12 张表 ✓） | Step 1 末尾加一段**三步次序**：先只改测试抓 `expected size: 2 but was: 1` → 再建 V2 抓表清单红 → 最后补实体/新用例 |
+
+第三轮另外**独立复核了 Task 1 依赖的全部现实**（`SchemaMigrationTest` 确实 4 条用例且用 `JdbcTemplate` 而非 Flyway API；`allTenTablesExist` 恰好 10 张表；`request_log` 的两个列与 `RANGE COLUMNS(created_at)` 分区使两条 `ADD KEY` 合法且不撞名；实体写法与仓库一致；`AbstractIntegrationTest` 无全局清理因此"先归零"的警告是必要的），并确认 **Task 1 的 Files/Interfaces/V2 SQL/`git add` 完整**。
+
+**至此：Task 1 可以直接开工**（上述 RED 次序已写进正文），其后的任务按各自小节里的修正执行即可。
