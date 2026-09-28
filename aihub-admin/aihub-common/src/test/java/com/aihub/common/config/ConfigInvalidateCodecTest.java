@@ -3,6 +3,7 @@ package com.aihub.common.config;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
 /**
  * 配置失效消息的线格式（{@code {version}|{escaped reason}}）是 admin（发布方）与 gateway（订阅方）
@@ -52,6 +53,34 @@ class ConfigInvalidateCodecTest {
         assertThat(ConfigInvalidateCodec.decode("")).isNull();
         assertThat(ConfigInvalidateCodec.decode("not-a-number|x")).isNull();
         assertThat(ConfigInvalidateCodec.decode("1")).as("缺分隔符").isNull();
+    }
+
+    /**
+     * 发布端**快速失败**的判据：空 reason 编码出的线格式是 {@code "42|"}，而 {@link
+     * ConfigInvalidateCodec#decode} 按结构把 {@code "42|"} 判为畸形返回 {@code null} ——
+     * 订阅端只打一条 WARN、不做任何失效，其他实例默默等满 TTL（回到 M3 的 10 分钟上界），
+     * 而发布端一条都没记。**这种载荷比没有载荷更糟，因为它是静默的**，所以 {@code encode}
+     * 必须拒绝产生它的输入，而不是把这份不对称写进文档。
+     *
+     * <p>空白但非空的 reason（{@code " "}）**允许**：线格式不是清洗层，这里刻意不做 trim 归一化，
+     * 且 {@code "42| "} 是一条订阅端能解开的**有效**载荷（与 {@code "42|"} 不同）。
+     */
+    @Test
+    void encodeRejectsNullOrEmptyReasonInsteadOfEmittingAPayloadDecodeWouldReject() {
+        assertThatIllegalArgumentException()
+                .as("null reason 曾经编码成 \"42|\"，被订阅端判为畸形后静默丢弃")
+                .isThrownBy(() -> ConfigInvalidateCodec.encode(new ConfigInvalidateMessage(42L, null)));
+        assertThatIllegalArgumentException()
+                .as("空 reason 与之等价：同样产生 \"42|\" 这条解不开的载荷")
+                .isThrownBy(() -> ConfigInvalidateCodec.encode(new ConfigInvalidateMessage(42L, "")));
+
+        var blankButNonEmpty = new ConfigInvalidateMessage(42L, " ");
+        assertThat(ConfigInvalidateCodec.encode(blankButNonEmpty))
+                .as("只拒绝 null / 空串；空白按字面量上线，不做 trim 归一化")
+                .isEqualTo("42| ");
+        assertThat(ConfigInvalidateCodec.decode(ConfigInvalidateCodec.encode(blankButNonEmpty)))
+                .as("\"42| \" 是有效载荷（\"42|\" 则不是），因此订阅端不会静默丢弃它")
+                .isEqualTo(blankButNonEmpty);
     }
 
     @Test

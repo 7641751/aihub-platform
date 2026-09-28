@@ -29,6 +29,12 @@ import org.springframework.stereotype.Service;
  * {@code useAffectedRows=false}（即设了 {@code CLIENT_FOUND_ROWS}）下又会返回 1 —— 同一个实现可能给出
  * 0 / 1 / 2，那是驱动语义，不是业务事实（Task 1 已登记）。
  *
+ * <p><b>调用方义务：只能在事务提交之后调用，不能在事务里调</b>。本方法写的是**持久水位**，而广播是
+ * **不可撤回**的：若在事务内调用而事务随后回滚，消息里的版本会比水位更高，其他实例按版本比对就会把
+ * **真实但更低**的快照挡在门外，直到后续某次写超过它才自愈 —— 有界、可自愈，但是**静默**的。
+ * 把「提交后调用」落成 after-commit 钩子（连同它的用例）属于**引入调用方的任务**（Task 8/9/10）；
+ * 本任务只登记这条义务，**不声称它已被验证**（这里没有回滚用例，也没有 after-commit 机制）。
+ *
  * <p><b>发布失败绝不让业务写失败</b>：调用本方法时控制台的写**已经提交**了。把「广播失败」变成
  * 「业务失败」只会让用户以为没存上，然后重试一次已经成功的写。因此 {@link #publish(long, String)}
  * 吞掉所有 {@link RuntimeException}，只记账 + 打 WARN。
@@ -67,11 +73,17 @@ public class ConfigChangePublisher {
     /**
      * 抬水位（D5）并广播失效（D4）。返回生效版本。
      *
+     * <p><b>调用方义务：必须在事务提交之后调用</b>（见类注释）：本方法写持久水位 + 发不可撤回的广播，
+     * 在事务内调用、事务随后回滚，会让发布出去的版本高于水位，其他实例便会把真实但更低的快照挡在门外
+     * （有界、可自愈，但静默）。after-commit 钩子与它的用例属于引入调用方的那些任务（Task 8/9/10）。
+     *
      * <p><b>发布失败绝不让业务写失败</b>：控制台的写已经提交了，把「广播失败」变成「业务失败」
      * 只会让用户以为没存上 —— 而本地 TTL（30s）+ 版本比对是设计文档 §6.3 写明的兜底。
      * 代价（诚实登记）：广播失败时其他实例只能等 TTL，最长回到 M3 的 10 分钟上界。
      *
-     * @param reason 失效原因（有限枚举，如 {@code "channel.update"}），只进日志与消息正文
+     * @param reason 失效原因 token（**有限枚举**，如 {@code "channel.update"}）：只进日志与消息正文，
+     *               但**必须非空** —— 空/ {@code null} 会被 {@link ConfigInvalidateCodec#encode} 拒绝，
+     *               由 {@link #publish(long, String)} 转成计数 + WARN（订阅端会丢弃这种载荷，静默不失效）
      * @return 生效版本 = {@code max(现在, 抬升后读回的水位)}；订阅方按它抬写入水位
      */
     public long bumpAndPublish(String reason) {
@@ -90,8 +102,16 @@ public class ConfigChangePublisher {
      * 把一条失效消息投到 {@link ConfigInvalidateTopology#CHANNEL}。**永不抛异常**：
      * 广播是可丢的加速手段，配置的真相源是 MySQL + 快照 TTL（见类注释里的代价登记）。
      *
+     * <p><b>调用方义务：必须在事务提交之后调用</b>（见类注释）：这里发出去的是**不可撤回**的广播，
+     * 事务回滚不会把它收回来，而水位会回滚 —— 消息里的版本因此可能长期高于真实水位。
+     *
      * <p>载荷由 {@link ConfigInvalidateCodec} 编码 —— 与 gateway 订阅方共用同一份实现，
      * 因此频道名与线格式只有一处真相。
+     *
+     * @param reason 失效原因 token（**有限枚举**，如 {@code "channel.update"}），**必须非空**：
+     *               {@link ConfigInvalidateCodec#encode} 对 {@code null} / 空串快速失败，而本方法的
+     *               {@code catch (RuntimeException)} 把它转成计数 + WARN —— 因为订阅端会拒绝这种载荷，
+     *               让它上线等于**静默**地不做失效
      */
     public void publish(long version, String reason) {
         try {

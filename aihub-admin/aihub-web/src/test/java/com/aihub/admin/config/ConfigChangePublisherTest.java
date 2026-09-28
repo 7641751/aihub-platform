@@ -1,5 +1,8 @@
 package com.aihub.admin.config;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.aihub.admin.support.AbstractIntegrationTest;
 import com.aihub.common.config.ConfigInvalidateCodec;
 import com.aihub.common.config.ConfigInvalidateTopology;
@@ -8,6 +11,7 @@ import com.aihub.service.config.ConfigChangePublisher;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
@@ -16,6 +20,7 @@ import org.springframework.data.redis.listener.ChannelTopic;
 import org.springframework.data.redis.listener.RedisMessageListenerContainer;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -24,12 +29,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
  * admin 侧的**发布方**（D4/D5）：抬水位 + 把失效消息真的投到 {@code aihub:config:invalidate}。
  *
- * <p><b>为什么这是一条真实的订阅</b>：本用例不断言「方法被调用过」（那是 Mockito 的断言），
+ * <p><b>为什么这是一条真实的订阅</b>：成功路径不断言「方法被调用过」（那只是 Mockito 的断言），
  * 而是在真 Redis（{@code AbstractIntegrationTest} 的 Testcontainers 单例）上装一条
  * {@link RedisMessageListenerContainer}，断言**线上真的出现了那条消息**、且它的版本号等于
  * {@code bumpAndPublish} 的返回值。跨服务契约的价值全在这里：gateway 侧订阅方（Task 4）看到的
@@ -40,8 +47,9 @@ import static org.mockito.Mockito.when;
  * {@code RedisMessageListenerContainer} 字段，所以这里用注入的 {@link RedisConnectionFactory} 现搭一个
  * （brief 里的 {@code container.addMessageListener(...)} 是伪代码）。
  *
- * <p>两个用例都不需要额外的 Docker 容器（复用基类的单例）：成功路径用真 Redis，
- * 失败路径用替身 Redis —— 「发布失败绝不让业务写失败」是**异常路径**，不能靠真 Redis 去制造。
+ * <p>三个用例都不需要额外的 Docker 容器（复用基类的单例）：成功路径用真 Redis，
+ * 两条失败路径（Redis 抛异常、reason 为空被 codec 拒绝）用替身 Redis —— 「发布失败绝不让业务写失败」
+ * 是**异常路径**，不能靠真 Redis 去制造。
  */
 class ConfigChangePublisherTest extends AbstractIntegrationTest {
 
@@ -74,7 +82,7 @@ class ConfigChangePublisherTest extends AbstractIntegrationTest {
     }
 
     @Test
-    void publishesAfterBumpingTheWatermarkAndNeverThrowsOnRedisFailure() throws Exception {
+    void bumpsTheWatermarkAndPutsADecodableMessageOnTheChannel() throws Exception {
         BlockingQueue<String> received = new LinkedBlockingQueue<>();
         container().addMessageListener((m, ch) -> received.add(new String(m.getBody())),
                 new ChannelTopic(ConfigInvalidateTopology.CHANNEL));
@@ -90,14 +98,15 @@ class ConfigChangePublisherTest extends AbstractIntegrationTest {
     /**
      * 「发布失败绝不让业务写失败」的判据（D4）：Redis 抛 {@link RuntimeException} 时
      * {@code bumpAndPublish} 必须**正常返回**（业务写已经提交，把广播失败变成业务失败只会让用户
-     * 以为没存上），同时失败被计数（观测面）。
+     * 以为没存上），同时失败既被计数、也留下一条 WARN（观测面是「计数器 + WARN」两件，缺一不可：
+     * 只删掉 {@code log.warn} 时本用例必须变红）。
      *
      * <p>用替身而不是真 Redis：这里要制造的是「Redis 命令抛异常」这一条**确定的**路径，
      * 真 Redis 只能靠拔网线/黑障端口去逼近它，慢且不确定。水位那一跳用替身 Mapper 返回
      * {@code null}（空库语义），因此生效版本就是「现在」。
      */
     @Test
-    void redisFailureDoesNotFailTheBusinessWriteAndIsCounted() {
+    void redisFailureIsCountedAndWarnedWithoutFailingTheBusinessWrite() {
         StringRedisTemplate failingRedis = mock(StringRedisTemplate.class);
         when(failingRedis.convertAndSend(anyString(), anyString()))
                 .thenThrow(new RedisConnectionFailureException("模拟 Redis 不可用"));
@@ -105,13 +114,69 @@ class ConfigChangePublisherTest extends AbstractIntegrationTest {
         ConfigChangePublisher publisherWithFailingRedis = new ConfigChangePublisher(
                 failingRedis, mock(ConfigVersionMapper.class), meterRegistry);
 
-        assertThatCode(() -> publisherWithFailingRedis.bumpAndPublish("channel.update"))
-                .as("发布失败只记 WARN + 计数，绝不抛给调用方（TTL + 版本比对是兜底）")
-                .doesNotThrowAnyException();
+        List<ILoggingEvent> warnings = capturePublisherWarnings(() ->
+                assertThatCode(() -> publisherWithFailingRedis.bumpAndPublish("channel.update"))
+                        .as("发布失败只记 WARN + 计数，绝不抛给调用方（TTL + 版本比对是兜底）")
+                        .doesNotThrowAnyException());
 
         assertThat(meterRegistry.counter(ConfigChangePublisher.PUBLISH_FAILURES_METRIC).count())
                 .as("发布失败必须被计数（否则「广播在静默失败」没有任何观测面）")
                 .isEqualTo(1.0);
+        assertThat(warnings)
+                .as("发布失败必须留下**恰好一条** WARN：只删掉 log.warn 时这条断言变红")
+                .hasSize(1);
+        assertThat(warnings.get(0).getFormattedMessage())
+                .as("WARN 必须指向这次失败的原因，而不是别的噪声")
+                .contains("RedisConnectionFailureException");
+        assertThat(warnings.get(0).getLevel()).isEqualTo(Level.WARN);
+    }
+
+    /**
+     * 空 reason **不会**变成一次静默的失效：{@code encode} 对 {@code null} 快速失败
+     * （{@link org.springframework.data.redis.core.StringRedisTemplate#convertAndSend} 根本没被调用，
+     * 所以线上不会出现订阅端解不开的 {@code "42|"}），异常又被 {@code publish} 自己的
+     * {@code catch (RuntimeException)} 转成计数 + WARN —— **没有异常逃到调用方，也没有静默成功**。
+     *
+     * <p>这条路径今天可达（{@code publish} / {@code bumpAndPublish} 是公开 API，reason 是自由参数），
+     * 所以它必须被一个用例钉住，而不是靠文档提醒「别传 null」。
+     */
+    @Test
+    void nullReasonThroughThePublisherIsCountedAndWarnedNotASilentSuccess() {
+        StringRedisTemplate recordingRedis = mock(StringRedisTemplate.class);
+        SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+        ConfigChangePublisher publisherWithNullReason = new ConfigChangePublisher(
+                recordingRedis, mock(ConfigVersionMapper.class), meterRegistry);
+
+        List<ILoggingEvent> warnings = capturePublisherWarnings(() ->
+                assertThatCode(() -> publisherWithNullReason.publish(42L, null))
+                        .as("快速失败被发布路径吞掉：调用方看到的仍是正常返回（发布失败绝不升级成业务失败）")
+                        .doesNotThrowAnyException());
+
+        assertThat(meterRegistry.counter(ConfigChangePublisher.PUBLISH_FAILURES_METRIC).count())
+                .as("必须计数：否则「发了一条订阅端必然丢弃的载荷」在发布端完全不可见")
+                .isEqualTo(1.0);
+        assertThat(warnings).as("必须留一条 WARN，指出发布失败").hasSize(1);
+        verify(recordingRedis, never()).convertAndSend(anyString(), anyString());
+    }
+
+    /**
+     * 抓 {@link ConfigChangePublisher} 自己打的 WARN（照搬 {@code ConfigSnapshotServiceTest} 的
+     * {@code ListAppender} 形状）：把 appender 挂到**这个类的 logger** 上，动作跑完立刻摘掉 ——
+     * logback 的 logger 是 JVM 全局对象，不摘会污染同一 JVM 里的其它用例。
+     */
+    private static List<ILoggingEvent> capturePublisherWarnings(Runnable action) {
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(ConfigChangePublisher.class);
+        logger.addAppender(appender);
+        try {
+            action.run();
+            return appender.list.stream().filter(event -> event.getLevel() == Level.WARN).toList();
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
     }
 
     private RedisMessageListenerContainer container() {

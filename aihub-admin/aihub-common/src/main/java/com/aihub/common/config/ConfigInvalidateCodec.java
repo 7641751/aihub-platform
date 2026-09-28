@@ -16,6 +16,8 @@ package com.aihub.common.config;
  * <p><b>畸形载荷一律返回 {@code null}，绝不抛异常</b>：订阅端不能因为一条坏消息崩掉，
  * 也不能把一条解不开的消息当成有效失效（那会让它去清一个不该清的缓存、或把水位抬到错误的值）。
  * 与 {@code MeteringEventCodec} 一致：畸形走「拒绝」，不是「尽力解释」。
+ * 这条纪律只约束**解码**（订阅端）；**编码**（发布端）方向恰好相反：能造出订阅端必然拒绝的载荷的输入
+ * 直接快速失败，见 {@link #encode(ConfigInvalidateMessage)}。
  */
 public final class ConfigInvalidateCodec {
 
@@ -24,9 +26,29 @@ public final class ConfigInvalidateCodec {
     private ConfigInvalidateCodec() {
     }
 
-    /** 线格式：{version}|{escaped reason}。reason 是**有限枚举**（如 "channel.update"），不是自由文本。 */
+    /**
+     * 线格式：{version}|{escaped reason}。reason 是**有限枚举**（如 "channel.update"），不是自由文本。
+     *
+     * <p><b>{@code reason} 必须是非空的原因 token，否则抛 {@link IllegalArgumentException}（快速失败）</b>：
+     * {@code encode(null)} 曾经退化成线格式 {@code "42|"}，而 {@link #decode} 按结构把 {@code "42|"}
+     * 判为畸形返回 {@code null} —— 订阅端只打一条 WARN、**不做任何失效**，其他实例默默等满本地 TTL
+     * （最长回到 M3 的 10 分钟上界），而发布端**一条都没记**。这就是「一条订阅端会拒绝的载荷」：
+     * 它比没有载荷更糟，因为它是**静默**的。所以这里拒绝 {@code null} 与空串。
+     *
+     * <p><b>刻意不 trim 归一化</b>：{@code " "} 这类空白但非空的 reason 仍按字面量上线（线格式不是清洗层）。
+     * <b>刻意不改 {@link #decode}</b>：让空 reason 变成一条**有效**失效，比拒绝它更危险；两侧的不对称是
+     * 有意的 —— 发布端保证不发出这种载荷，订阅端则一律拒绝无法解释的载荷。
+     *
+     * @throws IllegalArgumentException {@code message} 的 reason 为 {@code null} 或空串
+     */
     public static String encode(ConfigInvalidateMessage message) {
-        return message.version() + String.valueOf(DELIMITER) + escape(message.reason());
+        String reason = message.reason();
+        if (reason == null || reason.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "配置失效消息的 reason 必须是非空的原因 token（有限枚举，如 \"channel.update\"）："
+                            + "空 reason 编码出的载荷会被订阅端判为畸形并静默丢弃");
+        }
+        return message.version() + String.valueOf(DELIMITER) + escape(reason);
     }
 
     /** 畸形一律返回 null（**不抛**）：一条坏消息不该让订阅端崩掉，也不该被当成有效失效。 */
