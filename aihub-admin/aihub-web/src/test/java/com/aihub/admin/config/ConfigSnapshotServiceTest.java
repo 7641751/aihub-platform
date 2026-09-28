@@ -40,8 +40,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       {@code containsExactly} 钉死（不是「ACTIVE 的在」而是「INACTIVE 的不在」）。</li>
  *   <li><b>决策 17</b>：「同维度取最后一条」= 「取 {@code id} 最大的那条」，这里用真实 MySQL 断言，
  *       不把 {@code RateLimitPolicyMapper} javadoc 里的 InnoDB 扫描顺序假设默默继承下来。</li>
- *   <li><b>决策 5</b>：{@code version} 是三张表 {@code updated_at} 的最大值，改一行必须**严格变大**；
- *       空控制面的哨兵值是 {@code 0}。</li>
+ *   <li><b>决策 D5</b>：{@code version} = {@code max(三张表 updated_at 的最大值, config_version 水位)}，
+ *       改一行必须**严格变大**；水位被显式归零（见 {@link #resetVersionWatermark()}）且控制面为空时是
+ *       {@code 0}。抬水位的入口是配置**写**路径（{@code ConfigChangePublisher}），本类只用 {@code updated_at}
+ *       那一半，因此这些断言仍然钉住「三张表都参与 max」。</li>
  * </ul>
  *
  * <p>用例数据一律是一眼可辨的合成值；密文走真实的 {@link ChannelKeyService#encrypt}，主密钥在
@@ -70,19 +72,29 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
         deleteEverything();
     }
 
+    @BeforeEach
+    void resetVersionWatermark() {
+        // 水位是**持久**的（这正是 Task 3 的意义），而容器是 JVM 级共享的：
+        // 不归零，「空库 version=0」这类断言就变成了对**用例执行顺序**的断言。
+        jdbcTemplate.update("UPDATE config_version SET version = 0 WHERE id = 1");
+    }
+
     @AfterEach
     void cleanAfter() {
         deleteEverything();
     }
 
     @Test
-    void emptyDatabaseYieldsAnEmptySnapshotWithVersionZero() {
+    void emptyDatabaseYieldsAnEmptySnapshotWithTheResetVersion() {
         ConfigSnapshot snapshot = service.snapshot();
 
         assertThat(snapshot.channels()).isEmpty();
         assertThat(snapshot.routes()).isEmpty();
         assertThat(snapshot.ratePolicies()).isEmpty();
-        assertThat(snapshot.version()).as("空控制面的哨兵值（决策 5）").isZero();
+        assertThat(snapshot.version())
+                .as("空控制面 + 被显式归零的水位（决策 D5：水位是持久的，这个 0 来自 @BeforeEach 的归零，"
+                        + "不是「版本恒为 0」）")
+                .isZero();
         assertThat(snapshot.generatedAtEpochMilli()).isPositive();
     }
 

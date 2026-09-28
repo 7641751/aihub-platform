@@ -8,6 +8,7 @@ import com.aihub.dao.entity.ChannelEntity;
 import com.aihub.dao.entity.ModelRouteEntity;
 import com.aihub.dao.entity.RateLimitPolicyEntity;
 import com.aihub.dao.mapper.ChannelMapper;
+import com.aihub.dao.mapper.ConfigVersionMapper;
 import com.aihub.dao.mapper.ModelRouteMapper;
 import com.aihub.dao.mapper.RateLimitPolicyMapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
@@ -28,9 +29,23 @@ import java.util.Set;
  * 组装 {@code GET /internal/config/snapshot} 的响应：一次调用把网关需要的**全部**配置给它
  * （渠道 + 密文 + 路由 + 限流策略 + 版本号）。设计文档 §7.2 的明文接口。
  *
- * <p><b>version 是单调时间戳</b>（决策 5）：三张表的 {@code updated_at} 取最大。V1 的三张表都有
- * {@code ON UPDATE CURRENT_TIMESTAMP(3)}，因此任何一次配置写入都会推进它。空库返回 {@code 0}。
- * 已知缺口（**登记在案，不修**）：同一毫秒内的两次写入可能得到相同的 {@code updated_at}。
+ * <p><b>version 是单调的</b>（决策 D5）：{@code max(三张表的 max(updated_at), config_version 的水位)}。
+ * V1 的三张表都有 {@code ON UPDATE CURRENT_TIMESTAMP(3)}，因此任何一次配置写入都会推进版本；
+ * 而水位的存在修掉了 M3 登记的 A2 缺口 —— 只靠 {@code max(updated_at)} 时，**删掉最新那一行会让版本
+ * 倒退**，而网关的本地/Redis 两侧比对与 {@code lastGood} 用的都是严格 {@code >}，于是一份更旧的快照
+ * 会被记住并继续服务、且没有收敛信号。
+ *
+ * <p><b>水位只在配置写入路径上抬升</b>（{@code ConfigChangePublisher.bumpAndPublish}，Task 2/8/9/10），
+ * 读路径**绝不写库**：{@link #snapshot()} 是 {@code @Transactional(readOnly = true)}，而 MySQL +
+ * Connector/J 的 {@code readOnlyPropagatesToServer} 默认是**开**的（会发
+ * {@code SET SESSION TRANSACTION READ ONLY}），在只读事务里写会直接 {@code ERROR 1792} ——
+ * 正好打在 {@code GET /internal/config/snapshot} 这条里程碑依赖的路径上。
+ *
+ * <p><b>残余（D5 已登记，不修）</b>：手工 SQL / seeder 的写入会推进 {@code updated_at}（这一半仍在），
+ * 但**手工 SQL 的删除不走控制台、就不会抬水位**，因此一条 raw SQL 的删除仍可能让版本回退一次。
+ * M4 的验收（Task 17 第 3 步）因此必须走控制台/API 改配置；这也意味着 {@code config_version} 的水位
+ * 在纯 SQL 运维路径上是空的。另一条**登记在案**的既有边界：同一毫秒内的两次写入可能得到相同的
+ * {@code updated_at}。
  *
  * <p><b>限流策略的排序是契约的一部分</b>（决策 17）：同一租户的租户级策略必须按 {@code id} 升序、
  * 且排在 key 级策略之前 —— 这样 gateway 侧「在每一维内部取最后一条」（租户级取最后一条租户级行、
@@ -67,15 +82,18 @@ public class ConfigSnapshotService {
     private final ModelRouteMapper modelRouteMapper;
     private final RateLimitPolicyMapper rateLimitPolicyMapper;
     private final JdbcTemplate jdbcTemplate;
+    private final ConfigVersionMapper configVersionMapper;
     private final String defaultModel;
 
     public ConfigSnapshotService(ChannelMapper channelMapper, ModelRouteMapper modelRouteMapper,
                                  RateLimitPolicyMapper rateLimitPolicyMapper, JdbcTemplate jdbcTemplate,
+                                 ConfigVersionMapper configVersionMapper,
                                  @Value("${aihub.upstream.default-model:}") String defaultModel) {
         this.channelMapper = channelMapper;
         this.modelRouteMapper = modelRouteMapper;
         this.rateLimitPolicyMapper = rateLimitPolicyMapper;
         this.jdbcTemplate = jdbcTemplate;
+        this.configVersionMapper = configVersionMapper;
         this.defaultModel = defaultModel;
     }
 
@@ -86,8 +104,31 @@ public class ConfigSnapshotService {
                 defaultModel == null || defaultModel.isBlank() ? null : defaultModel);
     }
 
-    /** 三张表的 {@code updated_at} 最大值（epoch 毫秒）；空库为 0。 */
+    /**
+     * 快照版本 = max(三张配置表的 max(updated_at), config_version 的水位)。
+     *
+     * <p><b>纯读：本方法绝不写库。</b>它由 {@link #snapshot()} 调用，而后者是
+     * {@code @Transactional(readOnly = true)}；MySQL + Connector/J 的 {@code readOnlyPropagatesToServer}
+     * 默认是开的（会发 {@code SET SESSION TRANSACTION READ ONLY}），在只读事务里写会直接
+     * {@code ERROR 1792} —— 正好打在 {@code GET /internal/config/snapshot} 这条里程碑依赖的路径上。
+     * 因此水位**只在配置写入路径**上抬升（{@code ConfigChangePublisher.bumpAndPublish}）。
+     *
+     * <p>为什么需要水位：{@code max(updated_at)} 会**倒退**（删掉最新那一行），而网关两侧的比对是
+     * 严格 {@code >} —— 一旦倒退，更旧的快照会被 lastGood 记住并继续服务（M3 登记、M4 修）。
+     */
     public long currentVersion() {
+        long dbMax = maxUpdatedAtAcrossConfigTables();     // 既有实现保持不变（JdbcTemplate 查三张表）
+        Long stored = configVersionMapper.current();
+        return Math.max(dbMax, stored == null ? 0L : stored);
+    }
+
+    /**
+     * 三张配置表的 {@code updated_at} 最大值（epoch 毫秒）；空库为 {@code 0}。
+     *
+     * <p>这一半仍然必要：**手工 SQL / seeder 写入不经过控制台，不会抬水位**，只能靠
+     * {@code ON UPDATE CURRENT_TIMESTAMP(3)} 推进版本（D5）。
+     */
+    private long maxUpdatedAtAcrossConfigTables() {
         long max = 0L;
         for (String table : List.of("channel", "model_route", "rate_limit_policy")) {
             Long candidate = maxUpdatedAt(table);
