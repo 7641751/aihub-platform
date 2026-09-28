@@ -47,5 +47,16 @@
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-core</artifactId>
         </dependency>
+        <!--
+          Spring Security Crypto：**只为 BCryptPasswordEncoder**（`sys_user.password_hash` 的口令哈希，
+          M4 Task 6 的登录路径用它）。刻意不引 spring-boot-starter-security：那会带来第二条全局过滤器链
+          与 auto-config，与既有的 InternalAuthFilter / ConsoleAuthFilter 形成两套鉴权（D2）。
+          版本走 Spring Boot BOM（3.5.16 → spring-security 6.5.11），**不写死**；这是本里程碑封闭的
+          pom 改动清单里的第二条（第一条是上面的 micrometer-core，见其注释）。
+        -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-crypto</artifactId>
+        </dependency>
     </dependencies>
 </project>
