@@ -55,7 +55,7 @@
 
 | # | 决策 | 理由 | 影响面 / 证据 |
 |---|---|---|---|
-| 1 | **本里程碑获准新增唯一一条 Flyway 迁移 `V2__m4_console.sql`**，内容严格限定为三件事：① 新建 `audit_log` 表；② 给 `request_log` 加 `channel_id`、`api_key_id` 两个索引；③ 新建 `config_version` 单行表。`SchemaMigrationTest` 的断言从「恰好 1 条」改成「恰好 2 条，且文件名/校验和与预期一致」。 | M3 禁止新增迁移的理由是「保护 `flywayAppliesExactlyOneMigration` 这条护栏」，而那条护栏要保的是「**没人能悄悄加迁移**」这件事，不是「永远只有 1 条」。M4 的业务确实需要新表（审计没有表就只剩日志）与新索引（已登记：`request_log.channel_id`/`api_key_id` 无索引，按渠道/按 Key 聚合会全表扫描）。把断言改成「恰好 2 条 + 显式文件名」**保留了护栏的全部语义**，并且**有意**地让改动显式可见（而不是绕过）。**残余（诚实登记）**：分区表上加二级索引在 MySQL 上要重建索引且不能在线加分区；生产环境需评估 DDL 窗口，本机演示数据量下无影响。 | 新增 `aihub-admin/aihub-dao/src/main/resources/db/migration/V2__m4_console.sql`；`SchemaMigrationTest` 改断言；`docs/CONVENTIONS.md` 第 7 节补「迁移数量由测试显式钉住」的说明。 |
+| 1 | **本里程碑获准新增唯一一条 Flyway 迁移 `V2__m4_console.sql`**，内容严格限定为三件事：① 新建 `audit_log` 表；② 给 `request_log` 加 `channel_id`、`api_key_id` 两个索引；③ 新建 `config_version` 单行表。`SchemaMigrationTest` 的断言从「恰好 1 条」改成「恰好 2 条，且 version 与 description 逐条与预期一致」，**用例名一并改成 `flywayAppliesExactlyTwoMigrations`**（原名与改后的断言相反）。 | M3 禁止新增迁移的理由是「保护 `flywayAppliesExactlyOneMigration` 这条护栏」，而那条护栏要保的是「**没人能悄悄加迁移**」这件事，不是「永远只有 1 条」。M4 的业务确实需要新表（审计没有表就只剩日志）与新索引（已登记：`request_log.channel_id`/`api_key_id` 无索引，按渠道/按 Key 聚合会全表扫描）。把断言改成「恰好 2 条 + 显式文件名」**保留了护栏的全部语义**，并且**有意**地让改动显式可见（而不是绕过）。**残余（诚实登记）**：分区表上加二级索引在 MySQL 上要重建索引且不能在线加分区；生产环境需评估 DDL 窗口，本机演示数据量下无影响。 | 新增 `aihub-admin/aihub-dao/src/main/resources/db/migration/V2__m4_console.sql`；`SchemaMigrationTest` 改断言；`docs/CONVENTIONS.md` 第 7 节补「迁移数量由测试显式钉住」的说明。 |
 | 2 | **生产依赖只加 `org.springframework.security:spring-security-crypto`**（版本走 Boot BOM）。**先验证可解析**（走 `aliyunmaven`）再动代码；解析不下来就**报 BLOCKED**，**绝不**改为自己实现 bcrypt。**不引** `spring-boot-starter-security`，**不引**任何 JWT 库。 | 口令哈希是**唯一**不能自己实现的部分（`sys_user.password_hash` 是 `VARCHAR(72)`，恰好容纳 bcrypt 的 60 字符；PBKDF2 的自描述串（含 salt 与 iterations）会长于 72 字符而放不进该列，而设计文档 §5.1 明写「口令 bcrypt」）。反过来，**鉴权链路**（过滤器顺序、401 信封、`/internal/**` 的 HMAC）在本仓库已经有自己的一套且被测试钉住，引入 `spring-boot-starter-security` 会带来第二条过滤器链与全局 auto-config，收益低风险高。JWT 库同理：本控制台是**单签发方、单算法、无 JWKS、无 refresh** 的场景，自签 HS256 用 JDK 就能做完整（见 D3），换来「零新依赖」。 | `aihub-admin/aihub-service/pom.xml` +1；`aihub-admin/aihub-common/pom.xml` **不动**（令牌只用 JDK 类型）。Task 4 的第一步是**可解析性验证**，失败即 BLOCKED。**可解析性已在计划编写阶段实测（2026-09-27）**：Boot `3.5.16` 的 BOM 把 `spring-security.version` 钉在 **`6.5.11`**；`mvn -B org.apache.maven.plugins:maven-dependency-plugin:3.8.1:get -Dartifact=org.springframework.security:spring-security-crypto:6.5.11` → `Downloaded from aliyunmaven: … spring-security-crypto-6.5.11.jar (105 kB)` + `BUILD SUCCESS`，jar/pom 已落进 `.m2repo`。**注意**：本机 `curl` 到 `maven.aliyun.com` 是 `000`（走的是 Maven 的镜像/代理配置），所以**只能用 Maven 自己验证**，不要用 `curl -I` 判断「依赖能不能拉到」。 |
 | 3 | **控制台令牌 = 自研 HS256（JWT 形状，不是 JWT 标准实现）**：`base64url(header).base64url(payload).base64url(HMAC-SHA256(前两段))`；header 固定为 `{"alg":"HS256","typ":"JWT"}` 且**校验方完全忽略请求里的 header**（算法由服务端写死 → 不存在 `alg` 混淆面）；claims 只认 `sub`（`sys_user.id`）、`tenantId`、`role`、`iat`、`exp`（**≤ 2 小时，默认 2 小时**）；签名比较用**恒定时间**；密钥来自 `aihub.console.secret`（环境变量 `AIHUB_CONSOLE_SECRET`，**为空则登录接口直接失败**，不生成默认值）。**不做**：RS256 / JWKS / refresh token / 注销黑名单 / 多签发方。 | 设计文档 §7.3 写的是「签发 JWT」，而本场景是「一个 admin 签发、一个 admin 校验、算法固定、生命周期短」，用标准库要引三个新依赖（jjwt-api/impl/jackson）并为不存在的需求买单。自研的**风险必须显式写出来**：它只支持 HS256、不做密钥轮换、没有 `aud`/`iss` 校验 —— 一旦将来出现第二签发方或需要吊销，**必须换成库**（这条要写在类的 javadoc 里）。恒定时间比较与「忽略请求 alg」是防伪必需项，各有一条用例。 | 新增 `aihub-admin/aihub-service/src/main/java/com/aihub/service/console/{ConsoleToken,ConsoleClaims}.java` + 固定向量与篡改用例（**放在 `aihub-service` 而不是零依赖的 `aihub-common`**：只有 admin 用它，而 `aihub-common` 没有 Jackson，手写 JSON 解析只会给令牌引入无谓的脆弱点）；`aihub-web` 的 `ConsoleAuthFilter` 与 `ConsoleTokenService` 用它。 |
 | 4 | **配置失效走 Redis Pub/Sub（设计 §6.3 明文）**：频道名 `aihub:config:invalidate`，载荷 `{version}\|{reason}`（分隔符文本，与 `MeteringEventCodec` 同风格，编解码在 `aihub-common`）。admin 在**每一次**成功的配置写事务提交后发布一次；gateway 订阅后执行 `ConfigClient.invalidate()`。**`invalidate(long version)` 必须同时做三件事**：清本地 Caffeine、**删除共享条目 `aihub:config:snapshot`**、**把 `ConfigCache` 的写入水位抬到失效消息里的 `version`** —— **绝不重置成 `NO_VERSION`**（重置会拆掉「挡住在飞的旧回填把刚删掉的陈旧条目写回去」的唯一护栏，等于让这次失效白做；见 E.2-I9）。 | 这正是 M3 决策 16 推迟到 M4 的那一半，也是 M3 已登记缺口的修复：`ConfigClient.invalidate()` 当前**只清本地**，紧接着 `resolve()` 又会读到 Redis 里同样陈旧的共享条目并采用它 —— 于是「配置变了」这个信号对多实例部署**完全无效**，而 `docs/CONVENTIONS.md` §6.6 记录的 10 分钟上界就是这么来的。设计文档 §6.3 原话是「admin 变更配置后通过 Redis Pub/Sub 广播失效消息，各 gateway 实例清理本地缓存；本地 TTL 30 秒作为兜底」，本决策把它落地。**M4 的验收标准（控制面配置 → 数据面生效全链路打通）依赖这一条**。 | 新增 `aihub-common/.../config/ConfigInvalidateTopology.java` + `ConfigInvalidateCodec.java`；`aihub-gateway/.../config/{ConfigSubscriber,ConfigInvalidateSubscriptionConfig,ConfigInvalidateProperties}.java`（**`RedisMessageListenerContainer` 的装配放在专用的 `ConfigInvalidateSubscriptionConfig` 里，不是 `ConfigConfig`** —— 见 N3 的处置）；admin 侧 `ConfigChangePublisher`。Channel 名与载荷格式是**跨服务契约**，两端共用同一常量（与 `MeteringTopology` 同一纪律）。 |
@@ -283,7 +283,7 @@ INSERT INTO config_version (id, version) VALUES (1, 0);
 
 `SchemaMigrationTest`：**先读这个类再改**（评审已核实它的真实形状）—— 它**不用 Flyway API**，而是用 `JdbcTemplate` 查 `flyway_schema_history`；它的 `allTenTablesExist` **断言的是恰好 10 张表**。因此本任务要改它**三处**，不是一处：
 
-1. `flywayAppliesExactlyOneMigration` → 改成「恰好 2 条，且 version 与 description 都是预期的」。**用 JDBC 查历史表**，不要引入 `Flyway`/`MigrationInfo`/`MigrationVersion`（那个类今天没有这些装配，引进来就是额外的接线）：
+1. `flywayAppliesExactlyOneMigration` → **改名为 `flywayAppliesExactlyTwoMigrations`**，断言改成「恰好 2 条，且 version 与 description 都是预期的」（名字与断言必须一致：这是本任务「迁移纪律」交付物的一部分，一个叫 ExactlyOne 却断言 2 的用例名本身就是假话）。**用 JDBC 查历史表**，不要引入 `Flyway`/`MigrationInfo`/`MigrationVersion`（那个类今天没有这些装配，引进来就是额外的接线）：
 
 ```java
 // D1：M4 有意引入第二条迁移（审计表 / request_log 索引 / config_version）。
@@ -697,6 +697,10 @@ git commit -m "fix(config): make the snapshot version monotonic with a persisted
 
 > **本任务是 M4 验收标准（控制面配置 → 数据面生效）的前置，必须最先做完。**
 
+> ⚠️ **`ConfigCacheTest.equalVersionIsRewrittenToRedisAfterBothCacheLayersLapse`（约 842 行）是一个先存的真实时钟脆点**，M4 Task 1 的全量跑里实测到了它（第一次全量 `aihub-gateway` 只红这一条，单独重跑该模块 350/350 全绿，那个类三次 FAIL/PASS/PASS）。独立评审核实过：**不是 Task 1 造成的**（该文件在两个提交里 blob 一致，本次提交没碰网关任何文件）；机制是「第 842 行必须观察到一个**刚写入、TTL 只有 80 ms** 的本地条目」（`ConfigCache.java:69` 的 `expireAfterWrite(localTtl)`，测试把 localTtl/cooldown 都设成 80 ms），任何 ≥80 ms 的停顿都会把它翻成空（失败那次该用例耗 3.47 s，通过时约 1 s）。
+>
+> **本任务要把它变确定**（它正好改 `ConfigCache`/`invalidate` 这一段）：**首选**给 `ConfigCache` 注入 `Ticker`/`Clock` 并在测试里推进它，替掉 `Thread.sleep(150)`；**次选**断言那个**守卫**（版本比对/水位）而不是「一个 80 ms 的条目还在」。**禁止**用「允许重跑一次」或加长 sleep 来"修" —— 那只是把脆点藏起来，而 Task 17 的全量 `mvn clean test` 要引用这条证据。
+
 **Files:**
 - Create: `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigSubscriber.java`
 - Create: `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigInvalidateSubscriptionConfig.java`
@@ -705,6 +709,7 @@ git commit -m "fix(config): make the snapshot version monotonic with a persisted
 - Modify: `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigClient.java`
 - Modify: `aihub-gateway/src/main/resources/application.yml`
 - Modify: `aihub-gateway/src/test/resources/application.properties`
+- Modify: `aihub-gateway/src/test/java/com/aihub/gateway/config/ConfigCacheTest.java`（**硬化一个先存的真实时钟脆点**，见下面的说明；**只许让它变确定，不许放宽任何断言**）
 - Test: `aihub-gateway/src/test/java/com/aihub/gateway/config/ConfigSubscriberTest.java`
 - Test: `aihub-gateway/src/test/java/com/aihub/gateway/config/ConfigInvalidateContractTest.java`
 
