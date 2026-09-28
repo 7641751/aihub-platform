@@ -36,8 +36,9 @@ class ConfigSubscriberTest {
      * 一条有效消息触发一次失效（且带着**解码出来的版本**——水位必须来自消息，不是本地已知的版本）；
      * 一条畸形消息既不清缓存也不抛异常。
      *
-     * <p>「不抛」是硬要求：异常会被 {@code RedisMessageListenerContainer} 当成一次失败的投递并
-     * **反复重投**同一条永远解不开的消息。
+     * <p>「不抛」是硬要求：畸形载荷没有可抬水位的版本、也没有可据以行动的 reason，抛出去只会被
+     * {@code RedisMessageListenerContainer} 自己的 {@code handleListenerException} 吞掉
+     * （Pub/Sub 没有重投），白白赔上这条原因。
      *
      * <p>夹具把载荷放在 {@code body} 里（{@code MessageListener} 的约定：{@code body} = 载荷，
      * {@code pattern} = 匹配到的模式，频道订阅下为 {@code null}）。
@@ -56,7 +57,7 @@ class ConfigSubscriberTest {
                 "garbage".getBytes(UTF_8)), null);
         verifyNoMoreInteractions(client);                    // 坏消息不触发失效，也不抛
 
-        // 空 body（畸形载荷的极端形式）：同样只 WARN、不抛、不失效 —— 抛出去会被容器反复重投。
+        // 空 body（畸形载荷的极端形式）：同样只 WARN、不抛、不失效 —— 无版本可抬、无 reason 可行动。
         Message withoutBody = mock(Message.class);
         when(withoutBody.getBody()).thenReturn(null);
         subscriber.onMessage(withoutBody, null);
@@ -110,6 +111,19 @@ class ConfigSubscriberTest {
      * {@code ${AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION:true}} —— 环境变量的**名字**与**默认值**两者
      * 缺一不可。名字尤其重要：Task 17 的 compose 正是用 {@code AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION}
      * 做反证的，占位符写错就等于 compose 的那个开关永远不起作用。
+     *
+     * <p><b>原文只是「源码里写了什么」，所以下面再把出厂 yml 真的喂进一个
+     * {@link ApplicationContextRunner}，断言解析后的**行为**</b>：不给环境变量时开关绑成
+     * {@code true}（读 {@link ConfigInvalidateProperties} 这个 bean 本身，也就是**解析后的绑定**）
+     * 且容器 bean 存在；{@code AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION=false} 时容器 bean 消失。
+     * 「占位符没被条件注解解析」这类漂移在原文断言下依然全绿 —— 只有让
+     * {@code @ConditionalOnProperty} 真去读一次才会现形（读的是解析后的值，值的来源是
+     * 环境里的 {@code AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION}）。
+     *
+     * <p>反例那一半**不能**断言 {@code ConfigInvalidateProperties} 的绑定值：条件为假时整个
+     * {@link ConfigInvalidateSubscriptionConfig} 都不生效，连带它上面的
+     * {@code @EnableConfigurationProperties} 也不执行，那个 record 根本不是 bean
+     * （强行断言只会得到 {@code NoSuchBeanDefinition}）。关掉时的可观测行为就是**容器不存在**。
      */
     @Test
     void theProductionDefaultOfTheInvalidateSubscriptionIsOn() throws IOException {
@@ -121,5 +135,25 @@ class ConfigSubscriberTest {
                 .as("生产默认必须解析为 true，且覆盖用的环境变量名必须是 AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION；"
                         + "否则一个 typo 就能在全绿测试下静默关掉主动失效（退回最长 10 分钟的 TTL 收敛）")
                 .isEqualTo("${AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION:true}");
+
+        // 出厂 yml + 真条件判定：ApplicationContextRunner 与上面那条装配用例同一套夹具
+        // （mock connectionFactory / subscriber + no-op lifecycleProcessor），差别只在配置来源。
+        ApplicationContextRunner shippedYml = new ApplicationContextRunner()
+                .withInitializer(context -> shipped
+                        .forEach(source -> context.getEnvironment().getPropertySources().addLast(source)))
+                .withUserConfiguration(ConfigInvalidateSubscriptionConfig.class)
+                .withBean(RedisConnectionFactory.class, () -> mock(RedisConnectionFactory.class))
+                .withBean(ConfigSubscriber.class, () -> mock(ConfigSubscriber.class))
+                .withBean(LifecycleProcessor.class, () -> mock(LifecycleProcessor.class));
+
+        shippedYml.run(ctx -> {
+            assertThat(ctx).hasBean("configInvalidateListenerContainer");
+            assertThat(ctx.getBean(ConfigInvalidateProperties.class).invalidateSubscription())
+                    .as("出厂 yml 的占位符默认值必须真的被绑定成 true，而不只是文本里写了 true")
+                    .isTrue();
+        });
+
+        shippedYml.withPropertyValues("AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION=false")
+                .run(ctx -> assertThat(ctx).doesNotHaveBean("configInvalidateListenerContainer"));
     }
 }

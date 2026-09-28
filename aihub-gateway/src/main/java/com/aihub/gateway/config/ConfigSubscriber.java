@@ -20,10 +20,12 @@ import static java.nio.charset.StandardCharsets.UTF_8;
  * {@code visibleVersion} 代替是不行的 —— 一个落后的实例会因此把水位抬得太低，让在飞的旧回填
  * 把刚删掉的陈旧共享条目又写回去。
  *
- * <p><b>坏消息一律忽略并 WARN，绝不抛异常</b>：{@code RedisMessageListenerContainer} 会把监听器
- * 抛出的异常当成一次失败的投递并**反复重投**同一条消息，而一条解不开的消息永远解不开 ——
- * 抛出去只会把这条线程变成一条无界的重试循环。{@link ConfigInvalidateCodec#decode(String)}
- * 对畸形载荷返回 {@code null}（它自己不抛），这里再做一次空 body 的兜底。
+ * <p><b>坏消息一律忽略并 WARN，绝不抛异常</b>：一条畸形载荷既没有可抬水位的版本，也没有可据以
+ * 行动的 reason，唯一有用的事就是让它可见（WARN）然后继续。抛出去并不会换来一次重投 ——
+ * Redis Pub/Sub 没有重投与应答，{@code RedisMessageListenerContainer} 自己用
+ * {@code handleListenerException} 把监听器的异常吞掉，抛出去只是**多赔上这条原因**。
+ * {@link ConfigInvalidateCodec#decode(String)} 对畸形载荷返回 {@code null}（它自己不抛），
+ * 这里再做一次空 body 的兜底。
  *
  * <p>装配在 {@link ConfigInvalidateSubscriptionConfig} 里（**不是** {@code ConfigConfig}）：
  * 这个类只依赖 {@link ConfigClient}，因此可以在不起 Spring 上下文的情况下被直接驱动

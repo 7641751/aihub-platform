@@ -19,7 +19,7 @@ import java.time.Duration;
  *                                {@code ConfigClient} 的回源等待上限同量级（所以一次「慢失败」与一次
  *                                「快失败」的退避量级相当），同时比本地 TTL（30 s）小一个数量级 ——
  *                                故障恢复后最多 5 s 就能重新拿到控制面快照，不会让 TTL 白白走完。
- *                                {@code ConfigClient.invalidate()}（配置变更信号）会显式放行这个窗口。
+ *                                {@code ConfigClient.invalidate(long)}（配置变更信号）会显式放行这个窗口。
  */
 @ConfigurationProperties(prefix = "aihub.config")
 public record GatewayConfigProperties(@DefaultValue("30s") Duration localTtl,
