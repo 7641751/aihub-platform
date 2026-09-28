@@ -34,5 +34,18 @@
             <groupId>com.github.ben-manes.caffeine</groupId>
             <artifactId>caffeine</artifactId>
         </dependency>
+        <!--
+          Micrometer core：ConfigChangePublisher 的发布失败计数器（Counter / MeterRegistry）需要
+          io.micrometer.core.instrument.*，而这个包只在 micrometer-core 里（observation / commons 都没有）。
+          它**本来就在 admin 的运行时 classpath 上**（aihub-web 的 spring-boot-starter-actuator 传递进来
+          的 micrometer-core 1.15.12）：这里补声明只是把一个已经成立的运行时事实写成**显式的编译依赖**，
+          运行时不新增任何构件。版本走 Spring Boot BOM，不写死（与决策 2 同一纪律）。
+          控制器裁决（M4 Task 2）：pom 改动清单由「只有 spring-security-crypto 一项」放宽为
+          「aihub-service + micrometer-core（Task 2）、aihub-service + spring-security-crypto（Task 5）」。
+        -->
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-core</artifactId>
+        </dependency>
     </dependencies>
 </project>
