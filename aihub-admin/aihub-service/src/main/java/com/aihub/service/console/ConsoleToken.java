@@ -26,10 +26,19 @@ import java.util.Base64;
  * 读写（固定五个字段），而 {@code aihub-common} 的 main 作用域必须零第三方依赖；只有 admin 用它。
  * 手写一份 JSON 解析器只会给令牌引入无谓的脆弱点。
  *
- * <p><b>故障面（契约）：任何失败都抛 {@link IllegalArgumentException}</b> —— 格式不对、base64 不合法、
- * 签名不匹配、已过期、claims 缺失或类型不对，全部同一种异常。调用方（{@code ConsoleAuthFilter}）只接
- * 这一种异常并回 401；**受检的 {@link JsonProcessingException} 必须在这里被包住**，否则它会穿透过滤器
- * 变成 500 —— 401 与 500 的区别正是"你的令牌不行"与"平台坏了"。
+ * <p><b>故障面（契约）：两种失败、两种异常，刻意不合并</b>：
+ * <ul>
+ *   <li><b>令牌层失败 → {@link IllegalArgumentException}</b>：格式不对、base64 不合法、签名不匹配、
+ *       已过期、claims 缺失或类型不对，全都归这一种。这是**凭证问题**（"你的令牌不行"），调用方
+ *       （{@code ConsoleAuthFilter}）接住它回 401；**受检的 {@link JsonProcessingException} 必须在这里
+ *       被包住**，否则它会穿透过滤器变成 500。</li>
+ *   <li><b>密钥为 null/空 → {@link IllegalStateException}</b>：{@link #hmac} 把 JDK
+ *       {@link SecretKeySpec} 抛出的 {@code IllegalArgumentException} 包成 ISE。签名密钥没配是
+ *       **平台配置故障**（"平台坏了"），**刻意不并进 IAE** —— 把平台故障伪装成凭证错误正是本仓库在
+ *       503-vs-401 上已经否决过的做法。调用方必须分别接这两种异常，不能只 catch IAE。</li>
+ * </ul>
+ * 空白/过短的密钥属于第三种情形（D16），本类**不做判定**：由 {@code ConsoleAuthFilter}（Task 6）
+ * 自己判（空白或 &lt;32 字符 ⇒ {@code /api/**} 恒 401、登录回 {@code CONFIGURATION_ERROR}）。
  *
  * <p><b>D3 登记的边界（必须随代码一起被读到）</b>：
  * <ul>
@@ -84,11 +93,17 @@ public final class ConsoleToken {
     }
 
     /**
-     * 校验并取回 claims。**任何失败都抛 {@link IllegalArgumentException}**（见类注释的故障面），
+     * 校验并取回 claims。**令牌层失败一律 {@link IllegalArgumentException}**（见类注释的故障面），
      * 因此调用方不需要 {@code Optional} 的三态：要么拿到可信的 claims，要么 401。
+     *
+     * <p><b>唯一的例外是密钥本身</b>：{@code secret} 为 {@code null} 或空时抛
+     * {@link IllegalStateException}（平台配置故障），**不是** IAE —— 调用方必须分别接这两种异常。
+     * 空白/过短的密钥（D16）**不在本方法的判定范围内**：本方法只区分"能不能算签名"、不做长度策略，
+     * {@code ConsoleAuthFilter}（Task 6）必须自己判。
      *
      * @throws IllegalArgumentException 令牌为 null、不是三段、签名不匹配、载荷不是合法 base64/JSON、
      *                                  claims 缺失或类型不对、已过期
+     * @throws IllegalStateException    {@code secret} 为 null 或空（平台配置故障，不是凭证错误）
      */
     public static ConsoleClaims verify(byte[] secret, String token) {
         if (token == null) {
@@ -205,7 +220,16 @@ public final class ConsoleToken {
         return value.textValue();
     }
 
-    /** HMAC-SHA256；算法名是写死的常量，因此 {@code NoSuchAlgorithmException} 属于 JVM 层面的故障。 */
+    /**
+     * HMAC-SHA256；算法名是写死的常量，因此 {@code NoSuchAlgorithmException} 属于 JVM 层面的故障。
+     *
+     * <p><b>{@code secret} 为 {@code null} 或空时抛 {@link IllegalStateException}（不是 IAE）</b>：
+     * {@link SecretKeySpec} 对 null/空密钥抛 {@code IllegalArgumentException}，被下面的
+     * {@code catch (Exception)} 包成 ISE —— 这是**刻意的**：密钥没配是平台配置故障，不是凭证故障，
+     * 两者共用一个异常类型就会把平台故障伪装成 401。因此防"空白/过短密钥"（D16：空白或 &lt;32 字符
+     * ⇒ {@code /api/**} 恒 401、登录回 {@code CONFIGURATION_ERROR}）必须由
+     * {@code ConsoleAuthFilter}（Task 6）自己判，不能依赖本方法。
+     */
     private static byte[] hmac(byte[] secret, String signingInput) {
         try {
             Mac mac = Mac.getInstance(ALGORITHM);
