@@ -99,7 +99,7 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 决策 5：{@code version} 必须是**严格递增的标量**。三张表都要参与 {@code max}，
+     * 决策 D5：{@code version} 必须是**严格递增的标量**。三张表都要参与 {@code max}，
      * 而且「改一行」也要推进（V1 三张表的 {@code updated_at} 都是 {@code ON UPDATE CURRENT_TIMESTAMP(3)}）。
      *
      * <p>毫秒分辨率下同一毫秒内的两次写入可能拿到相同的 {@code updated_at} —— 那个缺口是**登记在案**的
@@ -108,6 +108,7 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
     @Test
     void versionStrictlyIncreasesEveryTimeAnyOfTheThreeTablesChanges() throws Exception {
         long empty = service.snapshot().version();
+        // 语义是 max(空控制面 0, 被 @BeforeEach 归零的水位 0) = 0 —— 不是「version 恒为 0」。
         assertThat(empty).isZero();
 
         String cipher = insertChannel("snap-v", ACTIVE);
