@@ -1,0 +1,2249 @@
+# aihub-platform M4（业务平台）实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 把 M0–M3 建成的「能跑的数据面」变成**可运营的产品**：一张带登录的极简管理台 + 一组受保护的 `/api/**` 控制面接口（租户 / API Key / 渠道 / 模型路由 / 限流策略的 CRUD，**改完必须真的在数据面生效**）、§6.2 的**配额**（Redis 预扣 → 实际校正 → 每日对账）、以及**审计**（谁在什么时候改了什么）。同时把 M3 交接过来的两条**必须先修的前置缺口**收掉：配置变更的**主动失效**（否则「控制面配置 → 数据面生效」这条验收标准演示不出来）与快照 `version` 的**单调性**（否则删掉最新一行会让版本倒退）。
+
+**Architecture:** 控制面仍是 admin 独占 MySQL 真相源（决策 A 延续），gateway 仍然**不连数据库**。新增的三条链路：① **写路径**：`/api/**`（控制台令牌）→ 服务层（`aihub-service`）→ MySQL + **审计行** + **Redis Pub/Sub 失效广播**；② **失效路径**：gateway 订阅 `aihub:config:invalidate`，收到后**同时**清本地 Caffeine、**删共享 Redis 快照条目**、**把写入水位抬到失效消息里的版本（绝不重置）**，然后按需回源 admin —— 这是设计文档 §6.3 明文要求的机制，M3 因为「没有写入方」而按决策 16 推迟到本里程碑；③ **配额路径**：gateway 在鉴权之后、上游之前用 **Redis + Lua 原子预扣**（键 `aihub:quota:{tenantId}:{period}`），余额不足直接 **429 `insufficient_quota`**；拿到真实 `usage` 后**补扣/退回**差额；计量事件照旧经 MQ 落 `request_log`（幂等），每日 02:00 的对账任务按 `request_log` 重算 `billing_daily` 并与 Redis 计数比对（**只报告与告警，不自动改账**）。管理台是**零构建**的静态单页（vanilla JS + `fetch`，放在 `aihub-web` 的 `static/` 下），由 admin 自己伺服 —— 不引前端框架、不引 Spring Security 的过滤器链、不引 JWT 库。
+
+**Tech Stack:** Java 21（编译目标，运行于 JDK 25.0.2）、Spring Boot 3.5.16、Spring MVC（admin）+ WebFlux（gateway）、Spring Data Redis 7（Lettuce 同步 API）+ Lua + **Pub/Sub**、MyBatis-Plus 3.5.17、MySQL 8.4、Flyway、RabbitMQ 3.13、**`org.springframework.security:spring-security-crypto`（唯一新增生产依赖，只为 bcrypt 口令哈希）**、自研 HS256 控制台令牌（JDK `javax.crypto`，与既有 `InternalHmac` 同一手法）、JUnit 5 + AssertJ + Mockito、Testcontainers（admin 侧）、宿主 `com.sun.net.httpserver.HttpServer` 夹具 + WireMock（gateway 侧）、Maven 3.9.12。
+
+## Global Constraints
+
+- 项目根目录：`D:\PycharmProjects\aihub-platform`。基线：`master` = `30e1ce1`（含标签 `m0`/`m1`/`m2`/`m3`）。**本计划不负责建分支**，由控制器决定在 `master` 上提交还是切 `m4`。
+- 编译目标固定 Java 21（`<maven.compiler.release>21</maven.compiler.release>`），本机 JVM 为 JDK 25.0.2。Spring Boot 固定 `3.5.16`，MyBatis-Plus 固定 `3.5.17`。不要改。
+- **生产依赖只新增一个**：`org.springframework.security:spring-security-crypto`（**版本走 Spring Boot BOM，不写死版本号**），作用域 `aihub-admin/aihub-service`（登录路径用它做 bcrypt），`aihub-web` 通过依赖传递拿到。**明确不引**：`spring-boot-starter-security`（会引入全局过滤器链与自动配置，与既有 `InternalAuthFilter` 形成两套鉴权，且会改变 `/internal/**`、`/healthz` 的既有行为）、任何 JWT 库（`jjwt` / `java-jwt` / `nimbus`）。`aihub-common` 的 main 作用域**仍然零第三方依赖**（新增的令牌编解码只用 JDK 类型）。
+- **`pom.xml` 的改动清单是封闭的**：只有 `aihub-admin/aihub-service/pom.xml`（+1 依赖）。任何其它 `pom.xml` 改动都要在报告里单独登记理由。
+- **`docker-compose.yml` 与 `.env.example` 必须一起改，否则 Task 17 的验收根本跑不起来**：compose 的 `services.admin.environment` 与 `services.gateway.environment` 是**显式白名单**，没列进去的环境变量在容器里是空的。因此 Task 17 必须：① 给 `admin` 加 `AIHUB_CONSOLE_SECRET: ${AIHUB_CONSOLE_SECRET:?...}`；② 给 `gateway` 加 `AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION: ${AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION:-true}`（验收第 4 步的**反证**要靠它把订阅关掉）；③ `.env.example` 给 `AIHUB_CONSOLE_SECRET` 的生成方法（两种 PowerShell 写法 + openssl）。**除了这三处，`docker-compose.yml` 不许再动**（尤其不要碰 Redis 的宿主映射）。
+- **admin 侧集成测试的既有惯用法**（本计划的测试草图必须落成这个形状，否则新写的类跑不起来）：`@SpringBootTest(webEnvironment = RANDOM_PORT)` + `TestRestTemplate` + **显式 `HttpEntity`**（含 header），装配基类是 `AbstractIntegrationTest`（Testcontainers 单例：MySQL + Redis + RabbitMQ，`@Autowired` 注入 `JdbcTemplate` 与各 Mapper）；它**不提供** `redis`/`upstream`/`container`/`snapshotService` 这类字段，测试自己要什么就自己注入什么。**全文出现的 `post(...)`/`get(...)`/`jsonPath(...)`/`read(...)`/`postBytes(...)`/`stubQuota(...)`/`activeRowsFor(...)`/`createTenantPolicy(...)` 都是「这段测试在断言什么行为」的伪代码**：每个任务在 Step 1 里必须把它们落成真实的 `TestRestTemplate` 调用与真实的注入（`git grep 'TestRestTemplate' aihub-admin/aihub-web/src/test` 有现成例子可抄）。
+- **本里程碑获准新增 Flyway 迁移，且只有一条**：`V2__m4_console.sql`（D1）。`V1__init_schema.sql` **已执行过、禁止修改**。`SchemaMigrationTest` 里「恰好 1 条迁移」的断言**有意**改成「恰好 2 条并列出两条文件名」——那是把护栏改成「数量与内容都显式受控」，不是削弱（见 D1 的理由与残余）。
+- 端口不变：admin `8081`（**管理台就跑在这里**）、gateway `8080`、MySQL 宿主 `3307`、Redis 宿主 `6380`（容器内 `6379`）、RabbitMQ `5672` / 管理台 `15672`。**不要改 `docker-compose.yml` 里 Redis 的宿主映射**（`127.0.0.1:6380:6379` 是用户刻意设的）。
+- **两套响应契约不要混用**：admin（含 `/internal/**` 与**新增的 `/api/**`**）是 `{"code","message","data"}`；gateway `/v1/**` 是 OpenAI 兼容体 `{"error":{"message","type","param","code"}}`。**配额超限走数据面契约**：`429` + `code="insufficient_quota"` + `type="insufficient_quota"`（D6），**不要**用 admin 信封，也**不要**复用 `rate_limit_exceeded`。
+- **M1 的字节级透传是铁律**且本里程碑不改动它：上游状态码 / `Content-Type` / 响应体字节在流式与非流式下都原样回写；唯一合法的切换时机仍是「响应尚未提交」。**新增的 `QuotaFilter` 必须排在鉴权之后、限流之后、且在响应提交之前只做一次判定**，绝不能在中途改写已提交的响应。
+- **明文密钥的边界**（M1/M3 已确立，本里程碑新增两处约束）：① API Key 明文**只在创建响应里返回一次**，此后任何接口（含列表、审计、日志、管理台页面）都不许再出现它；② 渠道明文密钥只在 seeder / 控制台**写入**时短暂出现在服务层内存里，**绝不**进审计、日志、指标、响应体。
+- **禁止读 / 打印 / echo `.env` 或任何密钥文件**；不要执行 `docker compose config` 或任何会把 `.env` 插值打进 stdout 的命令。判断某个环境变量是否存在时**只判断是否为空**。M1 曾因此泄漏过一次真实上游 key。
+- **审计表绝不记录**：API Key 明文、渠道明文密钥、`api_key_cipher` 密文原文、主密钥、控制台口令/口令哈希、令牌原文。审计记的是「谁、什么时候、对哪个对象、做了什么、改了哪些**非敏感**字段」。
+- 所有时间字段按 UTC 存储（`datetime(3)`）；`quota.period` 用 `YYYYMM`（D13）。控制台令牌的时间基准是 `Instant.now()`（秒），配额/限流的时间基准是**调用方传入的毫秒时间戳**（沿用 M3 决策 9：不用 Redis `TIME`）。
+- **`aihub-gateway` 的测试永远不允许依赖 Docker，也不允许要求有活 broker 或活 Redis**：Redis 的故障降级用例一律用「指向不存在的端口 / Mockito 桩」构造，WireMock 必须**进程内**使用。admin 侧集成测试沿用 `AbstractIntegrationTest`（Testcontainers 单例：MySQL + Redis + RabbitMQ 已在基类）。
+- 每个 Task 完成后立即 commit（conventional commits），**只 stage 显式路径**，禁止 `git add -A` / `git add .`。
+- **每个任务的提交必须让整个反应堆编译通过，且该任务自述的测试全绿**；共享契约（Pub/Sub 频道名与载荷、配额 Lua 与键布局、令牌格式、`/api/**` 的错误码）必须在**第一个需要它的任务之前**就位，**不允许跨任务占位**（不允许「先传 null、后面任务再补」，也不允许「此处待后续任务收口」这类注释）。判定方法：每个任务结束前跑一次全反应堆 `mvn -B -q test-compile -DskipTests`，必须绿。
+- 命令一律在项目根目录执行；不用 Maven wrapper，用本机 `mvn`。
+- **不做的事**（按此判断越界）：`/v1/embeddings` 与文档流水线（M5）、压测/故障注入报告与指标端点暴露（M6）、Redis `requirepass` 与网络隔离生产加固（M6）、多实例部署编排、账单计费单价（`billing_daily.cost` 本里程碑只写 0 并登记）、RS256/JWKS/refresh token、第三方登录、管理台的多租户 RBAC 细粒度权限（只做 `ADMIN`/`VIEWER` 两级）。
+
+### 本机环境前提（**每一条都在别的里程碑上真实踩过**，照做）
+
+- 每次 shell 调用都是**全新的 `pwsh` 进程**：变量、工作目录都不保留；每条命令显式带 `workdir`。
+- **Docker 只能走 TCP**：`docker` CLI 必须带 `-H tcp://127.0.0.1:2375`；Maven / Testcontainers 需要 `$env:DOCKER_HOST='tcp://127.0.0.1:2375'`（**同一次**调用前 export）。Docker Desktop 冷启动约 160 秒。
+- **永远不要修改 `~/.testcontainers.properties`，也永远不要给它写 BOM**。
+- `.mvn/maven.config` 是**未跟踪、已 gitignore** 的本机适配文件（`-Dmaven.repo.local=.m2repo`、surefire argLine、`-Dsurefire.failIfNoSpecifiedTests=false`）。不要改、不要 `git add`。
+- **`-Dtest=A+B` 在 Surefire 3.5.6 上不会选中两个类**（它被当成一个类名，而 `.mvn/maven.config` 关掉了「没匹配就失败」，于是打印 `BUILD SUCCESS` 却**静默跳过**）。永远用逗号形式 `-Dtest=A,B` 并加引号。
+- **单独构建一个模块必须加 `-am`**（`.m2repo` 里有一个**空的** `aihub-common` jar，否则报假的 "package does not exist"）。
+- **Maven 的退出码不可信**：判定标准永远是 **surefire 汇总行 + `BUILD SUCCESS`**。含 `@Nested` 的外层类可能打印 `Tests run: 0`，此时以 `target/surefire-reports/*.xml` 为准。
+- **Maven 会静默复用陈旧 `.class`**：要信的一次运行前先删 `target/surefire-reports`。**不要**用 `mvn -Dmaven.test.skip` 之类的组合去"省时间"。
+- 在 shell 里调外部命令前先 `$ErrorActionPreference='Continue'`（原生 stderr 会变成终止性 `NativeCommandError`）。
+- `Set-Content -Encoding UTF8` 在这个 shell 上**会写 BOM**；写仓库文件一律用 `write` / `edit` 工具。**绝不要**用 `Get-Content` / `Set-Content` / `[System.IO.File]::WriteAllLines` 处理本仓库的中文文档（本机 ANSI 代码页是 **GBK**，会把整篇中文变成乱码）。批量改写中文文档只能用 `write` / `edit`。
+- `[System.IO.File]::ReadAllText/WriteAllText` 的**相对路径按进程当前目录解析，不认 `Set-Location`**；要用绝对路径（M4 之前踩过）。
+- **工作树里有第二个写入者**（用户或他们的编辑器/代理）。每次派发子代理前、以及每个子代理返回后都要 `git status --porcelain`；发现非自己改动的文件**不要**顺手 stage，先报告。
+- 磁盘上已有 `mysql:8.4`、`redis:7-alpine`、`rabbitmq:3.13-management-alpine`、`testcontainers/ryuk:0.12.0` 镜像；Docker Hub 直连不可达，用 `--pull never`（本地已有）或走镜像。**Maven 依赖走 `aliyunmaven` 镜像**（直连 `repo.maven.apache.org` 被出口阻断）——新依赖**必须先验证可解析**（D2）。
+- **`git push` 在本机不可能成功**（hosts 把 `github.com` 指向 127.0.0.1，真实 IP 也被出口阻断；只有 `gh` 的 REST API 通）。**不要尝试 push**，只做本地提交；控制器在里程碑末尾用 GitHub Git Data API 逐提交重放，并**逐路径核对远端树**。
+- **本地 `origin/master` ref 是过期的**（推送走 API，`git fetch` 不通）：判断远端一律用 `gh api repos/7641751/aihub-platform/git/ref/heads/master`，不要相信 `git status` 的 ahead/behind。
+- 基线（`30e1ce1` 实测）：`aihub-common 56`、`aihub-web 95`、`aihub-gateway 350` = **501 项通过 / 0 失败 / 0 错误 / 0 跳过**。每个任务报告**实测**数字，不要照抄本计划的估算。
+
+---
+
+## 决策登记（设计文档沉默处或需要取舍的地方，实施者按此执行、**不要自由发挥**；评审者按此判断越权）
+
+| # | 决策 | 理由 | 影响面 / 证据 |
+|---|---|---|---|
+| 1 | **本里程碑获准新增唯一一条 Flyway 迁移 `V2__m4_console.sql`**，内容严格限定为三件事：① 新建 `audit_log` 表；② 给 `request_log` 加 `channel_id`、`api_key_id` 两个索引；③ 新建 `config_version` 单行表。`SchemaMigrationTest` 的断言从「恰好 1 条」改成「恰好 2 条，且文件名/校验和与预期一致」。 | M3 禁止新增迁移的理由是「保护 `flywayAppliesExactlyOneMigration` 这条护栏」，而那条护栏要保的是「**没人能悄悄加迁移**」这件事，不是「永远只有 1 条」。M4 的业务确实需要新表（审计没有表就只剩日志）与新索引（已登记：`request_log.channel_id`/`api_key_id` 无索引，按渠道/按 Key 聚合会全表扫描）。把断言改成「恰好 2 条 + 显式文件名」**保留了护栏的全部语义**，并且**有意**地让改动显式可见（而不是绕过）。**残余（诚实登记）**：分区表上加二级索引在 MySQL 上要重建索引且不能在线加分区；生产环境需评估 DDL 窗口，本机演示数据量下无影响。 | 新增 `aihub-admin/aihub-dao/src/main/resources/db/migration/V2__m4_console.sql`；`SchemaMigrationTest` 改断言；`docs/CONVENTIONS.md` 第 7 节补「迁移数量由测试显式钉住」的说明。 |
+| 2 | **生产依赖只加 `org.springframework.security:spring-security-crypto`**（版本走 Boot BOM）。**先验证可解析**（走 `aliyunmaven`）再动代码；解析不下来就**报 BLOCKED**，**绝不**改为自己实现 bcrypt。**不引** `spring-boot-starter-security`，**不引**任何 JWT 库。 | 口令哈希是**唯一**不能自己实现的部分（`sys_user.password_hash` 是 `VARCHAR(72)`，恰好容纳 bcrypt 的 60 字符；PBKDF2 的自描述串（含 salt 与 iterations）会长于 72 字符而放不进该列，而设计文档 §5.1 明写「口令 bcrypt」）。反过来，**鉴权链路**（过滤器顺序、401 信封、`/internal/**` 的 HMAC）在本仓库已经有自己的一套且被测试钉住，引入 `spring-boot-starter-security` 会带来第二条过滤器链与全局 auto-config，收益低风险高。JWT 库同理：本控制台是**单签发方、单算法、无 JWKS、无 refresh** 的场景，自签 HS256 用 JDK 就能做完整（见 D3），换来「零新依赖」。 | `aihub-admin/aihub-service/pom.xml` +1；`aihub-admin/aihub-common/pom.xml` **不动**（令牌只用 JDK 类型）。Task 4 的第一步是**可解析性验证**，失败即 BLOCKED。**可解析性已在计划编写阶段实测（2026-09-27）**：Boot `3.5.16` 的 BOM 把 `spring-security.version` 钉在 **`6.5.11`**；`mvn -B org.apache.maven.plugins:maven-dependency-plugin:3.8.1:get -Dartifact=org.springframework.security:spring-security-crypto:6.5.11` → `Downloaded from aliyunmaven: … spring-security-crypto-6.5.11.jar (105 kB)` + `BUILD SUCCESS`，jar/pom 已落进 `.m2repo`。**注意**：本机 `curl` 到 `maven.aliyun.com` 是 `000`（走的是 Maven 的镜像/代理配置），所以**只能用 Maven 自己验证**，不要用 `curl -I` 判断「依赖能不能拉到」。 |
+| 3 | **控制台令牌 = 自研 HS256（JWT 形状，不是 JWT 标准实现）**：`base64url(header).base64url(payload).base64url(HMAC-SHA256(前两段))`；header 固定为 `{"alg":"HS256","typ":"JWT"}` 且**校验方完全忽略请求里的 header**（算法由服务端写死 → 不存在 `alg` 混淆面）；claims 只认 `sub`（`sys_user.id`）、`tenantId`、`role`、`iat`、`exp`（**≤ 2 小时，默认 2 小时**）；签名比较用**恒定时间**；密钥来自 `aihub.console.secret`（环境变量 `AIHUB_CONSOLE_SECRET`，**为空则登录接口直接失败**，不生成默认值）。**不做**：RS256 / JWKS / refresh token / 注销黑名单 / 多签发方。 | 设计文档 §7.3 写的是「签发 JWT」，而本场景是「一个 admin 签发、一个 admin 校验、算法固定、生命周期短」，用标准库要引三个新依赖（jjwt-api/impl/jackson）并为不存在的需求买单。自研的**风险必须显式写出来**：它只支持 HS256、不做密钥轮换、没有 `aud`/`iss` 校验 —— 一旦将来出现第二签发方或需要吊销，**必须换成库**（这条要写在类的 javadoc 里）。恒定时间比较与「忽略请求 alg」是防伪必需项，各有一条用例。 | 新增 `aihub-admin/aihub-service/src/main/java/com/aihub/service/console/{ConsoleToken,ConsoleClaims}.java` + 固定向量与篡改用例（**放在 `aihub-service` 而不是零依赖的 `aihub-common`**：只有 admin 用它，而 `aihub-common` 没有 Jackson，手写 JSON 解析只会给令牌引入无谓的脆弱点）；`aihub-web` 的 `ConsoleAuthFilter` 与 `ConsoleTokenService` 用它。 |
+| 4 | **配置失效走 Redis Pub/Sub（设计 §6.3 明文）**：频道名 `aihub:config:invalidate`，载荷 `{version}\|{reason}`（分隔符文本，与 `MeteringEventCodec` 同风格，编解码在 `aihub-common`）。admin 在**每一次**成功的配置写事务提交后发布一次；gateway 订阅后执行 `ConfigClient.invalidate()`。**`invalidate(long version)` 必须同时做三件事**：清本地 Caffeine、**删除共享条目 `aihub:config:snapshot`**、**把 `ConfigCache` 的写入水位抬到失效消息里的 `version`** —— **绝不重置成 `NO_VERSION`**（重置会拆掉「挡住在飞的旧回填把刚删掉的陈旧条目写回去」的唯一护栏，等于让这次失效白做；见 E.2-I9）。 | 这正是 M3 决策 16 推迟到 M4 的那一半，也是 M3 已登记缺口的修复：`ConfigClient.invalidate()` 当前**只清本地**，紧接着 `resolve()` 又会读到 Redis 里同样陈旧的共享条目并采用它 —— 于是「配置变了」这个信号对多实例部署**完全无效**，而 `docs/CONVENTIONS.md` §6.6 记录的 10 分钟上界就是这么来的。设计文档 §6.3 原话是「admin 变更配置后通过 Redis Pub/Sub 广播失效消息，各 gateway 实例清理本地缓存；本地 TTL 30 秒作为兜底」，本决策把它落地。**M4 的验收标准（控制面配置 → 数据面生效全链路打通）依赖这一条**。 | 新增 `aihub-common/.../config/ConfigInvalidateTopology.java` + `ConfigInvalidateCodec.java`；`aihub-gateway/.../config/{ConfigSubscriber,ConfigInvalidateSubscriptionConfig,ConfigInvalidateProperties}.java`（**`RedisMessageListenerContainer` 的装配放在专用的 `ConfigInvalidateSubscriptionConfig` 里，不是 `ConfigConfig`** —— 见 N3 的处置）；admin 侧 `ConfigChangePublisher`。Channel 名与载荷格式是**跨服务契约**，两端共用同一常量（与 `MeteringTopology` 同一纪律）。 |
+| 5 | **快照 `version` 改成显式单调计数**：新增单行表 `config_version(id=1, version BIGINT, updated_at)`；`ConfigSnapshotService.currentVersion()` 返回 `max(数据库侧的 max(updated_at), config_version.version)`；**水位只在配置写入路径上抬升**（`ConfigChangePublisher.bumpAndPublish`，见 Task 2/8/9/10，用「写入时刻的 epoch 毫秒」）。**读路径必须是纯读**：`snapshot()` 是 `@Transactional(readOnly = true)`，而 MySQL + Connector/J 的 `readOnlyPropagatesToServer` 默认是**开**的（`SET SESSION TRANSACTION READ ONLY`），在里面写库会直接 `ERROR 1792` —— 也就是把 `GET /internal/config/snapshot`（里程碑依赖的那条路）打坏。 | 已登记的缺口：`version = max(updated_at)` 会**倒退**（删掉最新那一行），而网关的比对是严格 `>`，于是更旧的快照会被 lastGood 记住并继续服务；`ConfigSnapshotService` 既不检测也不告警。M3 时「没有写入方」所以是潜在缺口，**M4 有了 CRUD 就必须修**，否则删除一条路由会让数据面永远停在旧快照上。为什么还要保留 `max(updated_at)` 这一半：**手工 SQL / seeder 写入仍然会推进 `updated_at`**。为什么不在读路径抬升：见左列的 `ERROR 1792`（评审实测的驱动语义）。**残余（诚实登记）**：**手工 SQL / raw SQL 的删除仍然可能让版本回退一次**（不经过控制台就不会抬水位）—— M4 的验收（Task 17 第 3 步）因此**必须走控制台/API** 去改配置，不能用 raw SQL；这同时意味着 `config_version` 的水位在纯 SQL 运维路径上是空的。 | `config_version` 表在 V2 里建；`ConfigSnapshotService` 的版本计算改动（**纯读**）+ `ConfigChangePublisher` 里的抬升；真 MySQL 用例（改一行 → 版本严格变大；**删掉最新那行 → 版本不回退**，前提是该行是本进程用 `raiseTo` 写过的）；`ConfigSnapshotServiceTest` 的两条既有断言（空库 version=0）改成**显式 reset `config_version` 后**再断言，理由写在测试里（Testcontainers 是 JVM 级共享的，水位会跨用例存活）。 |
+| 6 | **配额超限的数据面错误码用 OpenAI 的 `insufficient_quota`**（`429`，`type="insufficient_quota"`），**取代**设计文档 §6.2 里 `429 QUOTA_EXCEEDED` 的简写。 | 与 M3 决策 13 同一理由：数据面客户端是各种 OpenAI SDK，配额耗尽的标准形状就是 `429` + `error.code="insufficient_quota"`（`error.type` 同名）。用私有码 `QUOTA_EXCEEDED` 会让 SDK 的配额分支失效。**必须与限流严格区分**（CONVENTIONS §6.6 已警告）：`rate_limit_exceeded` 是「每秒发太快」（暂时、下个窗口自动恢复），`insufficient_quota` 是「这个周期的余额用完了」（持久、要充值或等新周期）。 | `docs/CONVENTIONS.md` §4 错误表新增一行，并写明「设计文档 §6.2 的 `QUOTA_EXCEEDED` 按已被取代处理」；`GatewayErrors` 不新增重载。 |
+| 7 | **配额在 Redis 不可用时降级为「放行 + 告警」**（fail-open），与限流的「降级仍拒绝」**刻意相反**。 | 设计文档 §9 明文：「Redis 不可用 → 限流降级为本地令牌桶（单机近似），**配额降级为放行 + 告警**，不阻断服务」。理由：限流是保护上游的（宁可错杀），配额是记账的（宁可少记也不能因为记账组件坏了而拒绝付费客户）。这条对照是本项目**面试时最值得讲的一处取舍**，必须写进 CONVENTIONS 与 README。降级时打 `aihub.quota.degraded` 计数器 + 限流过的 WARN；**Redis 侧的预扣丢失由每日对账兜底**（对账按 `request_log` 重算 `billing_daily`）。 | `QuotaFilter` 的降级分支 + 用例 `redisDownAllowsTheRequestAndCountsADegrade`；CONVENTIONS §6.7 新增配额小节。 |
+| 8 | **审计在服务层显式写**（`AuditService.record(...)`），**不用 AOP/拦截器**。审计行写在与业务写**同一个事务**里。 | AOP 看着优雅，但「谁做的、对哪个对象、改了哪些字段」这三件事只有服务层知道；用切面去猜注解等于把审计的准确性交给约定。同事务保证「改了但没审计」不可能发生（审计写失败 → 业务回滚）。**审计失败必须让业务失败**（审计是合规要求，不是尽力而为）。 | 新增 `AuditService` + `audit_log` 表（D1）；每个写接口的用例都要断言「产生了一条审计行，且**不含**敏感字段」。 |
+| 9 | **管理台是零构建的静态单页**：`aihub-web/src/main/resources/static/console/{index.html,console.js,console.css}`，vanilla JS + `fetch`，令牌放 **`sessionStorage`**（关闭标签页即失效）。**不引**前端框架、不引构建步骤、**不用 cookie**。 | 「极简管理台」的交付物是「能登录、能看渠道/Key/日志、能新建渠道与 Key」。引一个 Vite+React 工程会让本里程碑的构建面翻倍，而收益是零（面试讲的是后端链路）。不用 cookie 是为了**不引入 CSRF 面**（同源 + `Authorization` 头 + `sessionStorage` 的组合下，跨站请求带不上令牌）。代价是 XSS 会拿到令牌 —— 而本页面不加载任何第三方脚本、不渲染用户输入的 HTML，这个代价被登记为**已知边界**而不是假装不存在。 | 静态资源在 `aihub-web` 的 classpath 里；一个 `ConsoleStaticResourceTest` 断言三个文件可被 `GET /console/` 取到且 `index.html` 不含内联脚本。 |
+| 10 | **`/api/**` 的授权只分两级**：`ADMIN` 可读写，`VIEWER` 只读（非 GET/HEAD 一律 403 + admin 信封）。`sys_user.role` 是唯一来源。 | `sys_user` 表已经有 `role`，但设计文档没有定义角色集合。两级是「够用且可验证」的最小集合；细粒度 RBAC 属后续迭代（已登记在 §14 非目标）。**403 必须走 admin 信封**（`{"code":"FORBIDDEN",...}`），不要 Spring 默认错误页。 | `ConsoleAuthFilter` 之后的 `ConsoleRoleFilter`（或同一个过滤器里的两级判定）+ 用例（`VIEWER` GET 200 / POST 403）。 |
+| 11 | **API Key 吊销/停用必须显式 `DEL` 缓存**：控制台改 `api_key.status` 后，除发布配置失效消息外，还要 `DEL aihub:apikey:<key_hash>`（键前缀用 `ApiKeyCacheCodec.CACHE_KEY_PREFIX` 常量）。**网关侧的本地 Caffeine 仍要等 ≤30 秒**（除非该 key 的请求恰好触发本地过期）。 | M3 决策 16 把「真正的收敛手段是 M4 的吊销接口 + 显式 `DEL`」写在这里，本里程碑兑现它。`DEL` 只能清掉**共享**那一层：网关本地 Caffeine 的 30 秒窗口**没有**便宜的失效通道（给每个 key 建 Pub/Sub 主题的成本远大于收益），因此**残余必须写清楚**：吊销后最坏 30 秒内本实例仍可能放行。吊销的运维动作建议是「先停用、观察、再删」。 | `ApiKeyAdminService` + 用例：「停用后共享缓存条目被删除」；CONVENTIONS §6.6 的 ≤30s/≤5m 表述改为「控制台吊销后共享层立即失效，本地层 ≤30s」。 |
+| 12 | **对账任务只报告、不自动改账**：每日 02:00（`aihub.quota.reconcile-cron`，与 M3 的分区维护 03:10 **错开**）按 `request_log` 重算当日 `billing_daily`（**幂等 UPSERT**，`uk_billing_daily(tenant_id, stat_date)`），并与 Redis 的预扣计数比对；偏差超过阈值（`aihub.quota.reconcile-tolerance-ratio`，默认 1%）→ WARN + `aihub.quota.reconcile.mismatch` 计数器 + 一条审计行，**但不修改 `quota.token_used`**。 | 设计文档 §6.2 要求「与 Redis 计数比对、修正并告警偏差」。**修正**这一步在这里被降级为「报告」，理由是：对账任务自动改账会在「计量事件因为 DLQ 延迟到达」时把**正确**的账改**错**（计量是至少一次 + 幂等，`request_log` 在 02:00 时可能还没补全）。先报告、人工确认、再执行修正是更安全的顺序，且符合本里程碑「可演示」的验收口径。**残余**：偏差的自动收敛推迟（登记在 README 已知边界）。 | 新增 `QuotaReconciliationJob`（`@Scheduled(cron=...)`）+ 用例（用真 MySQL 造 3 天的 `request_log` → 断言 `billing_daily` 被正确重算 + 偏差被计数）。 |
+| 13 | **配额的时间粒度 `quota.period` = `YYYYMM`（UTC）**，Redis 键 `aihub:quota:{tenantId}:{period}`，`PEXPIRE` 设为「到下个周期开始 + 1 天」的毫秒数。 | `quota` 表唯一的唯一键是 `uk_quota_tenant_period(tenant_id, period)`，`period` 是 `VARCHAR(8)` —— `YYYYMM` 正好 6 字符且按字典序可比较（可用于 `period = ?` 精确查、也能做前缀范围查）。TTL 取「周期末 + 1 天」而不是固定值，是为了让跨月的边界请求不会读到一个已经过期又被重建的空桶（+1 天把「月末最后一个请求」与「对账任务的补扣」都罩住）。 | `QuotaKeys`（`aihub-common`）有键布局与 TTL 的固定向量测试；D2 的 Lua 用 `ARGV` 传入 ttlMillis（沿用 M3 决策 9：不用 Redis `TIME`）。 |
+| 14 | **`channel.models_json` 的语义定为「该渠道支持的模型清单，仅供展示与运维参考」**；**路由的唯一真相仍是 `model_route`**。控制台的渠道表单里它是可选文本，写入前做 JSON 合法性校验。 | M3 已知边界里登记过这条歧义（「两者同时存在时以哪个为准 spec 没说」），并说「M4 的控制台一并定」。定成「展示用」的理由：`model_route` 已经表达了「这个模型可以走哪些渠道」，反向的「这条渠道支持哪些模型」对路由**没有**增量信息（一个模型即使出现在渠道的 `models_json` 里，没有对应的 `model_route` 行也不会被路由到），把它接进路由只会制造第二个真相源。 | README 已知边界对应条目改为「已定：展示用」；`ChannelAdminService` 校验 JSON 合法性 + 用例。 |
+| 15 | **配额「不限」的表示是「没有行」或 `token_limit = 0`（`request_limit = 0` 同理）**：任一维度为 `0` 即该维度不判定。两个维度都非 0 才逐维判定。 | `quota` 表的 DDL 默认值就是 `0`（`token_limit BIGINT NOT NULL DEFAULT 0`），而 M4 上线前**所有既有租户都没有配额行**。若把 `0` 解读为「额度为零」，M4 上线的瞬间每一个既有租户都会开始吃 `429 insufficient_quota` —— 一个纯粹由新功能引入的全量停服。把 `0` 定为「不限」让升级是**惰性**的：不配额度 = 行为与 M3 完全一致，只有显式配了正数才启用配额。代价是「想表达额度为零」需要一个非零的替代（用 `1` 并把已用量记满，或直接停用该 key），已登记。 | `QuotaResolver` 的判定 + 用例 `absentQuotaRowAllowsEverything`、`zeroLimitMeansUnlimitedNotBlocked`、`positiveLimitIsEnforced`。README 写明这条语义。 |
+| 16 | **`aihub.console.secret` 为空时 `/api/**` 一律 `401`（fail-closed）**：`ConsoleAuthFilter` **不**放行任何请求，登录接口返回 `500`+`CONFIGURATION_ERROR`（明确告诉运维是配置问题，不是口令错），启动时打一条 WARN。 | 与既有的两处同构纪律一致：`aihub.internal.secret` 为空时 `InternalHmac.verify` 恒返回 `false`（fail-closed）、`InternalAuthFilter` 一律 401；`aihub.channel.master-key` 为空时 admin 是写入路径直接抛异常、gateway 是请求路径返回空。**绝不生成默认密钥**（默认密钥 = 所有人都能签令牌 = 管理台等于没有鉴权）。为什么登录接口回 500 而不是 401：401 会让运维以为「用户名或口令错了」并去翻口令，而真正的故障是缺配置 —— 这一条与本项目对 D1 的裁决同源（**不要把平台故障伪装成凭证错误**）。 | `ConsoleAuthFilter` + `ConsoleAuthService` 各一条用例；`.env.example` 给出生成命令。 |
+| 17 | **配额预扣必须读到请求体，因此在 `QuotaFilter` 里自己 join + `ServerHttpRequestDecorator` 缓存请求体**（⚠️ Spring 6.2 **没有** `ServerWebExchangeUtils.cacheRequestBody*`：评审已在 `spring-web`/`spring-webflux` **6.2.19 的 jar** 里核实，连 `web/server/support` 包都不存在。正确写法见 Task 13 的片段：join → 复制进 `byte[]` → **先复制再释放** → `exchange.mutate().request(装饰器).build()` → 把**装饰过的** exchange 传下去），并**必须证明字节透传未被破坏**：上游收到的请求体与客户端发的**逐字节相同**。 | `QuotaFilter` 需要 `max_tokens` 与 prompt 文本来估算（复用 M2 已有的 `TokenEstimator`：1 个汉字 ≈ 0.6 token、1 个非汉字 ≈ 0.3、向上取整），而 WebFlux 的请求体是**一次性**流：谁先订阅谁拿走。要么把预扣搬进已经读了 body 的 `ChatRelayController`（破坏「鉴权→限流→配额→路由」的文档顺序），要么在过滤器里缓存。选缓存，并把 M1 的字节级透传铁律作为**该任务的验收判据**（`AtomicReference` 记下上游收到的原始字节，与客户端发的比较 `isEqualTo`）。 | `QuotaFilter` + 用例 `cachedBodyStillReachesTheUpstreamByteForByte`；`QuotaEstimator` 复用 `com.aihub.gateway.meter.TokenEstimator`，**不新写一份估算器**。 |
+
+### 本里程碑**不做**的事（写进文档，避免范围蔓延）
+
+- **`/v1/embeddings`、文档上传/解析/嵌入/向量库、`kb_document` 状态机** —— M5（`kb_document` 表已在 V1，本里程碑不碰）。
+- **计费单价与成本**：`billing_daily.cost` 本里程碑**只写 0**（没有单价表），按 token 出账属后续迭代。
+- **压测报告、故障注入报告、`/actuator/metrics` 暴露** —— M6（网关仍然只暴露 `health,info`）。
+- **Redis `requirepass`、TLS、网络隔离** 的生产加固 —— 仍未做（README 继续披露）。
+- **RS256/JWKS/refresh token/注销黑名单/多签发方** —— 见 D3，明确不做。
+- **细粒度 RBAC、租户自助注册、第三方登录、邮件通知** —— 见 §14 非目标。
+- **对账偏差的自动修正** —— 见 D12，只报告。
+- **主动探活之外的健康度体系**（如按渠道的滑动窗口成功率）—— 只有 `POST /api/channels/{id}/probe` 的一次性探测。
+- **网关侧对配额的「本地近似降级」**：Redis 不可用时**放行**（D7），不建本地配额桶 —— 记账数据必须收敛到一个真相源，本地近似只会制造更难对账的偏差。
+
+---
+
+## File Structure
+
+M4 新增/修改的文件（`改` = 修改既有文件；**依赖变更只有一处**：`aihub-service` 加 `spring-security-crypto`；**迁移只有一条**：`V2__m4_console.sql`）：
+
+### aihub-common（main 作用域**仍然零第三方**）
+
+| 文件 | 职责 |
+|---|---|
+| `.../common/config/ConfigInvalidateTopology.java` | 新增：Pub/Sub 频道名常量（**跨服务契约的唯一真相**） |
+| `.../common/config/ConfigInvalidateCodec.java` | 新增：失效消息的分隔符编解码（`version\|reason`），含固定向量 |
+| `.../common/config/ConfigInvalidateMessage.java` | 新增：失效消息 record（version / reason） |
+| `.../common/quota/QuotaScript.java` | 新增：预扣 Lua 脚本 + `RETURN` 语义的唯一真相（gateway 跑它，admin 集成测试验它） |
+| `.../common/quota/QuotaDecision.java` | 新增：预扣判定的纯数据（`allowed` / `remainingTokens` / `remainingRequests`，`-1` = 该维度不限） |
+| `.../common/quota/QuotaKeys.java` | 新增：Redis 键布局 `aihub:quota:{tenantId}:{period}` 与 TTL 公式 |
+| `.../common/quota/QuotaPeriod.java` | 新增：`period` 的 `YYYYMM` 折算（UTC）与「下个周期开始」的毫秒数 |
+
+### aihub-dao
+
+| 文件 | 职责 |
+|---|---|
+| `.../db/migration/V2__m4_console.sql` | 新增：`audit_log` 表、`request_log` 两个索引、`config_version` 单行表（D1） |
+| `.../entity/AuditLogEntity.java` / `.../entity/ConfigVersionEntity.java` | 新增实体 |
+| `.../entity/SysUserEntity.java` | 新增实体（`sys_user` 已存在于 V1，M4 首次使用） |
+| `.../entity/QuotaEntity.java` / `.../entity/BillingDailyEntity.java` | 新增实体（两表已存在于 V1，M4 首次使用） |
+| `.../mapper/*Mapper.java` | 新增：AuditLog / ConfigVersion / SysUser / Quota / BillingDaily 五个 Mapper |
+
+### aihub-service
+
+| 文件 | 职责 |
+|---|---|
+| `.../service/console/ConsoleAuthService.java` | 新增：用户名+口令校验（bcrypt）、越权/停用判定、审计 |
+| `.../service/console/ConsoleToken.java` | 新增：**JWT 形状的 HS256 令牌**（`base64url(header).base64url(payload).base64url(HMAC-SHA256)`，载荷用 Jackson 读写，D3）。放在 `aihub-service` 而不是零依赖的 `aihub-common`：**只有 admin 用它**（登录签发 + 过滤器校验），而 `aihub-common` 没有 Jackson，手写 JSON 解析只会给令牌引入无谓的脆弱点 |
+| `.../service/console/ConsoleClaims.java` | 新增：令牌载荷 record（userId / tenantId / role / issuedAt / expiresAt） |
+| `.../service/console/ConsoleTokenService.java` | 新增：签发/校验令牌的薄封装（读 `aihub.console.*` 配置） |
+| `.../service/audit/AuditService.java` | 新增：写 `audit_log`（与业务同事务，D8） |
+| `.../service/tenant/TenantAdminService.java` | 新增：租户 CRUD |
+| `.../service/apikey/ApiKeyAdminService.java` | 新增：铸造（复用 `ApiKeyHasher`）、列表、吊销/停用 + 显式 `DEL`（D11） |
+| `.../service/channel/ChannelAdminService.java` | 新增：渠道 CRUD（写入时 AES-GCM 加密、轮换重加密） |
+| `.../service/route/ModelRouteAdminService.java` | 新增：`model_route` CRUD |
+| `.../service/ratelimit/RateLimitPolicyAdminService.java` | 新增：限流策略 CRUD（写入时先停用同维度旧行） |
+| `.../service/config/ConfigChangePublisher.java` | 新增：配置写成功后「抬水位（D5）+ 发布失效消息（D4）」 |
+| `.../service/config/ChannelProbeService.java` | 新增：`POST /api/channels/{id}/probe` 的真实上游探测 |
+| `.../service/log/RequestLogQueryService.java` | 新增：`/api/logs` 的**分区裁剪友好**分页查询（**必须**带 `tenant_id` + 时间范围；索引在 V2，见 D1；**不设**无界查询） |
+| `.../service/log/AuditQueryService.java` | 新增：`/api/audit` 的分页查询（审计是 M4 交付物之一，**只有写入路径不算交付** —— 见 I10③） |
+| `.../service/quota/QuotaAdminService.java` | 新增：额度 CRUD（`quota` 表）+ 周期折算（D13） |
+| `.../service/quota/QuotaReconciliationService.java` | 新增：按 `request_log` 重算 `billing_daily` + 与 Redis 比对 + 告警（D12） |
+| `.../service/quota/QuotaReconciliationJob.java` | 新增：`@Scheduled` 入口（02:00） |
+| `.../service/metering/MeteringSchedulingConfig.java` | **改**：注册对账的 cron（与分区维护错开） |
+
+### aihub-web
+
+| 文件 | 职责 |
+|---|---|
+| `.../web/console/ConsoleAuthController.java` | 新增：`POST /api/auth/login` |
+| `.../web/console/TenantController.java` | 新增：`/api/tenants` |
+| `.../web/console/ApiKeyController.java` | 新增：`/api/api-keys`（创建响应含一次性明文） |
+| `.../web/console/ChannelController.java` | 新增：`/api/channels` + `/api/channels/{id}/probe` |
+| `.../web/console/ModelRouteController.java` | 新增：`/api/routes` |
+| `.../web/console/RateLimitPolicyController.java` | 新增：`/api/rate-limits` |
+| `.../web/console/QuotaController.java` | 新增：`/api/quotas` |
+| `.../web/console/LogQueryController.java` | 新增：`/api/logs` |
+| `.../web/console/AuditController.java` | 新增：`/api/audit`（只读；强制 tenant + 时间范围，分页有上界） |
+| `.../web/console/BillingController.java` | 新增：`/api/billing/daily` |
+| `.../web/console/ConsoleAuthFilter.java` | 新增：守 `/api/**`（令牌 + 两级角色，D3/D10） |
+| `.../web/config/ConsoleProperties.java` | 新增：`aihub.console.*`（secret / TTL / 是否启用） |
+| `.../web/internal/InternalQuotaController.java` | 新增：`POST /internal/quota/reserve`（HMAC 内部接口） |
+| `.../resources/static/console/{index.html,console.js,console.css}` | 新增：极简管理台（D9） |
+| `.../resources/application.yml` | **改**：`aihub.console.*`、`aihub.quota.*` |
+
+### aihub-gateway
+
+| 文件 | 职责 |
+|---|---|
+| `.../config/ConfigSubscriber.java` | 新增：订阅失效频道 → `ConfigClient.invalidate(decoded.version())`（D4） |
+| `.../config/ConfigClient.java` | **改**：`invalidate(long)` 清本地 + 删共享条目 + **把水位抬到该版本**（D4 的修复点；**不是**重置） |
+| `.../config/ConfigCache.java` | **改**：暴露「删除共享条目 + 把 `observedRedisVersion` **抬到失效消息里的版本**」的方法（**不是**重置） |
+| `.../config/ConfigInvalidateSubscriptionConfig.java` | 新增：`RedisMessageListenerContainer` 的装配（`@ConditionalOnProperty(aihub.config.invalidate-subscription)`）；**必须带 `@EnableConfigurationProperties(ConfigInvalidateProperties.class)`**，否则容器拿不到那个 bean |
+| `.../config/ConfigInvalidateProperties.java` | 新增：`aihub.config.invalidate-subscription`（默认 `true`）。**独立于 `GatewayConfigProperties`** —— 往那个 record 加分量会打断 8 处 `new` 调用点（E.1-C2） |
+| `.../quota/QuotaFilter.java` | 新增：鉴权→限流→**配额**→路由 的过滤器（`@Order(HIGHEST_PRECEDENCE + 175)`） |
+| `.../quota/QuotaResolver.java` | 新增：按 **`tenant_id + period`** 选额度行（`quota` 表**没有** `api_key_id` 列，`uk_quota_tenant_period` 就是它的唯一键 —— 配额是租户级的月度预算，**不是**按 key 的，别把它和限流的两维搞混） |
+| `.../quota/QuotaLimiter.java` / `RedisQuotaLimiter.java` / `QuotaEstimator.java` | 新增：Lua 预扣、降级为放行、`估算 prompt + max_tokens`（D7） |
+| `.../quota/QuotaCorrector.java` | 新增：拿到真实 `usage` 后的**校正钩子**（`ChatRelayController` 在 `doFinally` 里把 `MeteringEvent` 直接喂给它，见 Task 13） |
+| `.../quota/QuotaConfigProperties.java` / `QuotaConfig.java` | 新增：`aihub.quota.*` 配置与装配（`QuotaFilter` / `QuotaResolver` / limiter / corrector 的接线都在这里） |
+| `.../relay/ChatRelayController.java` | **改**：`doFinally` 里在 `publish` 之后调用 `quotaCorrector.correct(event)`（**它不是"拿到 usage 后校正"那么简单**：controller 看不到 `usage`，见 Task 13 的说明） |
+
+### 文档
+
+| 文件 | 职责 |
+|---|---|
+| `docs/CONVENTIONS.md` | **改**：§4 错误表 +`insufficient_quota` 行；§5/§6 追加控制台与配额小节；§7 迁移纪律 |
+| `README.md` | **改**：M4 做了什么、管理台怎么用、已知边界（配额降级放行、吊销 ≤30s、对账只报告、cost=0、`models_json` 已定） |
+| `.env.example` | **改**：`AIHUB_CONSOLE_SECRET`（生成方法给两种 PowerShell 写法 + openssl） |
+| `docs/superpowers/specs/...design.md` | **改**：§6.2 的 `QUOTA_EXCEEDED` 标注已被 `insufficient_quota` 取代；§7.3 增补已实现/未实现的标注 |
+
+---
+
+## 任务索引
+
+| # | 任务 | 依赖 | 交付物一句话 |
+|---|---|---|---|
+| 1 | V2 迁移 + 迁移纪律 | — | `audit_log` / 两个索引 / `config_version` 落地，迁移断言显式化 |
+| 2 | 配置失效契约 + admin 发布方 | 1 | `ConfigInvalidateTopology/Codec` + 写后广播 |
+| 3 | 版本单调性（水位） | 1 | `config_version` 读时抬升，删行不再回退 |
+| 4 | 网关订阅方 + `invalidate(long)` 清本地/共享并**抬水位** | 2, 3 | 配置变更秒级到达数据面（**验收前置**） |
+| 5 | bcrypt 依赖 + 控制台令牌 | — | 可解析性验证 + HS256 令牌 + 固定向量 |
+| 6 | 登录 + `/api/**` 鉴权过滤器 + 角色 | 5 | `POST /api/auth/login`、401/403 信封 |
+| 7 | 审计服务 | 1, 6 | 与业务同事务的 `audit_log` 写入 |
+| 8 | 租户 + 渠道 CRUD（含加密写入与轮换） | 6, 7 | 渠道可建可改，密钥加密落库 |
+| 9 | API Key CRUD + 吊销显式 DEL | 6, 7, 8 | 明文仅一次返回；停用即失效共享层 |
+| 10 | 模型路由 + 限流策略 CRUD | 6, 7 | 两个真相源的写入接口 |
+| 11 | 渠道探测 + 请求日志/账单/审计查询接口 | 6, 1 | `probe` 与 `/api/logs`、`/api/billing/daily`、`GET /api/audit` |
+| 12 | 配额控制面 + Lua 预扣契约 | 1 | `quota` CRUD + `QuotaScript`/`QuotaKeys`/`QuotaPeriod` |
+| 13 | 网关 `QuotaFilter` + 实际校正 | 12 | 429 `insufficient_quota`、降级放行、usage 校正 |
+| 14 | `/internal/quota/reserve` 兜底 | 12, 13 | Redis 不可用时的预扣回源路径 |
+| 15 | 每日对账任务 | 11, 12 | `billing_daily` 重算 + 偏差告警（只报告） |
+| 16 | 极简管理台静态页 | 6, 8, 9, 10, 11 | 登录 + 渠道/Key/日志三个视图 |
+| 17 | 文档收口 + M4 全栈验收 | 全部 | 「控制面配置 → 数据面生效」判据达成 |
+
+---
+## Task 1: V2 迁移与迁移纪律
+
+**Files:**
+- Create: `aihub-admin/aihub-dao/src/main/resources/db/migration/V2__m4_console.sql`
+- Create: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/AuditLogEntity.java`
+- Create: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/ConfigVersionEntity.java`
+- Create: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/AuditLogMapper.java`
+- Create: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/ConfigVersionMapper.java`
+- Modify: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/dao/SchemaMigrationTest.java`
+- Test: 同上（`SchemaMigrationTest` 就是本任务的测试）
+
+**Interfaces:**
+- Consumes: `AbstractIntegrationTest`（Testcontainers 单例 MySQL/Redis/RabbitMQ）；MyBatis-Plus `BaseMapper<T>`
+- Produces:
+  - 表 `audit_log(id, tenant_id, actor_type, actor, action, target_type, target_id, detail, request_id, created_at)`
+  - 表 `config_version(id, version, updated_at)`，**并且必须已有一行 `id=1`**
+  - 索引 `request_log.idx_request_log_channel(channel_id, created_at)`、`request_log.idx_request_log_api_key(api_key_id, created_at)`
+  - `AuditLogEntity`（字段与列同名，`@TableName("audit_log")`、`@TableId(type = IdType.AUTO)`）
+  - `ConfigVersionEntity`（`id` / `version` / `updatedAt`）
+  - `interface AuditLogMapper extends BaseMapper<AuditLogEntity>`
+  - `interface ConfigVersionMapper extends BaseMapper<ConfigVersionEntity>` **外加两个注解方法**（Task 3 与 Task 5 直接调用，签名逐字如下）：
+    ```java
+    @Select("SELECT version FROM config_version WHERE id = 1")
+    Long current();
+
+    @Insert("INSERT INTO config_version (id, version) VALUES (1, #{version}) "
+            + "ON DUPLICATE KEY UPDATE version = GREATEST(version, #{version})")
+    int raiseTo(@Param("version") long version);
+    ```
+
+- [ ] **Step 1: 写迁移脚本与迁移断言（先写会红的断言）**
+
+`V2__m4_console.sql`（**逐字**，只做 D1 允许的三件事；不要顺手加别的列或表）：
+
+```sql
+-- M4 控制面所需的**唯一**一条迁移（决策 D1）。
+-- 1) 审计表：M4 之前没有审计承载物，写操作只有日志。
+-- 2) request_log 的两个索引：按渠道 / 按 Key 聚合此前是全表扫描（M3 已登记）。
+-- 3) config_version 单行表：快照 version 的水位（决策 D5，修「删掉最新一行版本会倒退」）。
+
+CREATE TABLE audit_log (
+    id          BIGINT        NOT NULL AUTO_INCREMENT,
+    tenant_id   BIGINT        NULL,
+    actor_type  VARCHAR(16)   NOT NULL,
+    actor       VARCHAR(64)   NOT NULL,
+    action      VARCHAR(32)   NOT NULL,
+    target_type VARCHAR(32)   NOT NULL,
+    target_id   VARCHAR(64)   NULL,
+    detail      VARCHAR(1024) NULL,
+    request_id  VARCHAR(64)   NULL,
+    created_at  DATETIME(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (id),
+    KEY idx_audit_log_created (created_at),
+    KEY idx_audit_log_tenant_created (tenant_id, created_at),
+    KEY idx_audit_log_target (target_type, target_id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- 分区表上的二级索引：MySQL 会重建各分区的本地索引。列顺序把 created_at 放在第二，
+-- 让「按渠道 + 时间范围」的查询能同时用到索引前缀与分区裁剪。
+ALTER TABLE request_log ADD KEY idx_request_log_channel (channel_id, created_at);
+ALTER TABLE request_log ADD KEY idx_request_log_api_key (api_key_id, created_at);
+
+CREATE TABLE config_version (
+    id         BIGINT      NOT NULL,
+    version    BIGINT      NOT NULL DEFAULT 0,
+    updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- 必须预先插入这一行：raiseTo 的 upsert 能处理缺失，但 current() 读到 NULL 会让
+-- 「水位」这个概念在第一次读时不存在，多一个分支不如一行数据。
+INSERT INTO config_version (id, version) VALUES (1, 0);
+```
+
+`SchemaMigrationTest`：**先读这个类再改**（评审已核实它的真实形状）—— 它**不用 Flyway API**，而是用 `JdbcTemplate` 查 `flyway_schema_history`；它的 `allTenTablesExist` **断言的是恰好 10 张表**。因此本任务要改它**三处**，不是一处：
+
+1. `flywayAppliesExactlyOneMigration` → 改成「恰好 2 条，且 version 与 description 都是预期的」。**用 JDBC 查历史表**，不要引入 `Flyway`/`MigrationInfo`/`MigrationVersion`（那个类今天没有这些装配，引进来就是额外的接线）：
+
+```java
+// D1：M4 有意引入第二条迁移（审计表 / request_log 索引 / config_version）。
+// 断言语义从「恰好 1 条」升级为「恰好这 2 条」：护栏要保的是「没人能悄悄加迁移」，
+// 而不是「永远只有 1 条」—— 现在任何人再加迁移都必须**显式**改这里。
+List<Map<String, Object>> applied = jdbcTemplate.queryForList(
+        "SELECT version, description FROM flyway_schema_history WHERE success = 1 ORDER BY installed_rank");
+assertThat(applied).hasSize(2);
+assertThat(applied).extracting(r -> String.valueOf(r.get("version"))).containsExactly("1", "2");
+assertThat(applied).extracting(r -> String.valueOf(r.get("description")))
+        .containsExactly("init schema", "m4 console");
+```
+
+> **不要**声称这里「钉住了校验和」：历史表里确实有 `checksum` 列，但本任务**只**钉 version + description（钉 checksum 会让任何一次无关的空白调整都变红，收益低于噪音）。
+
+2. `allTenTablesExist` → 表清单 **10 张改成 12 张**（新增 `audit_log`、`config_version`），方法名一并改成 `allTwelveTablesExist`。**不改它，V2 一落地这条就红。**
+3. 新增两条用例（见 Step 3）。
+
+**预期用例数**：该类现有 **4** 条，加新增 2 条 = **6** 条（Step 2 的期望值以此为准）。
+
+- [ ] **Step 2: 跑它确认失败**
+
+Run: `mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=SchemaMigrationTest"`
+Expected: FAIL —— 先是 `expected size: 2 but was: 1`（V2 还没被创建）；等 V2 加进去、表清单断言还没改时，再红在 `allTwelveTablesExist` 的 `containsExactlyInAnyOrder`（多了 `audit_log` 与 `config_version`）。**两条红都要抓下来**，它们分别是「迁移集合」与「表集合」的判别性证据。
+
+- [ ] **Step 3: 落实体、Mapper 与新用例**
+
+`AuditLogEntity` 的字段（列名与字段名一致，靠 MyBatis-Plus 的驼峰映射）：
+
+```java
+@TableName("audit_log")
+public class AuditLogEntity {
+    @TableId(type = IdType.AUTO)
+    private Long id;
+    private Long tenantId;
+    private String actorType;   // "USER" | "SYSTEM"
+    private String actor;       // sys_user.id 的字符串形式，或 "system"
+    private String action;      // 见 AuditAction 常量（Task 7）
+    private String targetType;  // "TENANT" | "API_KEY" | "CHANNEL" | "ROUTE" | "RATE_LIMIT" | "QUOTA"
+    private String targetId;
+    private String detail;      // 非敏感字段的变更摘要；**绝不放密钥/口令/密文**
+    private String requestId;
+    private Instant createdAt;
+    // getter / setter 略（与本仓库既有实体同风格）
+}
+```
+
+`ConfigVersionEntity`：`id`（`@TableId(type = IdType.INPUT)`，因为它是手工写死的 1）、`version`、`updatedAt`。
+
+新增两条用例到 `SchemaMigrationTest`：
+
+```java
+@Test
+void v2CreatesTheAuditTableAndTheTwoRequestLogIndexes() {
+    // 审计表可写可读（顺带证明列名与实体映射一致）
+    AuditLogEntity row = new AuditLogEntity();
+    row.setActorType("SYSTEM"); row.setActor("system");
+    row.setAction("MIGRATION_TEST"); row.setTargetType("CHANNEL");
+    auditLogMapper.insert(row);
+    assertThat(auditLogMapper.selectById(row.getId()).getAction()).isEqualTo("MIGRATION_TEST");
+
+    // 两个索引真实存在（查 information_schema 而不是读 SQL 文件）
+    assertThat(indexNamesOf("request_log"))
+            .contains("idx_request_log_channel", "idx_request_log_api_key");
+}
+
+@Test
+void configVersionRowExistsAndTheUpsertOnlyEverRaisesTheValue() {
+    // V2 已经插入了 (id=1, version=0)，所以下面两次走的都是 **UPDATE** 路径。
+    // **不要断言 affected rows**：MySQL 的 ON DUPLICATE KEY UPDATE 在「更新成相同值」时返回 0，
+    // 而 Connector/J 默认 useAffectedRows=false（即设了 CLIENT_FOUND_ROWS），此时返回 1；
+    // 换句话说同一个实现可能给出 0、1 或 2，断言返回值就是在猜驱动。断言**值**的语义。
+    // ⚠️ 水位行是**共享容器里的一行**，而 Testcontainers 是 JVM 级单例、`AbstractIntegrationTest`
+    // 没有全局清理：Task 2 的 ConfigChangePublisherTest 与 Task 3 都会把它抬到 ~1.76e12。
+    // 所以这里**先显式归零**再断言绝对值，否则这条用例在 Task 17 的全量 `mvn clean test` 里
+    // 会因为"谁先跑"而红（N11：与 ConfigSnapshotServiceTest 同一类隐患，那里已经加了 @BeforeEach）。
+    jdbcTemplate.update("UPDATE config_version SET version = 0 WHERE id = 1");
+    assertThat(configVersionMapper.current()).isZero();
+    configVersionMapper.raiseTo(1_700_000_000_000L);
+    assertThat(configVersionMapper.current()).isEqualTo(1_700_000_000_000L);
+    configVersionMapper.raiseTo(1_600_000_000_000L);                 // 更小的值：不改
+    assertThat(configVersionMapper.current()).isEqualTo(1_700_000_000_000L);
+}
+```
+
+> `raiseTo` 的返回值**没有任何调用方依赖**（Task 2/3 都不看它），保留 `int` 只是为了将来能用它做观测；任何地方都不许把它当判据。
+
+`indexNamesOf(String table)` 用一条 `SELECT index_name FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = ?` 的 `JdbcTemplate` 查询实现（放在测试类里，不要进生产代码）。
+
+- [ ] **Step 4: 跑它确认通过**
+
+Run: `mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=SchemaMigrationTest"`
+Expected: `Tests run: 6, Failures: 0, Errors: 0` + `BUILD SUCCESS`（**不要看 `[exit code: N]`**）。另外跑一次全反应堆编译：`mvn -B -q test-compile -DskipTests`。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add aihub-admin/aihub-dao/src/main/resources/db/migration/V2__m4_console.sql ^
+        aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/AuditLogEntity.java ^
+        aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/ConfigVersionEntity.java ^
+        aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/AuditLogMapper.java ^
+        aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/ConfigVersionMapper.java ^
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/dao/SchemaMigrationTest.java
+git commit -m "feat(dao): add V2 migration (audit_log, request_log indexes, config_version watermark)"
+```
+（上面是 PowerShell 的续行写法；在 bash 里用 `\`。**逐路径 add，禁止 `git add -A`。**）
+
+**验收判据：** 真实 MySQL 上 V2 被应用，`audit_log` 可读写、两个索引在 `information_schema` 里可见、`config_version` 有 `id=1` 的行且 `raiseTo` 的 upsert 语义正确；迁移清单断言**显式**列出两条。
+**RED 证据：** 未创建 V2 时 `SchemaMigrationTest` 报 `expected size: 2 but was: 1`；这条红是判别性的（它测的正是「迁移集合」本身），而 Step 3 之后任何新增迁移都会让它再红一次。
+
+---
+
+## Task 2: 配置失效契约 + admin 发布方
+
+**Files:**
+- Create: `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigInvalidateTopology.java`
+- Create: `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigInvalidateMessage.java`
+- Create: `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigInvalidateCodec.java`
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/config/ConfigChangePublisher.java`
+- Test: `aihub-admin/aihub-common/src/test/java/com/aihub/common/config/ConfigInvalidateCodecTest.java`
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/config/ConfigChangePublisherTest.java`
+
+**Interfaces:**
+- Consumes: `StringRedisTemplate`；`ConfigVersionMapper.raiseTo(long)`（Task 1）
+- Produces:
+  - `ConfigInvalidateTopology.CHANNEL = "aihub:config:invalidate"`（`public static final String`；**跨服务契约的唯一真相**，admin 与 gateway 共用）
+  - `public record ConfigInvalidateMessage(long version, String reason)`
+  - `ConfigInvalidateCodec.encode(ConfigInvalidateMessage) : String`、`ConfigInvalidateCodec.decode(String) : ConfigInvalidateMessage`（畸形返回 `null`，**不抛异常**）
+  - `ConfigChangePublisher.publish(long version, String reason) : void`（**永不抛异常**）；`ConfigChangePublisher.bumpAndPublish(String reason) : long`（先 `raiseTo(now)` 再发布，返回生效版本）
+
+- [ ] **Step 1: 写失败测试**
+
+`ConfigInvalidateCodecTest`：
+
+```java
+@Test
+void roundTripsVersionAndReason() {
+    var msg = new ConfigInvalidateMessage(1_700_000_000_123L, "channel.update");
+    assertThat(ConfigInvalidateCodec.decode(ConfigInvalidateCodec.encode(msg))).isEqualTo(msg);
+}
+
+@Test
+void escapesTheDelimiterAndNewlinesInTheReason() {
+    var msg = new ConfigInvalidateMessage(42L, "weird|reason\\with\nnewline\r");
+    String wire = ConfigInvalidateCodec.encode(msg);
+    assertThat(wire.chars().filter(c -> c == '|').count()).as("分隔符必须只出现一次").isEqualTo(1);
+    assertThat(ConfigInvalidateCodec.decode(wire)).isEqualTo(msg);
+}
+
+@Test
+void malformedPayloadDecodesToNullInsteadOfThrowing() {
+    assertThat(ConfigInvalidateCodec.decode(null)).isNull();
+    assertThat(ConfigInvalidateCodec.decode("")).isNull();
+    assertThat(ConfigInvalidateCodec.decode("not-a-number|x")).isNull();
+    assertThat(ConfigInvalidateCodec.decode("1")).as("缺分隔符").isNull();
+}
+
+@Test
+void channelNameIsTheSharedContractConstant() {
+    assertThat(ConfigInvalidateTopology.CHANNEL).isEqualTo("aihub:config:invalidate");
+}
+```
+
+`ConfigChangePublisherTest`（`@SpringBootTest` + `AbstractIntegrationTest`，用真 Redis 收消息；**只在本任务**允许这样装一条订阅来断言「消息真的发出去了」）：
+
+```java
+@Test
+void publishesAfterBumpingTheWatermarkAndNeverThrowsOnRedisFailure() throws Exception {
+    BlockingQueue<String> received = new LinkedBlockingQueue<>();
+    container.addMessageListener((m, ch) -> received.add(new String(m.getBody())),
+            new ChannelTopic(ConfigInvalidateTopology.CHANNEL));
+
+    long version = publisher.bumpAndPublish("channel.create");
+
+    assertThat(received.poll(5, TimeUnit.SECONDS)).isNotNull()
+            .satisfies(body -> assertThat(ConfigInvalidateCodec.decode(body).version()).isEqualTo(version));
+    assertThat(configVersionMapper.current()).isGreaterThanOrEqualTo(version);
+}
+```
+
+- [ ] **Step 2: 跑它确认失败**
+
+Run: `mvn -B -pl aihub-admin/aihub-common -am test "-Dtest=ConfigInvalidateCodecTest"`
+Expected: FAIL —— 编译错误 `cannot find symbol: class ConfigInvalidateCodec`（类还不存在）。**这就是本任务的 RED 证据**：契约类型不存在，任何调用方都不可能"先写起来"。
+
+- [ ] **Step 3: 实现**
+
+`ConfigInvalidateCodec`（**与 `MeteringEventCodec` 同一纪律**：分隔符文本、转义 `\` `|` `\n` `\r`、畸形返回 null）：
+
+```java
+public final class ConfigInvalidateCodec {
+
+    private static final char DELIMITER = '|';
+
+    private ConfigInvalidateCodec() {
+    }
+
+    /** 线格式：{version}|{escaped reason}。reason 是**有限枚举**（如 "channel.update"），不是自由文本。 */
+    public static String encode(ConfigInvalidateMessage message) {
+        return message.version() + String.valueOf(DELIMITER) + escape(message.reason());
+    }
+
+    /** 畸形一律返回 null（**不抛**）：一条坏消息不该让订阅端崩掉，也不该被当成有效失效。 */
+    public static ConfigInvalidateMessage decode(String payload) {
+        if (payload == null || payload.isEmpty()) {
+            return null;
+        }
+        int split = indexOfUnescapedDelimiter(payload);
+        if (split <= 0 || split == payload.length() - 1) {
+            return null;
+        }
+        try {
+            long version = Long.parseLong(payload.substring(0, split));
+            return new ConfigInvalidateMessage(version, unescape(payload.substring(split + 1)));
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static int indexOfUnescapedDelimiter(String payload) {
+        for (int i = 0; i < payload.length(); i++) {
+            char c = payload.charAt(i);
+            if (c == '\\') { i++; continue; }
+            if (c == DELIMITER) { return i; }
+        }
+        return -1;
+    }
+    // escape / unescape 逐字照搬 MeteringEventCodec 的实现（同一个转义表）
+}
+```
+
+`ConfigChangePublisher`：
+
+```java
+@Service
+public class ConfigChangePublisher {
+
+    private static final Logger log = LoggerFactory.getLogger(ConfigChangePublisher.class);
+
+    private final StringRedisTemplate redis;
+    private final ConfigVersionMapper configVersionMapper;
+    private final Counter publishFailures;
+
+    /**
+     * 抬水位（D5）并广播失效（D4）。返回生效版本。
+     *
+     * <p><b>发布失败绝不让业务写失败</b>：控制台的写已经提交了，把「广播失败」变成「业务失败」
+     * 只会让用户以为没存上 —— 而本地 TTL（30s）+ 版本比对是设计文档 §6.3 写明的兜底。
+     * 代价（诚实登记）：广播失败时其他实例只能等 TTL，最长回到 M3 的 10 分钟上界。
+     */
+    public long bumpAndPublish(String reason) {
+        // 抬水位 = max(现在, 水位)：GREATEST 的 upsert 保证并发下不会把水位压低。
+        // **不要**用 affected rows 判断"发生了什么"：MySQL 在「更新成相同值」时返回 0，
+        // 而 Connector/J 默认的 CLIENT_FOUND_ROWS 语义下又会返回 1 —— 那是在猜驱动（Task 1 已登记）。
+        long now = System.currentTimeMillis();
+        configVersionMapper.raiseTo(now);
+        Long stored = configVersionMapper.current();
+        long version = stored == null ? now : Math.max(now, stored);
+        publish(version, reason);
+        return version;
+    }
+
+    public void publish(long version, String reason) {
+        try {
+            redis.convertAndSend(ConfigInvalidateTopology.CHANNEL,
+                    ConfigInvalidateCodec.encode(new ConfigInvalidateMessage(version, reason)));
+        } catch (RuntimeException e) {
+            publishFailures.increment();
+            log.warn("配置失效消息发布失败（业务写已提交，其他实例只能等 TTL 兜底）: {}", e.toString());
+        }
+    }
+}
+```
+
+- [ ] **Step 4: 跑它确认通过**
+
+Run: `mvn -B -pl aihub-admin/aihub-common -am test "-Dtest=ConfigInvalidateCodecTest"` → `Tests run: 4, Failures: 0`
+Run: `mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ConfigChangePublisherTest"`（`DOCKER_HOST=tcp://127.0.0.1:2375`）→ `Tests run: 1, Failures: 0`
+Expected: 两条都 `BUILD SUCCESS`。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigInvalidate*.java \
+        aihub-admin/aihub-common/src/test/java/com/aihub/common/config/ConfigInvalidateCodecTest.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/config/ConfigChangePublisher.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/config/ConfigChangePublisherTest.java
+git commit -m "feat(config): add the config-invalidate Pub/Sub contract and the admin publisher"
+```
+
+**验收判据：** 频道名与线格式是**一份**实现（`aihub-common` 的常量 + codec），发布只在写成功后发生，发布失败**不**影响业务结果且有计数器与 WARN。
+**RED 证据：** codec 类不存在导致编译失败（契约缺失是硬红）；`escapesTheDelimiterAndNewlinesInTheReason` 若不做转义会红在「分隔符出现了两次」上（判别性）。
+
+---
+
+## Task 3: 版本单调性（`config_version` 水位）
+
+**Files:**
+- Modify: `aihub-admin/aihub-service/src/main/java/com/aihub/service/config/ConfigSnapshotService.java`（**只改版本计算**，注入 `ConfigVersionMapper`；**不要动 `snapshot()` 的 `@Transactional(readOnly = true)`**）
+- Modify: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/config/ConfigSnapshotServiceTest.java`（**必须一起改**，见 Step 1 的第 3 条）
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/config/ConfigSnapshotVersionTest.java`
+
+**Interfaces:**
+- Consumes: `ConfigVersionMapper.current()` / `raiseTo(long)`（Task 1）；`ConfigChangePublisher.bumpAndPublish`（Task 2/8/9/10 的抬升入口）
+- **构造器从 5 参变 6 参**：`ConfigSnapshotService(ChannelMapper, ModelRouteMapper, RateLimitPolicyMapper, JdbcTemplate, ConfigVersionMapper, String defaultModel)`。（**更正 E.1-C3② 的一处错误**：评审核实仓库里**没有**任何 `new ConfigSnapshotService(` 调用点 —— `ConfigSnapshotServiceTest` 是 `@Autowired` 注入的，加参数对调用点**透明**。本任务真正要改的是**那个测试的断言**，见 Step 1 第 3 条，而不是"逐个跟着改编译错"。）
+- Produces: `ConfigSnapshotService.currentVersion() : long`（**纯读**：`max(max(updated_at)，config_version.version)`，**绝不写库** —— `snapshot()` 是 `@Transactional(readOnly = true)`，而 MySQL + Connector/J 的 `readOnlyPropagatesToServer` 默认是**开**的，在里面写会 `ERROR 1792`，正好打在 `GET /internal/config/snapshot` 这条里程碑依赖的路径上）
+
+- [ ] **Step 1: 写失败测试**
+
+```java
+@Test
+void deletingTheNewestRouteRowDoesNotMakeTheVersionGoBackwards() {
+    long before = snapshotService.currentVersion();
+    long rowVersion = publisher.bumpAndPublish("route.create");      // 抬水位只能走**写入**路径（Task 2）
+    assertThat(rowVersion).isGreaterThan(before);
+
+    insertRoute("m4-version-probe", 1L);
+    long withRow = snapshotService.currentVersion();
+    assertThat(withRow).isGreaterThanOrEqualTo(rowVersion);
+
+    deleteRoute("m4-version-probe");                                 // 删掉「最新」那一行
+    assertThat(snapshotService.currentVersion())
+            .as("M4 之前：version = max(updated_at)，删掉最新行会让版本倒退，"
+                    + "而网关两侧的比对都是严格 >，于是更旧的快照会被 lastGood 记住并继续服务")
+            .isGreaterThanOrEqualTo(withRow);
+}
+
+@Test
+void theWatermarkSurvivesARecreatedServiceInstance() {
+    long v = publisher.bumpAndPublish("channel.update");
+    deleteAllRoutes();                                               // 把库里的配置清空
+
+    ConfigSnapshotService fresh = new ConfigSnapshotService(channelMapper, routeMapper, policyMapper,
+            jdbcTemplate, configVersionMapper, "default-model");
+    assertThat(fresh.currentVersion()).as("水位在库里，不在进程里").isGreaterThanOrEqualTo(v);
+}
+```
+
+**第 3 条：两条既有断言必须显式处理**（不改就是两条红）。`ConfigSnapshotServiceTest` 里的
+`emptyDatabaseYieldsAnEmptySnapshotWithVersionZero` 与 `versionStrictlyIncreasesEveryTimeAnyOfTheThreeTablesChanges`
+断言「空库 → version 0」与「版本严格变大」；而 Testcontainers 的 MySQL 是 **JVM 级共享**的，水位会跨用例存活。
+所以在**该类**加一个 `@BeforeEach` 把水位显式归零，并把理由写在测试里：
+
+```java
+@BeforeEach
+void resetVersionWatermark() {
+    // 水位是**持久**的（这正是 Task 3 的意义），而容器是 JVM 级共享的：
+    // 不归零，「空库 version=0」这类断言就变成了对**用例执行顺序**的断言。
+    jdbcTemplate.update("UPDATE config_version SET version = 0 WHERE id = 1");
+}
+```
+
+顺手把 `emptyDatabaseYieldsAnEmptySnapshotWithVersionZero` 的**用例名**改成
+`emptyDatabaseYieldsAnEmptySnapshotWithTheResetVersion`，别让它继续暗示「version 恒为 0」。
+
+- [ ] **Step 2: 跑它确认失败**
+
+Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ConfigSnapshotVersionTest"`
+Expected: 两条都 FAIL —— 第一条报 `expecting actual: 1.7...E12 to be greater than or equal to: 1.7...E12`（实际值**小于**期望值，因为版本倒退了）；第二条同样红。**这正是 M3 登记、但一直没有观测手段的那条缺口**，本轮第一次把它变成可执行的事实。
+
+- [ ] **Step 3: 实现**
+
+```java
+/**
+ * 快照版本 = max(三张配置表的 max(updated_at), config_version 的水位)。
+ *
+ * <p><b>纯读：本方法绝不写库。</b>它由 {@link #snapshot()} 调用，而后者是
+ * {@code @Transactional(readOnly = true)}；MySQL + Connector/J 的 {@code readOnlyPropagatesToServer}
+ * 默认是开的（会发 {@code SET SESSION TRANSACTION READ ONLY}），在只读事务里写会直接
+ * {@code ERROR 1792} —— 正好打在 {@code GET /internal/config/snapshot} 这条里程碑依赖的路径上。
+ * 因此水位**只在配置写入路径**上抬升（{@code ConfigChangePublisher.bumpAndPublish}）。
+ *
+ * <p>为什么需要水位：{@code max(updated_at)} 会**倒退**（删掉最新那一行），而网关两侧的比对是
+ * 严格 {@code >} —— 一旦倒退，更旧的快照会被 lastGood 记住并继续服务（M3 登记、M4 修）。
+ */
+public long currentVersion() {
+    long dbMax = maxUpdatedAtAcrossConfigTables();     // 既有实现保持不变（JdbcTemplate 查三张表）
+    Long stored = configVersionMapper.current();
+    return Math.max(dbMax, stored == null ? 0L : stored);
+}
+```
+
+同步更新该类 javadoc 里的版本语义，并把 D5 的**残余**写进去：**手工 SQL 的写入/删除不走控制台，就不会抬水位**，因此一条 raw SQL 的删除仍可能让版本回退一次 —— M4 的验收（Task 17 第 3 步）因此必须走控制台/API 改配置。
+
+- [ ] **Step 4: 跑它确认通过**
+
+Run: 同 Step 2 命令 → `Tests run: 2, Failures: 0` + `BUILD SUCCESS`。
+再跑一遍既有的版本用例，确认没被改坏：`mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ConfigSnapshotServiceTest,InternalConfigSnapshotIntegrationTest"`。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add aihub-admin/aihub-service/src/main/java/com/aihub/service/config/ConfigSnapshotService.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/config/ConfigSnapshotVersionTest.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/config/ConfigSnapshotServiceTest.java
+git commit -m "fix(config): make the snapshot version monotonic with a persisted high-water mark"
+```
+
+**验收判据：** 删掉最新配置行后 `currentVersion()` **不回退**；水位跨实例存活（存在库里）；控制台写入路径由 Task 8/9/10 的 `bumpAndPublish` 显式抬升。
+**RED 证据：** 两条用例在实现前都红，且原因是**值真的倒退了**（不是编译错），因此它们是判别性的。
+
+---
+
+## Task 4: 网关订阅方 + `invalidate(long)` 清本地/共享并把水位**抬到消息版本**
+
+> **本任务是 M4 验收标准（控制面配置 → 数据面生效）的前置，必须最先做完。**
+
+**Files:**
+- Create: `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigSubscriber.java`
+- Create: `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigInvalidateSubscriptionConfig.java`
+- Create: `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigInvalidateProperties.java`
+- Modify: `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigCache.java`
+- Modify: `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigClient.java`
+- Modify: `aihub-gateway/src/main/resources/application.yml`
+- Modify: `aihub-gateway/src/test/resources/application.properties`
+- Test: `aihub-gateway/src/test/java/com/aihub/gateway/config/ConfigSubscriberTest.java`
+- Test: `aihub-gateway/src/test/java/com/aihub/gateway/config/ConfigInvalidateContractTest.java`
+
+> **不要改 `GatewayConfigProperties`。** 它是 record，加一个分量会让**每一个** `new GatewayConfigProperties(...)` 的调用点编译失败 —— 评审已核实有 **8 处**（`ConfigCacheTest` 7 处 + `ModelsControllerTest` 1 处），而那两个文件不在本任务的 Files 里，Step 4 却要求 `ConfigCacheTest` 绿。新增一个**独立**的小配置类即可：
+> `@ConfigurationProperties("aihub.config") public record ConfigInvalidateProperties(@DefaultValue("true") boolean invalidateSubscription) {}`（与既有 `GatewayConfigProperties` 并列，互不影响）。
+
+**Interfaces:**
+- Consumes: `ConfigInvalidateTopology` / `ConfigInvalidateCodec` / `ConfigInvalidateMessage`（Task 2）；`ConfigCache`；`AdminClient`
+- Produces:
+  - `ConfigCache.invalidateAllCaches(long version) : void` —— 清本地 + **删共享条目 `REDIS_KEY`** + **把 `observedRedisVersion` 设为消息里那个 `version`**（见下）
+  - `ConfigClient.invalidate(long version) : void` —— 清本地 + `cache.invalidateAllCaches(version)`（**水位抬到 `version`**）+ 放行冷却窗口；`ConfigSubscriber` 把解码出来的版本传进来（**没有第二种写法**，见 N14 的处置）
+  - `ConfigSubscriber implements MessageListener`，`onMessage(Message, byte[]) : void`
+  - `ConfigInvalidateProperties.invalidateSubscription() : boolean`（`aihub.config.invalidate-subscription`，默认 `true`）
+  - `ConfigInvalidateSubscriptionConfig`：`@Bean RedisMessageListenerContainer configInvalidateListenerContainer(RedisConnectionFactory, ConfigSubscriber, ConfigInvalidateProperties)`，`@ConditionalOnProperty(name = "aihub.config.invalidate-subscription", havingValue = "true", matchIfMissing = true)`
+
+- [ ] **Step 1: 写失败测试**
+
+`ConfigInvalidateContractTest`（**不起 Spring 上下文、不碰 socket**：直接 `new ConfigClient(new ConfigCache(mockRedis, props), mockAdmin, props...)`，与既有 `ConfigCacheTest` 同一手法）：
+
+```java
+@Test
+void invalidationDropsTheSharedEntryAndRaisesTheWatermarkToTheInvalidatedVersion() {
+    when(redis.opsForValue()).thenReturn(valueOps);
+    when(valueOps.get(ConfigCache.REDIS_KEY)).thenReturn(ConfigSnapshotCodec.encode(snapshotOfVersion(4L)));
+    cache.readRedis();                                   // 水位到 4
+
+    cache.invalidateAllCaches(9L);                       // 消息里带的是 9
+
+    verify(redis).delete(ConfigCache.REDIS_KEY);         // ① 共享条目必须被删
+
+    // ② 水位不能被重置成 NO_VERSION：那样一个**在飞的旧回填**（版本 5）会把刚删掉的
+    //    陈旧共享条目重新写回去，等于让这次失效白做。水位应当抬到消息里的 9。
+    cache.writeRedis(snapshotOfVersion(5L));
+    verify(valueOps, never()).set(eq(ConfigCache.REDIS_KEY), anyString(), any(Duration.class));
+
+    cache.writeRedis(snapshotOfVersion(9L));             // 不旧于水位 → 允许
+    verify(valueOps).set(eq(ConfigCache.REDIS_KEY), anyString(), any(Duration.class));
+}
+
+@Test
+void afterInvalidationTheNextReadGoesToAdminInsteadOfServingTheStaleSharedEntry() {
+    // 本地为空 + Redis 里有一份旧快照 + admin 有一份新快照
+    when(admin.configSnapshot()).thenReturn(Mono.just(Optional.of(newSnapshot)));
+
+    client.invalidate(9L);
+    ConfigSnapshot served = client.current();
+
+    assertThat(served.version()).as("M3 的缺口：invalidate() 只清本地，紧接着 resolve() 又会采用 Redis 里的旧条目")
+            .isEqualTo(newSnapshot.version());
+    verify(admin, times(1)).configSnapshot();
+}
+```
+
+`ConfigSubscriberTest`（**注意 `ConfigSubscriber` 是 `@Component`，`withUserConfiguration(ConfigConfig.class)` 不会把它注册进来**，而 `RedisMessageListenerContainer` 需要 `RedisConnectionFactory`）：
+
+```java
+@Test
+void aValidMessageInvalidatesAndAMalformedOneDoesNot() {
+    ConfigClient client = mock(ConfigClient.class);
+    ConfigSubscriber subscriber = new ConfigSubscriber(client);
+
+    subscriber.onMessage(new Message(null, new byte[0]),
+            ConfigInvalidateCodec.encode(new ConfigInvalidateMessage(9L, "channel.update")).getBytes(UTF_8));
+    verify(client).invalidate(9L);
+
+    subscriber.onMessage(new Message(null, new byte[0]), "garbage".getBytes(UTF_8));
+    verifyNoMoreInteractions(client);                    // 坏消息不触发失效，也不抛
+}
+
+@Test
+void theSubscriptionBeanIsWiredExactlyWhenTheFlagIsOn() {
+    new ApplicationContextRunner()
+            .withUserConfiguration(ConfigInvalidateSubscriptionConfig.class)
+            .withBean(RedisConnectionFactory.class, () -> mock(RedisConnectionFactory.class))
+            .withBean(ConfigSubscriber.class, () -> mock(ConfigSubscriber.class))
+            .withPropertyValues("aihub.config.invalidate-subscription=true")
+            .run(ctx -> assertThat(ctx).hasBean("configInvalidateListenerContainer"));
+
+    new ApplicationContextRunner()
+            .withUserConfiguration(ConfigInvalidateSubscriptionConfig.class)
+            .withBean(RedisConnectionFactory.class, () -> mock(RedisConnectionFactory.class))
+            .withBean(ConfigSubscriber.class, () -> mock(ConfigSubscriber.class))
+            .withPropertyValues("aihub.config.invalidate-subscription=false")
+            .run(ctx -> assertThat(ctx).doesNotHaveBean("configInvalidateListenerContainer"));
+}
+```
+
+- [ ] **Step 2: 跑它确认失败**
+
+Run: `mvn -B -pl aihub-gateway -am test "-Dtest=ConfigInvalidateContractTest,ConfigSubscriberTest"`
+Expected: FAIL —— `cannot find symbol: method invalidateAllCaches(long)`（编译错）+ 第二条用例若只保留今天的 `invalidate()` 实现会红在 `expected: <新版本> but was: <旧版本>`。**第二条的红是判别性的**，它测的正是 M3 登记的缺口。
+
+- [ ] **Step 3: 实现**
+
+```java
+// ConfigCache 新增
+/**
+ * 失效的**完整**含义：本地、共享条目、写入水位三者一起动。
+ *
+ * <p>只清本地是 M3 登记的缺口：紧接着的 {@code resolve()} 会读到 Redis 里**同样陈旧**的
+ * 共享条目并采用它，于是「配置变了」这个信号对多实例部署完全没有效果（实测 101 秒仍不可见）。
+ *
+ * <p><b>水位要抬到消息里的版本，而不是重置成 {@code NO_VERSION}</b>：重置会拆掉
+ * 「挡住在飞的旧回填把刚删掉的陈旧条目写回去」的唯一护栏 —— 那等于让这次失效白做。
+ *
+ * @param version 失效消息里带的版本（权威的"控制面已经到过这里"的证据）
+ */
+public void invalidateAllCaches(long version) {
+    local.invalidateAll();
+    observedRedisVersion.accumulateAndGet(version, Math::max);
+    try {
+        redis.delete(REDIS_KEY);
+    } catch (RuntimeException e) {
+        log.warn("删除共享配置快照失败（本地已失效，回源仍会写回新版本）: {}", e.toString());
+    }
+}
+```
+
+`ConfigClient.invalidate(long)` 的形态（**签名定为带版本**：这是唯一能把「水位抬到消息版本」这件事做对的地方 —— N14 的处置）：
+
+```java
+/**
+ * 收到失效广播时调用。
+ *
+ * @param version 失效消息里的版本。**它就是新的水位**：清掉共享条目之后，一个在飞的、
+ *                更旧的回源结果必须被 {@code writeRedis} 挡住，而唯一的挡板就是这个水位。
+ *                用本地的 {@code visibleVersion} 当水位是不够的 —— 它可能比控制面刚推进到的版本更旧。
+ */
+public void invalidate(long version) {
+    cache.invalidateAllCaches(version);
+    nextAttemptAt.set(0L);
+}
+```
+
+```java
+// ConfigSubscriber：坏消息一律忽略并 WARN，绝不让监听线程抛（抛出去会被容器反复重投）
+@Component
+public class ConfigSubscriber implements MessageListener {
+    @Override
+    public void onMessage(Message message, byte[] pattern) {
+        ConfigInvalidateMessage decoded = ConfigInvalidateCodec.decode(new String(message.getBody(), UTF_8));
+        if (decoded == null) {
+            log.warn("忽略畸形的配置失效消息");
+            return;
+        }
+        log.info("收到配置失效消息（version={}, reason={}），清理本地与共享缓存", decoded.version(), decoded.reason());
+        configClient.invalidate(decoded.version());
+    }
+}
+```
+
+`ConfigInvalidateSubscriptionConfig` 里装配（`@ConditionalOnProperty(name = "aihub.config.invalidate-subscription", havingValue = "true", matchIfMissing = true)` **且必须带 `@EnableConfigurationProperties(ConfigInvalidateProperties.class)`** —— 否则那个 `@ConfigurationProperties` record 不会被注册成 bean，`@Bean` 方法注入不到它，上下文起不来；这两点一起被 N3/N13 点名）一个 `RedisMessageListenerContainer` + `ChannelTopic(ConfigInvalidateTopology.CHANNEL)`；**`aihub-gateway/src/test/resources/application.properties` 里显式写 `aihub.config.invalidate-subscription=false`**，理由写在注释里：网关测试环境**没有活 Redis**，容器会在后台无限重试连接并污染日志；订阅逻辑本身由 `ConfigSubscriberTest` 直接驱动，端到端由 Task 17 的 compose 验收覆盖。`application.yml`（生产）写 `true`。**不要**改 `ConfigConfig`（N3：装配的所有权在专用的配置类里）。
+
+- [ ] **Step 4: 跑它确认通过**
+
+Run: `mvn -B -pl aihub-gateway -am test "-Dtest=ConfigInvalidateContractTest,ConfigSubscriberTest,ConfigCacheTest,ConfigClientTest"`
+Expected: 全绿 + `BUILD SUCCESS`；再跑一次整个网关模块 `mvn -B -pl aihub-gateway -am test` 确认**没有 Docker、没有活 Redis**也能全绿（基线 350）。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add aihub-gateway/src/main/java/com/aihub/gateway/config/ \
+        aihub-gateway/src/main/resources/application.yml \
+        aihub-gateway/src/test/java/com/aihub/gateway/config/ \
+        aihub-gateway/src/test/resources/application.properties
+git commit -m "fix(config): honour the invalidation broadcast and drop local+shared caches and the water mark"
+```
+
+**验收判据：** 收到一条失效消息后，网关的下一次读取**必须回源 admin**，并且共享条目**被删**、写入水位**抬到消息里的版本**（**不是**清掉/重置）；坏消息不触发失效也不抛异常；测试环境不因缺 Redis 而变红。
+**RED 证据：** `afterInvalidationTheNextReadGoesToAdminInsteadOfServingTheStaleSharedEntry` 在只保留 M3 的 `invalidate()` 时红在「服务了旧版本」；`invalidationDropsTheSharedEntryAndRaisesTheWatermarkToTheInvalidatedVersion` 红在 `delete` 从未被调用、以及「版本 5 的写入本该被拒」。两条都直接对应用户可见的 10 分钟上界。
+
+---
+## Task 5: bcrypt 依赖验证 + 控制台令牌（JWT 形状的 HS256）
+
+**Files:**
+- Modify: `aihub-admin/aihub-service/pom.xml`（**+1 依赖，版本不写死**）
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/console/ConsoleClaims.java`
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/console/ConsoleToken.java`
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ConsoleTokenTest.java`
+
+**Interfaces:**
+- Consumes: Jackson `ObjectMapper`（`aihub-service` 已有）
+- Produces:
+  - `public record ConsoleClaims(long userId, long tenantId, String role, long issuedAtEpochSecond, long expiresAtEpochSecond)`
+  - `ConsoleToken.issue(byte[] secret, ConsoleClaims claims) : String`
+  - `ConsoleToken.verify(byte[] secret, String token) : ConsoleClaims`（**任何失败都抛 `IllegalArgumentException`**：格式 / base64 / 签名 / 过期 / claims 缺失或类型不对）
+    - ⚠️ **必须把一个 `catch (RuntimeException | JsonProcessingException e)` 包在解析段外面并转成 `IllegalArgumentException`**：Jackson 抛的是**受检**的 `JsonProcessingException`，忘了包就会让它穿透到过滤器外面变成 **500**，而契约要求的是 **401**（`ConsoleAuthFilter` 只接 `IllegalArgumentException`）。
+  - 常量 `ConsoleClaims.ROLE_ADMIN = "ADMIN"`、`ConsoleClaims.ROLE_VIEWER = "VIEWER"`
+
+- [ ] **Step 1: 先验证依赖能拉到（**在写任何代码之前**）**
+
+Run: `mvn -B org.apache.maven.plugins:maven-dependency-plugin:3.8.1:get -Dartifact=org.springframework.security:spring-security-crypto:6.5.11`
+Expected: `Downloaded from aliyunmaven: … spring-security-crypto-6.5.11.jar` + `BUILD SUCCESS`。
+**已在计划编写阶段实测通过（2026-09-27）**，jar 已在 `.m2repo`。若换了机器或镜像失效导致解析失败：**报 BLOCKED 并说明**，**绝不**改为自己实现 bcrypt（D2）。
+**不要**用 `curl -I https://maven.aliyun.com/...` 判断（本机 curl 到该域名返回 `000`，走的是 Maven 自己的镜像/代理配置）。
+
+- [ ] **Step 2: 写失败测试**
+
+`ConsoleTokenTest`（纯单元，不需要 Spring）：
+
+```java
+private static final byte[] SECRET = "m4-console-test-secret".getBytes(UTF_8);
+
+@Test
+void roundTripsClaims() {
+    ConsoleClaims claims = new ConsoleClaims(7L, 1L, ConsoleClaims.ROLE_ADMIN, 1_700_000_000L, 1_700_007_200L);
+    assertThat(ConsoleToken.verify(SECRET, ConsoleToken.issue(SECRET, claims))).isEqualTo(claims);
+}
+
+@Test
+void theWireFormIsHeaderDotPayloadDotSignature() {
+    String token = ConsoleToken.issue(SECRET, claims());
+    assertThat(token.split("\\.")).hasSize(3);
+    assertThat(new String(Base64.getUrlDecoder().decode(token.split("\\.")[0]), UTF_8))
+            .isEqualTo("{\"alg\":\"HS256\",\"typ\":\"JWT\"}");
+}
+
+@Test
+void aTamperedPayloadOrSignatureIsRejected() {
+    String token = ConsoleToken.issue(SECRET, claims());
+    String[] parts = token.split("\\.");
+    assertThatIllegalArgumentException().isThrownBy(() -> ConsoleToken.verify(SECRET,
+            parts[0] + "." + Base64.getUrlEncoder().withoutPadding()
+                    .encodeToString("{\"sub\":\"999\"}".getBytes(UTF_8)) + "." + parts[2]));
+    assertThatIllegalArgumentException().isThrownBy(() -> ConsoleToken.verify(SECRET, parts[0] + "." + parts[1] + ".AAAA"));
+}
+
+@Test
+void anExpiredTokenIsRejected() {
+    ConsoleClaims expired = new ConsoleClaims(7L, 1L, ROLE_ADMIN, 1_600_000_000L, 1_600_000_001L);
+    assertThatIllegalArgumentException().isThrownBy(
+            () -> ConsoleToken.verify(SECRET, ConsoleToken.issue(SECRET, expired)));
+}
+
+@Test
+void aTokenSignedWithAnotherSecretIsRejected() {
+    String token = ConsoleToken.issue("other".getBytes(UTF_8), claims());
+    assertThatIllegalArgumentException().isThrownBy(() -> ConsoleToken.verify(SECRET, token));
+}
+
+@Test
+void aTokenWhoseHeaderClaimsAlgNoneIsRejectedBecauseTheAlgorithmIsServerSide() {
+    // 手工拼一个 alg:none 的令牌（签名段为空）—— 校验方**根本不看请求里的 header**
+    String header = b64("{\"alg\":\"none\",\"typ\":\"JWT\"}");
+    String payload = b64("{\"sub\":\"7\",\"tenantId\":\"1\",\"role\":\"ADMIN\",\"exp\":9999999999}");
+    assertThatIllegalArgumentException().isThrownBy(() -> ConsoleToken.verify(SECRET, header + "." + payload + "."));
+}
+```
+
+- [ ] **Step 3: 跑它确认失败**
+
+Run: `mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ConsoleTokenTest"`
+Expected: FAIL —— `cannot find symbol: class ConsoleToken`（RED 是编译级的：契约不存在）。
+
+- [ ] **Step 4: 实现**
+
+`aihub-service/pom.xml` 加（**不写版本**，由 Boot BOM 管理）：
+
+```xml
+<dependency>
+    <groupId>org.springframework.security</groupId>
+    <artifactId>spring-security-crypto</artifactId>
+</dependency>
+```
+
+`ConsoleToken`（JDK `javax.crypto.Mac` + `MessageDigest.isEqual` + Jackson 读写载荷）：
+
+```java
+public final class ConsoleToken {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Base64.Encoder ENC = Base64.getUrlEncoder().withoutPadding();
+    private static final Base64.Decoder DEC = Base64.getUrlDecoder();
+    /** 算法与 header 都是**服务端写死**的：校验方不读请求里的 header，因此不存在 alg 混淆面。 */
+    private static final String HEADER = ENC.encodeToString("{\"alg\":\"HS256\",\"typ\":\"JWT\"}".getBytes(UTF_8));
+
+    public static String issue(byte[] secret, ConsoleClaims claims) {
+        String payload = ENC.encodeToString(write(claims));
+        String signingInput = HEADER + "." + payload;
+        return signingInput + "." + ENC.encodeToString(hmac(secret, signingInput));
+    }
+
+    /** 任何失败都抛 IllegalArgumentException —— 过滤器据此回 401，不需要 `Optional` 的三态。 */
+    public static ConsoleClaims verify(byte[] secret, String token) {
+        if (token == null) { throw new IllegalArgumentException("missing token"); }
+        String[] parts = token.split("\\.");
+        if (parts.length != 3) { throw new IllegalArgumentException("malformed token"); }
+        String signingInput = parts[0] + "." + parts[1];
+        byte[] expected = hmac(secret, signingInput);
+        byte[] actual = DEC.decode(parts[2]);                      // 非法 base64 → IllegalArgumentException
+        if (!MessageDigest.isEqual(expected, actual)) {            // 恒定时间比较（D3）
+            throw new IllegalArgumentException("bad signature");
+        }
+        ConsoleClaims claims = read(DEC.decode(parts[1]));
+        if (claims.expiresAtEpochSecond() <= Instant.now().getEpochSecond()) {
+            throw new IllegalArgumentException("expired");
+        }
+        return claims;
+    }
+    // hmac(secret, input) = Mac.getInstance("HmacSHA256")，key = new SecretKeySpec(secret, "HmacSHA256")
+    // write/read：Jackson 读写**固定五个**字段；注意线上载荷里 `userId` 写作标准的 `sub` 声明，
+    // 读取时把 `sub` 映射回 `ConsoleClaims.userId()`（写死这一对，不要"兼容"别的拼法）
+    // 其它四个是 tenantId / role / iat / exp（数字或字符串都按 long/String 显式取，缺失即 IAE）
+}
+```
+
+类的 javadoc 必须写明 D3 的边界：只支持 HS256、不做密钥轮换、不校验 `aud`/`iss`、没有 refresh 与吊销黑名单；**一旦出现第二签发方或需要吊销，必须换成库**。
+
+- [ ] **Step 5: 跑它确认通过并提交**
+
+Run: `mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ConsoleTokenTest"` → `Tests run: 6, Failures: 0` + `BUILD SUCCESS`
+
+```bash
+git add aihub-admin/aihub-service/pom.xml \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/console/ \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ConsoleTokenTest.java
+git commit -m "feat(console): add the HS256 console token with a server-pinned algorithm"
+```
+
+**验收判据：** 令牌是 `header.payload.signature`；篡改载荷/签名、换密钥、过期、`alg:none` **全部**被拒；依赖从镜像可解析。
+**RED 证据：** 六个用例在类不存在时编译失败；其中 `aTokenWhoseHeaderClaimsAlgNone` 与 `roundTripsClaims` 在「校验方读请求 header」的错误实现下会红（判别性）。
+
+---
+
+## Task 6: 登录 + `/api/**` 鉴权过滤器 + 两级角色
+
+**Files:**
+- Create: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/SysUserEntity.java`
+- Create: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/SysUserMapper.java`
+- Modify: `aihub-admin/aihub-common/src/main/java/com/aihub/common/api/ErrorCode.java`（**+1 枚举值** `CONFIGURATION_ERROR(500)`，D16 唯一需要的共享改动）
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/console/ConsoleAuthService.java`
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/console/ConsoleTokenService.java`
+- Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/config/ConsoleProperties.java`
+- Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ConsoleAuthFilter.java`
+- Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ConsoleAuthController.java`
+- Modify: `aihub-admin/aihub-web/src/main/resources/application.yml`
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ConsoleAuthFilterTest.java`
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ConsoleLoginIntegrationTest.java`
+
+**Interfaces:**
+- Consumes: `ConsoleToken`/`ConsoleClaims`（Task 5）；`BCryptPasswordEncoder`（`spring-security-crypto`）；`AuditService`（Task 7 —— **若 Task 7 尚未完成，本任务先不写审计调用**，见 Step 3 的说明）
+- Produces:
+  - `SysUserEntity`（`id/tenantId/username/passwordHash/role/status`）、`SysUserMapper extends BaseMapper<SysUserEntity>`
+  - `ConsoleAuthService.login(String username, String password) : ConsoleClaims`（失败抛 `BizException(UNAUTHORIZED, …)`；secret 为空抛 `BizException(CONFIGURATION_ERROR, …)`）
+  - `ConsoleTokenService.issue(ConsoleClaims) : String`、`verify(String) : ConsoleClaims`
+  - `ConsoleProperties`：`secret`（`aihub.console.secret`）、`tokenTtl`（默认 `2h`）
+  - `ConsoleAuthFilter`：`@Order(Ordered.LOWEST_PRECEDENCE - 100)`，只守 `/api/**`
+  - 请求属性 `ConsoleAuthFilter.ATTRIBUTE_CLAIMS = "aihub.consoleClaims"`
+
+- [ ] **Step 1: 写失败测试**
+
+```java
+@Test
+void loginReturnsATokenAndTheFilterAcceptsIt() { /* POST /api/auth/login → 200 + data.token；带它 GET /api/ping → 200 */ }
+
+@Test
+void aWrongPasswordIs401AndDoesNotRevealWhetherTheUserExists() {
+    // 用户名不存在 与 口令错 必须返回**逐字相同**的信封（否则等于一个用户枚举接口）
+}
+
+@Test
+void aBlankConsoleSecretFailsClosedWithConfigurationError() {
+    // aihub.console.secret="" → 登录返回 500 + code=CONFIGURATION_ERROR（D16：不许伪装成凭证错误）
+    //                     → 同时任何 /api/** 请求（无令牌）都是 401，绝不放行
+}
+
+@Test
+void viewerRoleMayReadButNotWrite() {
+    // GET  /api/tenants → 200；POST /api/tenants → 403 + code=FORBIDDEN（admin 信封，不是 Spring 默认体）
+}
+
+@Test
+void internalAndHealthEndpointsAreNotAffected() {
+    // /healthz → 200（无令牌）；/internal/api-keys/resolve 无签名 → 401（仍由既有的 InternalAuthFilter 决定）
+}
+```
+
+> ⚠️ **本任务不要写「`GET /console/index.html` → 200」这条断言**：静态资源文件到 **Task 16** 才存在，在这里写它按字面必然红（这正是 E.3 的 caveat 1，现已升级为正文要求）。登录页的可访问性由 Task 16 的 `ConsoleStaticResourceTest` 覆盖；本任务只需保证 **`ConsoleAuthFilter` 不守 `/api/**` 之外的路径** —— 上面那条 `internalAndHealthEndpointsAreNotAffected` 已经覆盖了这一点（`/healthz` 与 `/internal/**` 不经本过滤器）。
+
+- [ ] **Step 2: 跑它确认失败**
+
+Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ConsoleLoginIntegrationTest,ConsoleAuthFilterTest"`
+Expected: FAIL —— 编译错误（`ConsoleAuthFilter` 不存在）；或 404（`/api/auth/login` 没有映射）。
+
+- [ ] **Step 3: 实现**
+
+`ConsoleAuthFilter` 的关键结构（**与既有 `InternalAuthFilter` 同一手法**：自己解析、自己写响应、不引 Spring Security）：
+
+```java
+@Component
+@Order(Ordered.LOWEST_PRECEDENCE - 100)
+public class ConsoleAuthFilter extends OncePerRequestFilter {
+
+    public static final String ATTRIBUTE_CLAIMS = "aihub.consoleClaims";
+    private static final PathPattern GUARDED = new PathPatternParser().parse("/api/**");
+    private static final Set<String> READ_METHODS = Set.of("GET", "HEAD", "OPTIONS");
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+            throws ServletException, IOException {
+        if (!GUARDED.matches(new ServletRequestPathUtils... /* 用 UrlPathHelper.getPathWithinApplication，
+                与 InternalAuthFilter 完全一致的取路径方式 */)) {
+            chain.doFilter(request, response);
+            return;
+        }
+        if (properties.secret().isBlank()) {
+            // D16：平台配置故障**不伪装**成凭证错误 —— 但门必须是关着的，所以仍然 401（fail-closed），
+            // 只有登录接口会额外回 500 CONFIGURATION_ERROR 告诉运维真正的原因。
+            writeError(response, ErrorCode.UNAUTHORIZED, "控制台未配置（AIHUB_CONSOLE_SECRET 为空）");
+            return;
+        }
+        String header = request.getHeader("Authorization");
+        if (header == null || !header.regionMatches(true, 0, "Bearer ", 0, 7)) {
+            writeError(response, ErrorCode.UNAUTHORIZED, "缺少控制台令牌");
+            return;
+        }
+        ConsoleClaims claims;
+        try {
+            claims = tokenService.verify(header.substring(7).strip());
+        } catch (IllegalArgumentException e) {
+            writeError(response, ErrorCode.UNAUTHORIZED, "控制台令牌无效或已过期");
+            return;
+        }
+        if (!READ_METHODS.contains(request.getMethod())
+                && !ConsoleClaims.ROLE_ADMIN.equals(claims.role())) {
+            writeError(response, ErrorCode.FORBIDDEN, "只读角色不能执行写操作");   // 403，admin 信封
+            return;
+        }
+        request.setAttribute(ATTRIBUTE_CLAIMS, claims);
+        chain.doFilter(request, response);
+    }
+}
+```
+
+`ConsoleAuthService.login` 用 `new BCryptPasswordEncoder().matches(raw, stored)`（**口令哈希是本里程碑唯一不能自己实现的东西**）；`status != ACTIVE` 按 401 处理。**防用户枚举要做完整**：用户名不存在时**也要**对一个固定的假哈希跑一次 `matches`（类里放一个常量 dummy bcrypt hash，例如 `$2a$10$........`），否则两条路径的耗时差约 100 ms —— 响应体一样但**时序**照样能枚举用户（评审点名的一条）。
+
+**`aihub.console.secret` 的长度下限（E.4-(b)，必须在这里落地，不能只写在附录里）**：空串按 D16 fail-closed；**长度 < 32 字符时同样拒绝登录**并回 `CONFIGURATION_ERROR`，启动时打一条 WARN（HMAC 密钥太短 = 可离线爆破 = 管理台等于没有鉴权；与 `AesGcmChannelCipher` 在构造期拒绝 16 字节主密钥是同一纪律）。**必须有一条短密钥的用例**：`secret = "short"` → 登录 500 + `CONFIGURATION_ERROR`，且 `/api/**` 一律 401。
+
+**关于 Task 7 的耦合**：本任务先落地登录与过滤器，**审计调用留到 Task 7**；如果 Task 7 已经完成，就把 `auditService.record(...)` 的调用一起写上。**不允许**写「此处待 Task 7 收口」这类占位注释——要么不写，要么写真实的调用。
+
+`application.yml` 增加：
+
+```yaml
+aihub:
+  console:
+    # 控制台令牌的签名密钥：**只来自环境变量，刻意没有默认值**（空 = 门关着，见 D16）。
+    secret: ${AIHUB_CONSOLE_SECRET:}
+    token-ttl: 2h
+```
+
+- [ ] **Step 4: 跑它确认通过并提交**
+
+Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ConsoleLoginIntegrationTest,ConsoleAuthFilterTest,InternalAuthFilterContextPathTest,InternalConfigSnapshotIntegrationTest"`
+Expected: 全绿 + `BUILD SUCCESS`（**最后两个类必须一起跑**：它们是「既有 `/internal/**` 契约没被破坏」的证据）。
+
+```bash
+git add aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/SysUserEntity.java \
+        aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/SysUserMapper.java \
+        aihub-admin/aihub-common/src/main/java/com/aihub/common/api/ErrorCode.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/console/ \
+        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/config/ConsoleProperties.java \
+        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ \
+        aihub-admin/aihub-web/src/main/resources/application.yml \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/
+git commit -m "feat(console): add console login and the /api/** token filter with two roles"
+```
+
+**验收判据：** 登录签发令牌；`/api/**` 无令牌/坏令牌 401、只读角色写操作 403（**都是 admin 信封**）；secret 为空时门是关的且登录回 `CONFIGURATION_ERROR`；`/healthz`、`/internal/**`、`/console/**` 行为不变。
+**RED 证据：** D16 的用例在「secret 为空就放行」的实现下红；`viewerRoleMayReadButNotWrite` 在「只验签名不验角色」的实现下红。
+
+---
+
+## Task 7: 审计服务（与业务同事务）
+
+**Files:**
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/audit/AuditAction.java`（常量类）
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/audit/AuditService.java`
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/audit/AuditServiceIntegrationTest.java`
+
+**Interfaces:**
+- Consumes: `AuditLogMapper`（Task 1）
+- Produces:
+  - `AuditService.record(long tenantId, Actor actor, String action, String targetType, String targetId, Map<String,Object> detail) : void`（`Actor` = record `(String type, String id)`，`USER`/`SYSTEM`）
+  - `AuditAction` 常量：`TENANT_CREATE/UPDATE`、`API_KEY_CREATE/DISABLE/ENABLE/DELETE`、`CHANNEL_CREATE/UPDATE/DELETE/ROTATE_KEY`、`ROUTE_CREATE/UPDATE/DELETE`、`RATE_LIMIT_CREATE/UPDATE/DEACTIVATE`、`QUOTA_UPDATE`、`LOGIN_SUCCESS/LOGIN_FAILURE`、`RECONCILE_REPORT`
+
+- [ ] **Step 1: 写失败测试**
+
+```java
+@Test
+void recordWritesAnAuditRowInTheSameTransactionAsTheBusinessWrite() {
+    // 用**本任务自己的**一个 @Transactional 测试服务（不要借 Task 8 的 ChannelAdminService ——
+    // 那会让 Task 7 依赖 Task 8，而 Task 7 排在前面）：
+    // 它先写一行 audit_log，再抛异常；断言业务回滚时审计行也一起消失。
+    // ⚠️ `selectCount(null)` 是**全表计数**，而 audit_log 与 testcontainers 容器都是 JVM 级共享的
+    // （Task 1 的迁移用例、Task 8/9/10 的写路径都会往里插行）—— 断言「等于 0」会因为"谁先跑"而红（N12）。
+    // 所以断言**增量**：先记基线，再断言回滚之后没有新增。
+    long before = auditLogMapper.selectCount(null);
+    assertThatThrownBy(() -> transactionalProbe.writeAuditThenFail()).isInstanceOf(IllegalStateException.class);
+    assertThat(auditLogMapper.selectCount(null)).as("业务回滚，审计必须一起回滚").isEqualTo(before);
+}
+
+@Test
+void theAuditDetailNeverContainsSecrets() {
+    // 用一眼可辨的合成值，直接调 AuditService（不经任何业务服务）：
+    auditService.record(1L, new Actor("USER", "1"), AuditAction.CHANNEL_CREATE, "CHANNEL", "42",
+            Map.of("name", "probe", "weight", 100, "apiKeyCipher", "v1:cipher-synthetic",
+                    "apiKey", "sk-console-plaintext-synthetic"));
+    String all = auditLogMapper.selectList(null).stream()
+            .map(AuditLogEntity::getDetail).collect(joining("|"));
+    assertThat(all).as("审计只记非敏感字段：明文/密文/口令/令牌一律不许出现")
+            .doesNotContain("sk-console-plaintext-synthetic").doesNotContain("cipher-synthetic").doesNotContain("v1:");
+}
+```
+
+> `AuditService.record` 里的 `MAPPER.writeValueAsString` 抛的是**受检** `JsonProcessingException`：必须显式 `catch` 并转成 `IllegalStateException`（审计失败要让业务回滚，不能静默吞掉，也不能让受检异常从签名里漏出去）。
+
+- [ ] **Step 2: 跑它确认失败** → `cannot find symbol: class AuditService`
+
+- [ ] **Step 3: 实现**
+
+```java
+@Service
+public class AuditService {
+    /**
+     * 写一条审计行。**必须在调用方的事务里**（不加 @Transactional(REQUIRES_NEW)）：
+     * 「改了但没审计」是不可接受的，所以审计失败要让业务一起回滚。
+     * detail 只放**非敏感**字段（如渠道名、权重、状态），**绝不放**明文密钥、密文、口令、令牌。
+     */
+    public void record(long tenantId, Actor actor, String action, String targetType, String targetId,
+                       Map<String, Object> detail) {
+        AuditLogEntity row = new AuditLogEntity();
+        row.setTenantId(tenantId);
+        row.setActorType(actor.type());
+        row.setActor(actor.id());
+        row.setAction(action);
+        row.setTargetType(targetType);
+        row.setTargetId(targetId);
+        row.setDetail(detail == null || detail.isEmpty() ? null : MAPPER.writeValueAsString(detail));
+        auditLogMapper.insert(row);
+    }
+}
+```
+
+- [ ] **Step 4: 跑它确认通过并提交**
+
+Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=AuditServiceIntegrationTest"` → `Tests run: 2, Failures: 0`
+
+```bash
+git add aihub-admin/aihub-service/src/main/java/com/aihub/service/audit/ \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/audit/
+git commit -m "feat(audit): record audit rows in the business transaction"
+```
+
+**验收判据：** 业务回滚时审计一起回滚；审计 detail 不含任何密钥/口令/密文/令牌。
+**RED 证据：** 用 `REQUIRES_NEW` 实现时第一条红；把明文密钥写进 detail 时第二条红。
+
+---
+
+## Task 8: 租户 + 渠道 CRUD（含加密写入与密钥轮换）
+
+**Files:**
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/tenant/TenantAdminService.java`
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/channel/ChannelAdminService.java`
+- Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/TenantController.java`
+- Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ChannelController.java`
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ChannelAdminIntegrationTest.java`
+
+**Interfaces:**
+- Consumes: `ChannelKeyService`（**复用既有加密入口，先读它的签名，不要新写一份加密**）、`ConfigChangePublisher`（Task 2）、`AuditService`（Task 7）、`ChannelMapper`/`TenantMapper`（既有）
+- Produces:
+  - `POST /api/tenants`、`GET /api/tenants`、`PUT /api/tenants/{id}`
+  - `POST /api/channels`、`GET /api/channels`、`GET /api/channels/{id}`、`PUT /api/channels/{id}`、`DELETE /api/channels/{id}`、`POST /api/channels/{id}/rotate-key`
+  - 每个写操作：业务写 + 审计 + `configChangePublisher.bumpAndPublish("channel.update")`（**同一个事务提交之后**发布，见 Task 2 的说明）
+  - **任何 GET 的响应 DTO 都不含 `apiKeyCipher`**（`ChannelView` 只暴露 `keyVersion` 与 `hasKey`）
+
+- [ ] **Step 1: 写失败测试**
+
+```java
+@Test
+void creatingAChannelEncryptsTheKeyAndNeverReturnsTheCipher() {
+    var res = post("/api/channels", Map.of("name", "m4-a", "provider", "openai-compatible",
+            "baseUrl", "http://127.0.0.1:1", "apiKey", "sk-console-plaintext-synthetic"));
+    assertThat(res.statusCode()).isEqualTo(200);
+    Long id = jsonPath(res, "$.data.id");
+
+    ChannelEntity row = channelMapper.selectById(id);
+    assertThat(row.getApiKeyCipher()).startsWith("v");                     // v{n}:{b64}
+    assertThat(row.getApiKeyCipher()).doesNotContain("sk-console-plaintext-synthetic");
+    assertThat(row.getKeyVersion()).isEqualTo(channelKeyService.currentKeyVersion());
+    assertThat(res.body()).doesNotContain("sk-console-plaintext-synthetic").doesNotContain(row.getApiKeyCipher());
+    assertThat(get("/api/channels").body()).doesNotContain(row.getApiKeyCipher());
+}
+
+@Test
+void rotatingTheKeyReEncryptsToTheCurrentMasterKeyVersion() { /* rotate-key → key_version 前进、密文前缀跟着变 */ }
+
+@Test
+void aMalformedModelsJsonIsRejectedWithInvalidParam() { /* "not-json" → 400 + code=INVALID_PARAM（D14） */ }
+
+@Test
+void everyWritePublishesAnInvalidationMessage() { /* 用真 Redis 订阅，断言收到 channel.create / channel.update */ }
+```
+
+- [ ] **Step 2: 跑它确认失败** → 404（`/api/channels` 未映射）
+
+- [ ] **Step 3: 实现**：服务层用 `@Transactional`；控制器只做 DTO ↔ 服务的转换与 `ApiResponse.ok(...)`；`models_json` 用 Jackson 校验（D14：**展示用**，不参与路由）。
+
+- [ ] **Step 4: 跑它确认通过并提交**
+
+Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ChannelAdminIntegrationTest"`
+
+```bash
+git add aihub-admin/aihub-service/src/main/java/com/aihub/service/tenant/ \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/channel/ChannelAdminService.java \
+        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/TenantController.java \
+        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ChannelController.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ChannelAdminIntegrationTest.java
+git commit -m "feat(console): tenant and channel CRUD with encrypted keys and invalidation"
+```
+
+**验收判据：** 渠道密钥以密文落库、任何响应/列表都不含密文或明文；轮换后 `key_version` 前进；每次写都广播失效；`models_json` 非法被 400 拒。
+**RED 证据：** `creatingAChannelEncryptsTheKeyAndNeverReturnsTheCipher` 在「原样存明文」或「列表带密文」的实现下红。
+
+---
+
+## Task 9: API Key 管理 + 吊销显式 `DEL`
+
+**Files:**
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/apikey/ApiKeyAdminService.java`
+- Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ApiKeyController.java`
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ApiKeyAdminIntegrationTest.java`
+- Modify: `aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey/ApiKeyView.java`（**删掉已无生产调用方的 `UNUSABLE`**，见 I10②）
+- Modify: `aihub-admin/aihub-common/src/test/java/com/aihub/common/apikey/ApiKeyToolingTest.java`（同步改掉引用它的断言）
+
+**Interfaces:**
+- Consumes: `ApiKeyHasher`（**共用的唯一哈希实现**）、`ApiKeyCacheCodec.CACHE_KEY_PREFIX`（**复用常量，不要写字面量**）、`StringRedisTemplate`、`AuditService`
+- Produces:
+  - `POST /api/api-keys`（响应 `data.plaintextKey` **仅此一次**）、`GET /api/api-keys`、`POST /api/api-keys/{id}/disable`、`POST /api/api-keys/{id}/enable`、`DELETE /api/api-keys/{id}`
+  - `ApiKeyAdminService.create(ApiKeyCreateRequest, Actor) : ApiKeyCreated`、`list(long tenantId) : List<ApiKeyView>`、`disable(long apiKeyId, Actor)`、`enable(long apiKeyId, Actor)`、`delete(long apiKeyId, Actor)` —— 三个写方法都要：改状态 + 审计 + **`redis.delete(ApiKeyCacheCodec.CACHE_KEY_PREFIX + keyHash)`**（**不再有 `revoke(long, String)` 这个签名**，见 N6 的处置：以 Step 3 里定死的那一组为准）
+
+- [ ] **Step 1: 写失败测试**
+
+```java
+@Test
+void creationReturnsThePlaintextExactlyOnceAndNeverAgain() {
+    var created = post("/api/api-keys", Map.of("tenantId", 1, "name", "m4-key", "validDays", 30));
+    String plaintext = jsonPath(created, "$.data.plaintextKey");
+    assertThat(plaintext).matches("ak_[a-z0-9]{16}\\.[A-Za-z0-9_-]{43}");
+
+    assertThat(get("/api/api-keys").body()).doesNotContain(plaintext)
+            .doesNotContain(ApiKeyHasher.hash(plaintext.substring(plaintext.indexOf('.') + 1)));
+}
+
+@Test
+void disablingAKeyDeletesItsSharedCacheEntryImmediately() {
+    // 先让网关的共享缓存里有它（直接写一条 aihub:apikey:<hash>），再 disable
+    redis.opsForValue().set(ApiKeyCacheCodec.CACHE_KEY_PREFIX + hash, payload);
+    post("/api/api-keys/" + id + "/disable", Map.of());
+
+    assertThat(redis.hasKey(ApiKeyCacheCodec.CACHE_KEY_PREFIX + hash))
+            .as("D11：吊销必须显式 DEL 共享条目（M4 之前只有 TTL）").isFalse();
+}
+
+@Test
+void disablingAnUnknownKeyIs404AndTheAuditRowRecordsTheActor() { }
+```
+
+- [ ] **Step 2: 跑它确认失败** → 404 / `redis.hasKey` 仍为 true
+
+- [ ] **Step 3: 实现**（**签名先定死**，不要留到实现时再决定）：
+
+```java
+public record ApiKeyCreateRequest(long tenantId, String name, Integer validDays) {}
+public record ApiKeyCreated(long id, String keyId, String plaintextKey) {}     // 明文**只有这一个出口**
+public record ApiKeyView(long id, String keyId, long tenantId, String name, String status,
+                         Instant expireAt, Instant lastUsedAt) {}              // 无明文、无哈希
+
+@Service
+public class ApiKeyAdminService {
+    ApiKeyCreated create(ApiKeyCreateRequest request, Actor actor);
+    List<ApiKeyView> list(long tenantId);
+    void disable(long apiKeyId, Actor actor);
+    void enable(long apiKeyId, Actor actor);
+    void delete(long apiKeyId, Actor actor);
+    /** 共享层的即时失效：前缀必须用 `ApiKeyCacheCodec.CACHE_KEY_PREFIX`（**不许写字面量**）。 */
+    private void evictSharedCache(String keyHash) { redis.delete(ApiKeyCacheCodec.CACHE_KEY_PREFIX + keyHash); }
+}
+```
+
+- **密钥值的生成只能有一个实现**：现有格式已被固定向量钉死（`ak_` + 16 位小写字母数字 + `.` + 32 字节 URL-safe base64）。**先读 `ApiKeyMintRunner` / `ApiKeyService` 今天是怎么造的，把那段逻辑提升成 `ApiKeyAdminService` 也能调的同一个入口** —— 不是重写一份，也不是"看起来一样"的第二份。
+- **顺带清掉 D4 留下的死代码**：`aihub-common` 的 `ApiKeyView.UNUSABLE` 在 D4 之后**没有任何生产调用方**（过滤器改用 `AdminResolution.unavailable()` 了）。本任务把它**删掉**，并同步改 `ApiKeyToolingTest` 里引用它的断言（那是共享类型上的一块死代码，附录 A8 要求 M4 给个结论）。删不干净就说明还有调用方 —— 那就**保留并说明为什么**，但要在报告里给出结论，不许悬着。
+
+- [ ] **Step 4: 跑它确认通过并提交**
+
+Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ApiKeyAdminIntegrationTest"`
+
+```bash
+git add aihub-admin/aihub-service/src/main/java/com/aihub/service/apikey/ApiKeyAdminService.java \
+        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ApiKeyController.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ApiKeyAdminIntegrationTest.java \
+        aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey/ApiKeyView.java \
+        aihub-admin/aihub-common/src/test/java/com/aihub/common/apikey/ApiKeyToolingTest.java
+git commit -m "feat(console): API key management with explicit shared-cache eviction on disable"
+```
+
+**验收判据：** 明文只出现一次；列表不含明文与哈希；停用后共享缓存条目**立即**消失；审计记到 actor。
+**RED 证据：** `disablingAKeyDeletesItsSharedCacheEntryImmediately` 在只改状态不 `DEL` 的实现下红——这正是 M3 决策 16 交接的那一条。
+
+---
+
+## Task 10: 模型路由 + 限流策略 CRUD
+
+**Files:**
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/route/ModelRouteAdminService.java`
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/ratelimit/RateLimitPolicyAdminService.java`
+- Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ModelRouteController.java`
+- Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/RateLimitPolicyController.java`
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/RouteAndRateLimitAdminIntegrationTest.java`
+
+**Interfaces:**
+- Produces: `/api/routes`（POST/GET/PUT/DELETE）、`/api/rate-limits`（POST/GET/PUT/DELETE）
+- `RateLimitPolicyAdminService.upsert(...)`：写入新策略前**先把同一维度的 ACTIVE 行置为 `INACTIVE`**，这样 M3 决策 17 的「同维度取最后一条」在任何时候都只有一条候选
+
+- [ ] **Step 1: 写失败测试**
+
+```java
+@Test
+void creatingARouteTwiceForTheSameModelAndChannelIsAConflict() { /* 唯一键 uk_model_route → 409/400 + 明确 message */ }
+
+@Test
+void updatingATenantPolicyDeactivatesThePreviousActiveRowForThatDimension() {
+    long first = createTenantPolicy(1L, 10, 20);
+    long second = createTenantPolicy(1L, 5, 10);
+
+    assertThat(policyMapper.selectById(first).getStatus()).isEqualTo("INACTIVE");
+    assertThat(policyMapper.selectById(second).getStatus()).isEqualTo("ACTIVE");
+    assertThat(activeRowsFor(1L, null)).hasSize(1);
+}
+
+@Test
+void aKeyLevelPolicyAndATenantLevelPolicyCoexist() { /* 两个维度互不干扰 */ }
+
+@Test
+void bothWritesPublishAnInvalidationMessage() { }
+```
+
+- [ ] **Step 2–4: 失败 → 实现 → 通过**
+
+Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=RouteAndRateLimitAdminIntegrationTest"`
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add aihub-admin/aihub-service/src/main/java/com/aihub/service/route/ \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/ratelimit/RateLimitPolicyAdminService.java \
+        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ModelRouteController.java \
+        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/RateLimitPolicyController.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/RouteAndRateLimitAdminIntegrationTest.java
+git commit -m "feat(console): model route and rate-limit policy CRUD with dimension-unique activation"
+```
+
+**验收判据：** 同维度永远只有一条 ACTIVE 策略；两个维度共存；重复路由被拒并给出可读消息；写操作都广播失效。
+**RED 证据：** `updatingATenantPolicyDeactivatesThePreviousActiveRowForThatDimension` 在「只插入不停用」的实现下红（两行同时 ACTIVE → M3 的「取最后一条」规则会变成依赖插入顺序的运气）。
+
+---
+
+## Task 11: 渠道探测 + 请求日志/账单查询
+
+**Files:**
+- Create: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/BillingDailyEntity.java`
+- Create: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/BillingDailyMapper.java`
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/config/ChannelProbeService.java`
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/log/RequestLogQueryService.java`
+- Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/LogQueryController.java`
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/log/AuditQueryService.java`
+- Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/AuditController.java`
+- Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/BillingController.java`
+- Modify: `ChannelController`（Task 8 的）增加 `POST /api/channels/{id}/probe`
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ProbeAndQueryIntegrationTest.java`
+
+**Interfaces:**
+- Consumes: `RequestLogMapper`（既有）、`BillingDailyMapper`（本任务新建）、`ChannelKeyService` 的解密入口
+- Produces:
+  - `ChannelProbeService.probe(long channelId) : ProbeResult`（record：`reachable`、`httpStatus`、`latencyMs`、`message`；**绝不回显密钥**；单次请求，超时上限 3 秒）
+  - `RequestLogQueryService.page(long tenantId, Instant from, Instant to, Long apiKeyId, Long channelId, int page, int size) : Page<RequestLogView>`
+  - `GET /api/logs?tenantId=&from=&to=&apiKeyId=&channelId=&page=&size=`
+  - `GET /api/billing/daily?from=&to=`（按 `tenant_id` + `stat_date` 范围）
+  - **`GET /api/audit?tenantId=&from=&to=&page=&size=`** + `AuditQueryService.page(...) : Page<AuditLogView>`
+    —— **审计是 §12 的 M4 交付物之一，光有写入路径不算交付**（评审点名）。查询同样强制 tenant + 时间范围、分页有上界；`AuditLogView` **不含** `detail` 里的敏感内容（写入侧已经保证不含，这里只做只读回显）。
+
+- [ ] **Step 1: 写失败测试**
+
+```java
+@Test
+void probingAChannelReportsReachabilityWithoutLeakingTheKey() {
+    upstream.enqueueJson(200, "{\"object\":\"list\"}");           // 宿主夹具（admin 侧可以用 Testcontainers/夹具）
+    var res = post("/api/channels/" + id + "/probe", Map.of());
+    assertThat(res.body()).contains("\"reachable\":true").doesNotContain("sk-channel-plaintext-synthetic");
+}
+
+@Test
+void logsQueryRequiresATenantAndATimeRange() {
+    assertThat(get("/api/logs?page=0&size=10").statusCode()).as("禁止无界扫描（索引在 V2，见 D1）").isEqualTo(400);
+    assertThat(get("/api/logs?tenantId=1&from=2026-09-01T00:00:00Z&to=2026-09-30T00:00:00Z").statusCode()).isEqualTo(200);
+}
+
+@Test
+void logsPagingIsBoundedAndOrderedByCreatedAtDescending() { /* size>200 被钳到 200；按 created_at DESC */ }
+```
+
+- [ ] **Step 2–4: 失败 → 实现 → 通过**
+
+Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ProbeAndQueryIntegrationTest"`
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/BillingDailyEntity.java \
+        aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/BillingDailyMapper.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/config/ChannelProbeService.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/log/RequestLogQueryService.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/log/AuditQueryService.java \
+        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/AuditController.java \
+        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/LogQueryController.java \
+        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/BillingController.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ProbeAndQueryIntegrationTest.java
+git commit -m "feat(console): channel probe, request-log paging and daily billing query"
+```
+
+**验收判据：** 探测真实打一次上游并回报可达性与耗时、响应里没有密钥；`/api/logs` 强制 tenant + 时间范围且分页有上界；`/api/billing/daily` 按租户与日期范围可查。
+**RED 证据：** `logsQueryRequiresATenantAndATimeRange` 在「允许无界查询」的实现下红（这正是「分区表上全表扫描」的入口）。
+
+---
+## Task 12: 配额控制面 + Lua 预扣契约
+
+**Files:**
+- Create: `aihub-admin/aihub-common/src/main/java/com/aihub/common/quota/QuotaScript.java`
+- Create: `aihub-admin/aihub-common/src/main/java/com/aihub/common/quota/QuotaKeys.java`
+- Create: `aihub-admin/aihub-common/src/main/java/com/aihub/common/quota/QuotaPeriod.java`
+- Create: `aihub-admin/aihub-common/src/main/java/com/aihub/common/quota/QuotaDecision.java`
+- Create: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/QuotaEntity.java`
+- Create: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/QuotaMapper.java`
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/QuotaAdminService.java`
+- Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/QuotaController.java`
+- Test: `aihub-admin/aihub-common/src/test/java/com/aihub/common/quota/QuotaContractTest.java`
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/quota/QuotaPreDeductionIntegrationTest.java`
+
+**Interfaces:**
+- Consumes: `RateLimitScript` 的既有纪律（脚本 + 键布局 + ARGV 顺序只有一份实现）；`StringRedisTemplate`
+- Produces:
+  - `QuotaKeys.bucketKey(long tenantId, String period) : String` → `"aihub:quota:" + tenantId + ":" + period`
+  - `QuotaKeys.ttlMillis(String period, long nowEpochMillis) : long` → 「下个周期开始 + 1 天」减 now
+  - `QuotaPeriod.of(long epochMillis) : String`（UTC 的 `YYYYMM`）、`QuotaPeriod.nextPeriodStartMillis(String period) : long`
+  - `QuotaDecision(boolean allowed, long remainingTokens, long remainingRequests)`（`-1` 表示该维度不限）
+  - `QuotaScript.parse(List<?>)` **必须用 `((Number) raw.get(i)).longValue()`**（Spring Data Redis 的 `DefaultRedisScript<..., List>` 回来的是 `List<Long>`/`Number`，直接强转 `Long` 在某些驱动/版本下会 `ClassCastException`），并且**返回形状不是 3 个元素时抛 `IllegalStateException`**（不是返回 null —— 那会被当成"Redis 不可用"）
+  - **限额值的上界校验**：`QuotaScript` 的 ARGV 走 Lua 的 double，**超过 2^53 会丢整数精度**。`QuotaAdminService.update` 必须拒绝 `token_limit`/`request_limit > 9_007_199_254_740_992`（`INVALID_PARAM`），并有一条用例（见 E.4-(a)）
+  - `QuotaScript.SCRIPT : String`、`QuotaScript.keys(long tenantId, String period) : List<String>`、`QuotaScript.args(long estimatedTokens, long tokenLimit, long requestLimit, long ttlMillis) : List<String>`、`QuotaScript.parse(List<?> raw) : QuotaDecision`
+  - `QuotaAdminService.getOrCreate(long tenantId, String period)`、`QuotaAdminService.update(long tenantId, String period, long tokenLimit, long requestLimit)`（用 `quota.version` 做乐观锁）
+
+- [ ] **Step 1: 写失败测试**
+
+```java
+@Test
+void periodIsYyyymmInUtc() {
+    assertThat(QuotaPeriod.of(Instant.parse("2026-09-30T23:59:59Z").toEpochMilli())).isEqualTo("202609");
+    assertThat(QuotaPeriod.of(Instant.parse("2026-10-01T00:00:00Z").toEpochMilli())).isEqualTo("202610");
+}
+
+@Test
+void ttlReachesTheDayAfterTheNextPeriodStarts() {
+    long now = Instant.parse("2026-09-15T00:00:00Z").toEpochMilli();
+    long ttl = QuotaKeys.ttlMillis("202609", now);
+    assertThat(now + ttl).isEqualTo(Instant.parse("2026-11-02T00:00:00Z").toEpochMilli());
+}
+
+@Test
+void theLuaScriptUsesThePinnedKeyLayoutAndArgOrder() {
+    assertThat(QuotaScript.keys(7L, "202609")).containsExactly("aihub:quota:7:202609");
+    assertThat(QuotaScript.args(1_000L, 100_000L, 0L, 60_000L)).containsExactly("1000", "100000", "0", "60000");
+    assertThat(QuotaScript.SCRIPT).contains("HMGET").contains("HINCRBY").contains("PEXPIRE");
+}
+```
+
+```java
+// QuotaPreDeductionIntegrationTest（真 Redis，Testcontainers）
+// 注意：aihub-common **零第三方依赖**，所以那里只有 Lua 文本 + keys/args/parse；把它包成
+// Spring 的 RedisScript 是**每一侧自己的事**（与 RateLimitScript 完全同一纪律）。
+// 限额**必须由调用方传入**：写死在 helper 里会让「0 = 不限」那条用例自相矛盾。
+private QuotaDecision reserve(long tenantId, long estimatedTokens, long tokenLimit) {
+    var script = new DefaultRedisScript<>(QuotaScript.SCRIPT, List.class);
+    String period = QuotaPeriod.of(Instant.now().toEpochMilli());
+    List<?> raw = redis.execute(script, QuotaScript.keys(tenantId, period),
+            QuotaScript.args(estimatedTokens, tokenLimit, 0L,
+                    QuotaKeys.ttlMillis(period, Instant.now().toEpochMilli())));
+    return QuotaScript.parse(raw);
+}
+
+@Test
+void concurrentPreDeductionsNeverOversellTheBudget() throws Exception {
+    // tokenLimit = 1000，每次估算 100 → 只允许 10 次成功。
+    // **每个用例用自己的 tenantId**：桶是按 (tenant, period) 建的，共用租户会让用例互相污染。
+    long tenant = 101L;
+    ExecutorService pool = Executors.newFixedThreadPool(16);
+    CountDownLatch start = new CountDownLatch(1);
+    List<Future<QuotaDecision>> futures = new ArrayList<>();
+    for (int i = 0; i < 50; i++) {
+        futures.add(pool.submit(() -> { start.await(); return reserve(tenant, 100L, 1000L); }));
+    }
+    start.countDown();
+    long allowed = futures.stream().map(TestSupport::get).filter(QuotaDecision::allowed).count();
+
+    assertThat(allowed).as("Lua 必须原子：预扣的总量不可能超过预算").isEqualTo(10);
+    assertThat(redis.opsForHash().get(QuotaKeys.bucketKey(tenant, QuotaPeriod.of(Instant.now().toEpochMilli())), "tok"))
+            .isEqualTo("1000");
+}
+
+@Test
+void aZeroLimitMeansUnlimitedAndDoesNotBlockAnything() {   // D15
+    assertThat(reserve(102L, 999_999L, 0L).allowed()).isTrue();
+}
+```
+
+- [ ] **Step 2: 跑它确认失败** → `cannot find symbol: class QuotaScript`
+
+- [ ] **Step 3: 实现（Lua 逐字如下，**配额是周期预算，不是速率，所以没有补充逻辑**）**
+
+```lua
+-- 配额预扣：一次往返、服务器端原子（与 RateLimitScript 同一纪律）。
+-- KEYS[1] = aihub:quota:{tenantId}:{period}   (Hash: tok = 已用 token 估算累计, req = 已用请求数)
+-- ARGV    = {estimatedTokens, tokenLimit, requestLimit, ttlMillis}
+-- 返回    = {allowed(1/0), remainingTokens(-1 = 不限), remainingRequests(-1 = 不限)}
+-- 0 的限额表示**不限**（决策 D15）：M4 上线前所有租户都没有配额行，把 0 当「额度为零」
+-- 会让升级瞬间全员 429。
+local est          = tonumber(ARGV[1])
+local tokenLimit   = tonumber(ARGV[2])
+local requestLimit = tonumber(ARGV[3])
+local ttl          = tonumber(ARGV[4])
+
+local used = redis.call('HMGET', KEYS[1], 'tok', 'req')
+local tokenUsed   = tonumber(used[1]) or 0
+local requestUsed = tonumber(used[2]) or 0
+
+local remainingTokens   = -1
+local remainingRequests = -1
+if tokenLimit > 0 then remainingTokens = math.max(0, tokenLimit - tokenUsed) end
+if requestLimit > 0 then remainingRequests = math.max(0, requestLimit - requestUsed) end
+
+if tokenLimit > 0 and (tokenUsed + est) > tokenLimit then
+  return {0, remainingTokens, remainingRequests}
+end
+if requestLimit > 0 and (requestUsed + 1) > requestLimit then
+  return {0, remainingTokens, remainingRequests}
+end
+
+tokenUsed = tokenUsed + est
+requestUsed = requestUsed + 1
+redis.call('HSET', KEYS[1], 'tok', tokenUsed, 'req', requestUsed)
+redis.call('PEXPIRE', KEYS[1], ttl)
+if tokenLimit > 0 then remainingTokens = math.max(0, tokenLimit - tokenUsed) end
+if requestLimit > 0 then remainingRequests = math.max(0, requestLimit - requestUsed) end
+return {1, remainingTokens, remainingRequests}
+```
+
+- [ ] **Step 4: 跑它确认通过并提交**
+
+Run: `mvn -B -pl aihub-admin/aihub-common -am test "-Dtest=QuotaContractTest"` → `Tests run: 3, Failures: 0`
+Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=QuotaPreDeductionIntegrationTest"` → 全绿
+
+```bash
+git add aihub-admin/aihub-common/src/main/java/com/aihub/common/quota/ \
+        aihub-admin/aihub-common/src/test/java/com/aihub/common/quota/QuotaContractTest.java \
+        aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/QuotaEntity.java \
+        aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/QuotaMapper.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/QuotaAdminService.java \
+        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/QuotaController.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/quota/QuotaPreDeductionIntegrationTest.java
+git commit -m "feat(quota): add the atomic pre-deduction contract and the quota admin API"
+```
+
+**验收判据：** 并发预扣**不超发**（真 Redis、16 线程）；`0` 限额 = 不限；键布局与 ARGV 顺序被固定向量钉住；TTL 覆盖到「下个周期 + 1 天」。
+**RED 证据：** 把 Lua 拆成「先 HMGET 再 HSET」两次往返（非原子）时 `concurrentPreDeductionsNeverOversellTheBudget` 会红且 `allowed > 10` —— 判别性极强。
+
+---
+
+## Task 13: 网关 `QuotaFilter` + 实际校正
+
+**Files:**
+- Create: `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaFilter.java`
+- Create: `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaResolver.java`
+- Create: `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaEstimator.java`
+- Create: `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaLimiter.java`、`RedisQuotaLimiter.java`
+- Create: `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaCorrector.java`（校正钩子；`ChatRelayController` 在 `doFinally` 里拿到的那个 `MeteringEvent` 直接喂给它）
+- Create: `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaConfigProperties.java`、`QuotaConfig.java`
+- Modify: `aihub-gateway/src/main/java/com/aihub/gateway/relay/ChatRelayController.java`（拿到 usage 后校正）
+- Modify: `aihub-gateway/src/main/resources/application.yml`、`aihub-gateway/src/test/resources/application.properties`
+- Test: `aihub-gateway/src/test/java/com/aihub/gateway/quota/QuotaFilterTest.java`
+- Test: `aihub-gateway/src/test/java/com/aihub/gateway/quota/QuotaDegradeTest.java`
+- Test: `aihub-gateway/src/test/java/com/aihub/gateway/quota/QuotaCorrectionTest.java`
+
+**Interfaces:**
+- Consumes: `QuotaScript`/`QuotaKeys`/`QuotaPeriod`/`QuotaDecision`（Task 12）；`TokenEstimator`（M2 既有，**复用，不新写**）；`GatewayErrors`；`ApiKeyAuthFilter.ATTRIBUTE_KEY_VIEW`（取 `tenantId`）
+  - ⚠️ **配额是租户级的**：`quota` 表只有 `(tenant_id, period)`（V1 的 `uk_quota_tenant_period`），**没有 `api_key_id`** —— 不要照抄限流的「两维」结构
+- Produces:
+  - `QuotaFilter`（`@Order(Ordered.HIGHEST_PRECEDENCE + 175)`，**排在鉴权 `+100`、限流 `+150` 之后**，只守 `/v1/**`）
+  - 请求属性 `QuotaFilter.ATTRIBUTE_RESERVATION = "aihub.quotaReservation"`，值 `QuotaReservation(long tenantId, String period, long estimatedTokens, boolean degraded)`
+  - `QuotaEstimator.estimate(String bodyOrPrompt, Integer maxTokens) : long`。⚠️ **读体的内存上限（`aihub.quota.max-in-memory-bytes`）必须小于计量侧的 `aihub.metering.max-capture-bytes`** —— 否则配额这一层先失败，计量根本看不到这次请求（E.3 的 caveat 4，执行时确认这两个数字的关系并写进配置注释）
+  - **两种"配额没生效"的原因必须分开计数**（E.4-(a)）：`aihub.quota.degraded`（Redis 不可用 → 按 D7 放行）与 **`aihub.quota.script_error`**（Lua 返回了非预期形状 / 解析失败 → 同样是放行，但**这是缺陷不是降级**）。把它们合成一个计数器，等于让"脚本写错了"永远藏在"Redis 挂了"后面
+  - 超额响应：`429` + `{"error":{"message":…,"type":"insufficient_quota","param":null,"code":"insufficient_quota"}}`（D6）
+  - `RedisQuotaLimiter.reserve(long tenantId, long estimatedTokens) : QuotaDecision`、`adjust(long tenantId, String period, long estimate, long actual) : void`
+
+- [ ] **Step 1: 写失败测试**
+
+```java
+@Test
+void anOverBudgetRequestIsRejectedWithInsufficientQuotaNotRateLimitExceeded() {
+    stubQuota(1L, /* tokenLimit */ 100L);
+    var res = post("/v1/chat/completions", largeBody());
+    assertThat(res.statusCode()).isEqualTo(429);
+    assertThat(res.body()).contains("\"code\":\"insufficient_quota\"").contains("\"type\":\"insufficient_quota\"")
+            .doesNotContain("rate_limit_exceeded");
+}
+
+@Test
+void redisDownAllowsTheRequestAndCountsADegrade() {      // D7：配额 fail-open
+    // spring.data.redis.port=1 + 真实过滤器链
+    assertThat(post("/v1/chat/completions", smallBody()).statusCode()).isEqualTo(200);
+    assertThat(meterRegistry.counter("aihub.quota.degraded").count()).isEqualTo(1.0);
+}
+
+@Test
+void cachedBodyStillReachesTheUpstreamByteForByte() {    // D17 + M1 铁律
+    upstream.enqueueJson(200, FakeUpstream.completionJson());
+    byte[] sent = "{\"model\":\"demo-model\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":16}"
+            .getBytes(UTF_8);
+    postBytes("/v1/chat/completions", sent);
+    assertThat(upstream.lastRequestBytes()).isEqualTo(sent);   // 逐字节
+}
+
+@Test
+void theRealUsageCorrectsTheEstimateBothWays() {         // 实测 usage < 估算 → 退回差额
+    // 夹具回 usage.total_tokens = 3，而估算 = prompt + max_tokens
+    String period = QuotaPeriod.of(Instant.now().toEpochMilli());
+    long afterRequest = Long.parseLong((String) redis.opsForHash()
+            .get(QuotaKeys.bucketKey(1L, period), "tok"));
+    assertThat(afterRequest).as("校正之后桶里记的是**真实**用量，不是估算值").isEqualTo(3L);
+}
+```
+
+- [ ] **Step 2: 跑它确认失败** → `cannot find symbol: class QuotaFilter`
+
+- [ ] **Step 3: 实现**
+
+`QuotaFilter` 的关键点（**请求体一次性**，所以必须缓存；且缓存不得改变转发字节）：
+
+```java
+@Override
+public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
+    if (!properties.enabled() || !GUARDED.matches(exchange.getRequest().getPath().pathWithinApplication())
+            || !"/v1/chat/completions".equals(exchange.getRequest().getPath().pathWithinApplication().value())) {
+        return chain.filter(exchange);   // 只有 chat/completions 计费（A13：/v1/models 不落 request_log）
+    }
+    // 请求体是**一次性**流：本过滤器要读它来估算，下游（路由与转发）也必须能读到**同一份字节**。
+    // ⚠️ Spring 6.2 **没有** ServerWebExchangeUtils.cacheRequestBody*（评审已在 spring-web /
+    // spring-webflux 6.2.19 的 jar 里核实：连 web/server/support 包都不存在），所以自己 join 出来，
+    // 再用 ServerHttpRequestDecorator + exchange.mutate() 把**同一份 byte[]** 反复供给下游。
+    // ⚠️ 顺序很关键：先复制、**再**释放 join 出来的 buffer，然后把**装饰过的** exchange 传下去。
+    //    反过来（释放了还传原 exchange）会让下游读到空 body —— 那正好破坏 M1 的字节级透传铁律。
+    //    这一点由 cachedBodyStillReachesTheUpstreamByteForByte 证明，不靠"应该没事"。
+    return DataBufferUtils.join(exchange.getRequest().getBody(), properties.maxInMemoryBytes())
+            .map(buffer -> {
+                byte[] body = new byte[buffer.readableByteCount()];
+                buffer.read(body);
+                DataBufferUtils.release(buffer);          // 已复制进 byte[]，释放是安全的
+                return body;
+            })
+            .defaultIfEmpty(new byte[0])
+            .flatMap(body -> reserveAndContinue(withCachedBody(exchange, body), body, chain))
+            // 阻塞的 Redis 调用必须离开 event loop：与 RateLimitFilter 同一条纪律
+            // （`LIMITER_SCHEDULER = Schedulers.boundedElastic()`，见 CONVENTIONS §6.6；
+            //   网关侧 spring.data.redis.timeout 仍是 2 秒，占住 event loop 就是灾难）
+            .subscribeOn(LIMITER_SCHEDULER);
+}
+
+/** 把同一份 byte[] 反复供给下游的装饰器：只包 request，其它一概不动。 */
+private static ServerWebExchange withCachedBody(ServerWebExchange exchange, byte[] body) {
+    ServerHttpRequest decorated = new ServerHttpRequestDecorator(exchange.getRequest()) {
+        @Override
+        public Flux<DataBuffer> getBody() {
+            // 每次订阅都从 byte[] 重新包一个 buffer：下游读几次都拿到完整、独立的字节。
+            return Flux.defer(() -> Flux.just(exchange.getResponse().bufferFactory().wrap(body)));
+        }
+    };
+    return exchange.mutate().request(decorated).build();
+}
+```
+
+`reserveAndContinue`：取 `ApiKeyAuthFilter.ATTRIBUTE_KEY_VIEW` 里的 `tenantId`/`apiKeyId` → `QuotaResolver` 选额度（`quota` 表按 `tenant_id + period`，**没有行或 `token_limit == 0` 表示不限**，D15）→ `QuotaEstimator.estimate(body, maxTokens)`（**复用 `TokenEstimator`**）→ `RedisQuotaLimiter.reserve(...)` → 拒绝则 `GatewayErrors.write(..., TOO_MANY_REQUESTS, "insufficient_quota", "insufficient_quota", …)`；允许则把 `QuotaReservation` 放进 exchange 属性后 `chain.filter(...)`。Redis 异常时**放行** + `aihub.quota.degraded` 计数 + 限流过的 WARN（D7）。
+
+**校正点在哪：`ChatRelayController` 自己看不到 `usage`**（评审已核实：`UsageCapture` 是 `RelayMetering` 的内部物，usage 只在 `metering.toEvent(signal)` 被物化，而那一句在 `doFinally` 里，见 `ChatRelayController:203`）。所以本任务**新增**一个 gateway bean `QuotaCorrector`（`com.aihub.gateway.quota.QuotaCorrector`），并把那一处从：
+
+```java
+.doFinally(signal -> meteringPublisher.publish(metering.toEvent(signal)));
+```
+
+改成：
+
+```java
+.doFinally(signal -> {
+    MeteringEvent event = metering.toEvent(signal);
+    meteringPublisher.publish(event);       // 既有计量行为一字不变
+    quotaCorrector.correct(event);          // 校正：用的就是同一个事件里的真实用量
+});
+```
+
+`QuotaCorrector.correct(MeteringEvent event)` 取 `event.tenantId()` 与 token 分量算出 `actual`（**实现前先 `grep` 一次 `MeteringEvent` 的分量名并照抄**，别猜），与预扣时记下的 `estimate` 求差，`HINCRBY` 回桶。约束：**不参与响应链路**（失败只记日志 + 计数，02:00 的对账是兜底）；**绝不改写已提交的响应**；`adjust` **不是幂等的**，所以每个请求只调一次，并把这条限制写进 javadoc（重试会重复调整，偏差靠对账发现）。
+
+- [ ] **Step 4: 跑它确认通过并提交**
+
+Run: `mvn -B -pl aihub-gateway -am test "-Dtest=QuotaFilterTest,QuotaDegradeTest,QuotaCorrectionTest,SseStreamingTest,RelayMeteringFlowTest"`
+Expected: 全绿 + `BUILD SUCCESS`（后两个既有的类一起跑，证明字节透传与计量没被破坏）。
+
+```bash
+git add aihub-gateway/src/main/java/com/aihub/gateway/quota/ \
+        aihub-gateway/src/main/java/com/aihub/gateway/relay/ChatRelayController.java \
+        aihub-gateway/src/main/resources/application.yml \
+        aihub-gateway/src/test/java/com/aihub/gateway/quota/ \
+        aihub-gateway/src/test/resources/application.properties
+git commit -m "feat(gateway): pre-deduct quota atomically, reject with insufficient_quota, correct from real usage"
+```
+
+**验收判据：** 超额是 `insufficient_quota`（不是 `rate_limit_exceeded`）；Redis 挂了**放行**且有降级计数；缓存请求体后上游收到的字节**逐字节不变**；真实 usage 双向校正估算。
+**RED 证据：** `cachedBodyStillReachesTheUpstreamByteForByte` 在「缓存把 body 消费掉」的实现下红（上游收到空体）；`anOverBudgetRequestIsRejectedWithInsufficientQuota…` 在复用 `rate_limit_exceeded` 的实现下红。
+
+---
+
+## Task 14: `POST /internal/quota/reserve` 兜底
+
+**Files:**
+- Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/internal/InternalQuotaController.java`
+- Modify: `aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java`（+`reserveQuota(...)`，**default 方法返回空**，避免破坏既有函数式替身）
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/quota/InternalQuotaReserveTest.java`
+- Test: `aihub-gateway/src/test/java/com/aihub/gateway/quota/QuotaReserveFallbackTest.java`
+
+**Interfaces:**
+- Consumes: `InternalHmac` + `InternalAuthFilter`（既有内部契约：`POST` + 应用内路径 + `X-Internal-Timestamp`/`X-Internal-Signature`）
+- Produces:
+  - `POST /internal/quota/reserve` 请求体 `{"tenantId":1,"estimatedTokens":123}` → admin 信封，`data = {"allowed":true,"remainingTokens":…,"remainingRequests":…}`
+  - `AdminClient.reserveQuota(long tenantId, long estimatedTokens) : Mono<QuotaDecision>`（**default 实现返回 `Mono.empty()`**，与 `configSnapshot` 同一纪律）
+
+- [ ] **Step 1: 写失败测试**
+
+```java
+@Test
+void theReserveEndpointRequiresTheInternalSignature() { /* 无签名 → 401（admin 信封）；带签名 → 200 */ }
+
+@Test
+void whenTheReserveCallItselfFailsTheGatewayStillAllowsTheRequest() {
+    // D7 的一致性：兜底路径也失败时仍然 fail-open，并计数
+    assertThat(post("/v1/chat/completions", smallBody()).statusCode()).isEqualTo(200);
+    assertThat(meterRegistry.counter("aihub.quota.degraded").count()).isGreaterThanOrEqualTo(1.0);
+}
+```
+
+- [ ] **Step 2–4: 失败 → 实现 → 通过**
+
+Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=InternalQuotaReserveTest"`
+Run: `mvn -B -pl aihub-gateway -am test "-Dtest=QuotaReserveFallbackTest"`
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/internal/InternalQuotaController.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/quota/InternalQuotaReserveTest.java \
+        aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java \
+        aihub-gateway/src/test/java/com/aihub/gateway/quota/QuotaReserveFallbackTest.java
+git commit -m "feat(quota): add the HMAC-signed internal reserve fallback"
+```
+
+**验收判据：** 内部接口受签名保护（无签名 401）；网关在 Redis 不可用时可选择回源预扣；**兜底本身失败时仍然放行**（与 D7 一致）。
+**RED 证据：** `whenTheReserveCallItselfFailsTheGatewayStillAllowsTheRequest` 在「兜底失败就拒绝」的实现下红（那是把记账故障升级成业务故障）。
+
+---
+
+## Task 15: 每日对账任务
+
+**Files:**
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/QuotaReconciliationService.java`
+- Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/QuotaReconciliationJob.java`
+- Modify: `aihub-admin/aihub-service/src/main/java/com/aihub/service/metering/MeteringSchedulingConfig.java`（注册 `@Scheduled(cron = "${aihub.quota.reconcile-cron:0 0 2 * * *}")`）
+- Modify: `aihub-admin/aihub-web/src/main/resources/application.yml`
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/quota/QuotaReconciliationTest.java`
+
+**Interfaces:**
+- Consumes: `RequestLogMapper`、`BillingDailyMapper`（Task 11）、`QuotaMapper`、`AuditService`
+- Produces:
+  - `QuotaReconciliationService.reconcile(LocalDate statDate) : ReconciliationReport`（record：`long requests`、`long tokens`、`Map<Long,Double> mismatches`）
+  - 计数器 `aihub.quota.reconcile.mismatch`、`aihub.quota.reconcile.runs`
+  - `QuotaReconciliationJob.reconcileYesterday()`（`@Scheduled`，**02:00**，与 M3 的分区维护 **03:10** 错开）
+  - 配置 `aihub.quota.reconcile-cron`（默认 `0 0 2 * * *`）、`aihub.quota.reconcile-tolerance-ratio`（默认 `0.01`）
+
+- [ ] **Step 1: 写失败测试**
+
+```java
+@Test
+void recomputesBillingDailyForYesterdayFromRequestLog() {
+    // 真 MySQL：造 3 天、两个租户的 request_log
+    service.reconcile(LocalDate.of(2026, 9, 26));
+    List<BillingDailyEntity> rows = billingDailyMapper.selectList(null);
+    assertThat(rows).extracting(BillingDailyEntity::getTokens).containsExactlyInAnyOrder(30L, 300L);
+}
+
+@Test
+void runningTwiceIsIdempotentBecauseOfTheUniqueKey() { /* 同一个 stat_date 重跑不新增行 */ }
+
+@Test
+void aDeviationBeyondTheToleranceIsCountedAndAuditedButDoesNotChangeTheQuota() {
+    // Redis 里塞一个明显不同的计数 → 计数器 +1、审计行 +1、quota.token_used **不变**（D12）
+    assertThat(meterRegistry.counter("aihub.quota.reconcile.mismatch").count()).isEqualTo(1.0);
+    assertThat(quotaMapper.selectById(quotaId).getTokenUsed()).isEqualTo(before);
+}
+```
+
+- [ ] **Step 2–3: 失败 → 实现**
+
+重算用一条幂等 UPSERT（`uk_billing_daily(tenant_id, stat_date)` 是幂等的锚点）。**它必须是一个有名字的 Mapper 方法**（加在 Task 11 建的 `BillingDailyMapper` 上），不许"顺手写在服务层的字符串里"：
+
+```java
+// BillingDailyMapper（Task 11 建的那个）新增这一个方法。
+@Insert("""
+        INSERT INTO billing_daily (tenant_id, stat_date, requests, tokens, cost)
+        SELECT tenant_id, DATE(created_at), COUNT(*), SUM(total_tokens), 0
+        FROM request_log
+        WHERE created_at >= #{from} AND created_at < #{to}
+        GROUP BY tenant_id, DATE(created_at)
+        ON DUPLICATE KEY UPDATE requests = VALUES(requests), tokens = VALUES(tokens), cost = VALUES(cost)
+        """)
+int recomputeDaily(@Param("from") Instant from, @Param("to") Instant to);
+```
+
+- **`VALUES()` 在 MySQL 8.4 上是 deprecated**（会有 deprecation warning，功能正常）。8.0.19+ 推荐的替代是**行别名**，但它对 `INSERT ... SELECT` 有语法限制：先在真库上试 `... SELECT ... AS new ON DUPLICATE KEY UPDATE requests = new.requests, ...`，**能过就用它**；过不了就保留上面的 `VALUES()` 形式，并在报告里**登记实际采用哪一种**（不要在这里猜语法，以真库为准 —— Task 1 已经证明这个环境有真 MySQL）。
+- `cost` 固定写 `0` 并在 README 登记（没有单价表，见「不做的事」）。
+- **口径提醒**：`request_log` 里 `error_code = usage_missing` / `client_disconnected` 的行是**已知的近似值**（CONVENTIONS §6.5），重算不去区分它们 —— 所以偏差计数器天然包含这部分近似数据，README 的已知边界要写这句。
+
+- [ ] **Step 4: 跑它确认通过并提交**
+
+Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=QuotaReconciliationTest"`
+
+```bash
+git add aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/ \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/metering/MeteringSchedulingConfig.java \
+        aihub-admin/aihub-web/src/main/resources/application.yml \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/quota/QuotaReconciliationTest.java
+git commit -m "feat(quota): add the 02:00 reconciliation job that recomputes billing_daily and reports deviations"
+```
+
+**验收判据：** `billing_daily` 按 `request_log` 被**幂等**重算；偏差被计数 + 审计；**不改** `quota.token_used`；cron 与分区维护错开。
+**RED 证据：** `runningTwiceIsIdempotentBecauseOfTheUniqueKey` 在「先 DELETE 再 INSERT」之外的错误实现（例如累加）下红；`aDeviationBeyondTheToleranceIsCountedAndAuditedButDoesNotChangeTheQuota` 在「自动改账」的实现下红。
+
+---
+
+## Task 16: 极简管理台静态页
+
+**Files:**
+- Create: `aihub-admin/aihub-web/src/main/resources/static/console/index.html`
+- Create: `aihub-admin/aihub-web/src/main/resources/static/console/console.js`
+- Create: `aihub-admin/aihub-web/src/main/resources/static/console/console.css`
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ConsoleStaticResourceTest.java`
+
+**Interfaces:**
+- Consumes: `/api/auth/login`、`/api/channels`、`/api/api-keys`、`/api/logs`（Task 6/8/9/11）
+- Produces: `GET /console/` 可访问的三个静态文件；页面用 `sessionStorage` 存令牌（D9）
+
+- [ ] **Step 1: 写失败测试**
+
+```java
+@Test
+void theConsoleAssetsAreServedAndContainNoInlineScript() {
+    assertThat(get("/console/index.html").statusCode()).isEqualTo(200);
+    assertThat(get("/console/console.js").statusCode()).isEqualTo(200);
+    assertThat(get("/console/console.css").statusCode()).isEqualTo(200);
+    String html = get("/console/index.html").body();
+    assertThat(html).as("不引第三方脚本、不用内联脚本（CSP 友好，也少一个 XSS 面）")
+            .doesNotContain("<script>").contains("src=\"/console/console.js\"");
+}
+
+@Test
+void theConsoleNeverRendersUntrustedHtml() {
+    assertThat(read("console.js")).as("所有服务端文本都必须走 textContent，不许 innerHTML")
+            .doesNotContain("innerHTML");
+}
+```
+
+- [ ] **Step 2: 跑它确认失败** → 404（文件还不存在）
+
+- [ ] **Step 3: 实现**：登录表单 → `sessionStorage.setItem("aihub.console.token", token)`；三个视图（渠道列表 + 新建、Key 列表 + 新建并**一次性展示明文**、请求日志查询）；所有网络调用走一个 `api(path, options)` 包装，统一把非 `OK` 的 `data.code` 显示给用户；`401` 时清令牌并回登录视图。**全部用 `textContent`**。
+
+- [ ] **Step 4: 跑它确认通过并提交**
+
+Run: `mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ConsoleStaticResourceTest"`
+
+```bash
+git add aihub-admin/aihub-web/src/main/resources/static/console/ \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ConsoleStaticResourceTest.java
+git commit -m "feat(console): add the zero-build static admin console"
+```
+
+**验收判据：** 三个静态文件可访问；无内联脚本、无第三方脚本、无 `innerHTML`；登录后能完成「建渠道 / 建 Key / 查日志」三件事。
+**RED 证据：** `theConsoleNeverRendersUntrustedHtml` 在任何一次用 `innerHTML` 渲染服务端文本时红（这是本页面唯一的 XSS 入口，D9 已把代价登记为已知边界）。
+
+---
+
+## Task 17: 文档收口 + M4 全栈验收
+
+**Files:**
+- Modify: `docs/CONVENTIONS.md`、`README.md`、`.env.example`、`docker-compose.yml`（**admin 加 `AIHUB_CONSOLE_SECRET`、gateway 加 `AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION`** —— 不改它，第 2–7 步在容器里全是 500/401，见 C5）、`docs/superpowers/specs/2026-09-23-aihub-platform-design.md`
+- Create: `.superpowers/sdd/m4-acceptance.md`（**git-ignored**，原始输出，token 只留前缀）
+
+**Interfaces:**（本任务**没有代码接口**；下面是它必须逐条写清的**文档契约**，以及验收时必须能观察到的现象）
+- CONVENTIONS §4 错误表 + 一行：`insufficient_quota` / `429` / `insufficient_quota` / 触发=周期配额用尽 / 产出=`QuotaFilter`；并在同一处写明**与 `rate_limit_exceeded` 的区别**以及「设计文档 §6.2 的 `QUOTA_EXCEEDED` 已被取代」（注意：**admin 信封**里的 `ErrorCode.QUOTA_EXCEEDED` 仍然存在且是 admin 侧的码，别混）。
+- CONVENTIONS §6.7（新增）：配额小节 —— 预扣/校正/对账三段、`0` = 不限（D15）、Redis 不可用时**放行**（D7，与限流的「降级仍拒绝」对照）、`adjust` 非幂等与 02:00 对账是兜底。
+- CONVENTIONS §7：迁移纪律 —— 「迁移数量由 `SchemaMigrationTest` 显式钉住；M4 加入第二条（`V2__m4_console.sql`）是有意的，任何人再加必须改那条断言」。
+- CONVENTIONS §6.6：吊销生效延迟改为「控制台吊销后**共享层立即失效**（显式 `DEL`），本机 Caffeine 仍 ≤30s」。
+- README：M4 段落（做了什么 + 管理台怎么用 + 三个视图）、已知边界新增（配额 fail-open、吊销 ≤30s、对账只报告、`cost = 0`、`localStorage` 的 XSS 代价、D17 的请求体缓存、A3 的 2 秒 Redis 超时、A6 未鉴权不限流、A7 的 404/405 形状）。
+- `.env.example`：`AIHUB_CONSOLE_SECRET`（**两种 PowerShell 写法 + openssl**，并说明「必须与 admin 一致、轮换会让已签发的令牌立刻失效」）。
+- 设计文档：§6.2 的 `QUOTA_EXCEEDED` 标注为已被 `insufficient_quota` 取代；§7.3 的接口表标注已实现/未实现（`/api/kb/**` 属 M5）。
+
+- [ ] **Step 1: 文档改动 + 可证的断言**
+
+对每一条新写的边界，问一句「它有没有对应的代码/测试？」。没有对应证据的句子**不许写**（本仓库历史上出现过文档承诺了不存在的 WARN，被评审打回）。
+
+- [ ] **Step 2: 全量测试**
+
+Run: `$env:DOCKER_HOST='tcp://127.0.0.1:2375'; mvn -B clean test`
+Expected: `BUILD SUCCESS`，报告**每个模块**的 `Tests run`（基线 common 56 / web 95 / gateway 350 = 501，M4 之后必然增加）。先删 `target/surefire-reports`，**不要**看 `[exit code: N]`。
+
+- [ ] **Step 3: 真实 compose 全栈验收（**本任务的中心**）**
+
+前置：`docker -H tcp://127.0.0.1:2375 compose build`（`$env:BUILDX_CONFIG` 指向工作区内）→ `up -d --pull never` → 用**镜像 ID 与运行容器逐一核对**（M3 的教训：盘上镜像可能还是旧代码）。**永不**读 `.env`、**永不**执行 `docker compose config`。**脱敏清单（比"token 只留前缀"更宽）**：token、`sys_user` 的**口令与 bcrypt 哈希**、`POST /api/api-keys` 返回的**一次性明文 key**、`AIHUB_CONSOLE_SECRET`、渠道明文密钥、`api_key_cipher` 密文 —— 这些**都不许**出现在 `.superpowers/sdd/m4-acceptance.md` 或任何命令输出里（合成口令也要脱敏：它不是真秘密，但把"口令明文可以进记录"变成习惯才是真正的风险）。
+
+1. **容器与健康**：`compose ps` + `admin/gateway /healthz` 都是 200。
+2. **登录**：`POST /api/auth/login`（合成的 `sys_user` 行由本步骤前用一次性 SQL 插入，口令 bcrypt 哈希也由一次性工具生成）→ 拿到令牌 → 带它 `GET /api/channels` 200；不带令牌 401；`VIEWER` 角色 POST → 403。
+3. **★ M4 验收标准：控制面配置 → 数据面生效**：用 `/api/channels` **改一条渠道的 `base_url`**（或新建一条路由），然后**只观察数据面**（不做任何人工 `DEL`）：`GET /v1/models` / 发一次 chat 请求，记录「变更时刻 → 数据面可见时刻」。**判据：秒级（≤ 5 秒）**，并且与 M3 实测的 **101 秒 / 删共享条目后 15 秒**形成直接对照。顺带打印 `aihub:config:snapshot` 的 TTL 与网关日志里的「收到配置失效消息」行。
+4. **反向对照**：把订阅关掉（`aihub.config.invalidate-subscription=false` 重启网关）→ 同样的变更**不再是秒级**（应回到等 TTL 的行为）。这一步是判据的**判别性证明**：证明第 3 步的快是订阅带来的，不是别的路径。
+5. **配额**：通过 `/api/quotas` 给演示租户设一个很小的 `token_limit`（例如 50）→ 连续发请求 → **必须**看到 `429` + `code=insufficient_quota`（**不是** `rate_limit_exceeded`）→ 把配额调回 `0`（不限）→ 请求恢复 200。
+6. **审计**：`select action, actor, target_type, target_id, detail from audit_log order by id desc limit 10`，人工确认**没有**任何明文密钥/密文/口令/令牌。
+7. **对账**：手工触发一次 `reconcile(LocalDate.now(UTC).minusDays(1))`（或把 cron 临时改成下一次整分）→ 打印 `billing_daily` 行与偏差计数；确认 `quota.token_used` **未**被改动。
+8. **回归对照**（M1/M2/M3 的关键契约不能坏）：`GET /v1/models`、流式 `data: [DONE]`、429 限流形状、`request_log` 行（`channel_id`/`api_key_id`）、未注册 404/405 的 Spring 默认体（A7）。
+9. **收尾**：把演示改动还原（渠道 `base_url`、配额、路由），停宿主夹具，把真实输出（**删掉 token 明文**）写进 `.superpowers/sdd/m4-acceptance.md`，并把结论同步进 README。
+
+- [ ] **Step 4: 提交**
+
+```bash
+git add docs/CONVENTIONS.md README.md .env.example docker-compose.yml \
+        docs/superpowers/specs/2026-09-23-aihub-platform-design.md
+git commit -m "docs(m4): record the console, quota and invalidation contracts plus the M4 acceptance"
+```
+
+**验收判据：** 第 3 步**秒级**生效且第 4 步（关掉订阅）不秒级；配额超限是 `insufficient_quota`；审计无敏感字段；对账只报告；M1/M2/M3 的关键契约逐条复现。
+**RED 证据：** 第 4 步就是第 3 步的反证 —— 如果两条都"快"，说明快的原因不是 Pub/Sub，第 3 步的结论作废（必须查出真正原因再声称达成）。
+
+---
+---
+
+## 附录 A：M3 → M4 交接清单（**每一条都有证据**，M4 必须逐条处理或显式登记为不做）
+
+本附录由 M3 的收口轮与 D1/D4 修复轮实际测量得出。**它不是背景介绍，是 M4 的输入**：其中 A1/A2 不修，M4 的验收标准就无法演示。
+
+| # | 交接项 | 证据（在哪能看到） | M4 怎么处理 |
+|---|---|---|---|
+| A1 | **配置变更不会主动到达数据面**：改 `channel.base_url` 后 **101 秒**新快照仍不可见；只有删掉 `aihub:config:snapshot` 才在 **15 秒**内收敛。原因是本地 30 秒 TTL 过期后，网关从 Redis 读到的还是**同版本的旧快照**，于是根本不回源。 | README「已知边界」、`docs/CONVENTIONS.md` §6.6、`.superpowers/sdd/m3-acceptance.md` §7 发现 2 | **Task 2 + Task 4**（Pub/Sub 发布方 + 订阅方 + `invalidate()` 同时清共享条目与水位）。**M4 的验收标准「控制面配置 → 数据面生效全链路打通」就靠这条**。 |
+| A2 | **快照 `version` 会倒退**：`version = max(updated_at)`，删掉最新那一行版本就变小，而网关与 Redis 两侧的比对都是严格 `>`，于是更旧的快照被 lastGood 记住并继续服务；`ConfigSnapshotService` 既不检测也不告警。**M3 时零缓解措施**。 | `docs/CONVENTIONS.md` §6.6 末尾、README 已知边界；D1/D4 轮的验收**意外触发过它**（`.superpowers/sdd/m3-acceptance.md` §11.8） | **Task 3**（`config_version` 水位 + 读时抬升）。 |
+| A3 | **网关自己的 Redis 命令超时仍是 2 秒**：Redis 停机时一个请求要赔多次超时 —— 实测 **16 个顺序请求花了 110 秒（≈7 秒/请求）**；只有把请求**并发**发才能观察到限流降级后的 429。 | `.superpowers/sdd/m3-acceptance.md` §11.5 | **本计划不改**（做成粘性短路会破坏既有断言 `ApiKeyFilterContractTest.redisOutageStillResolvesThroughAdminWithBothRedisCallsOffTheCallersThread`）。**登记在 README 已知边界**，并把「Redis 停机时必须并发压测」写进 Task 17 的验收口径。 |
+| A4 | **API Key 吊销的生效延迟**：本机 Caffeine ≤30s、集群 Redis ≤5m；M3 决策 16 明确把「吊销接口 + 显式 DEL」交给 M4。 | `docs/CONVENTIONS.md` §6.6、M3 计划决策 16 | **Task 9**（显式 `DEL` 共享键）+ 残余登记（本地 30 秒窗口仍在）。 |
+| A5 | **`request_log.channel_id` / `api_key_id` 没有索引**：按渠道/按 Key 聚合会全表扫描；M3 不加迁移，留给 M4。 | `docs/CONVENTIONS.md` §6.5 末、README | **Task 1**（V2 里加两个索引）+ **Task 11**（`/api/logs` 的分区裁剪友好查询）。 |
+| A6 | **未鉴权的 `/v1/**` 请求永远不会被限流**（鉴权 `+100` 在限流 `+150` 之前）。 | `docs/CONVENTIONS.md` §6.6 | M4 **不改**（配额同理排在鉴权之后）。**登记**在 README：未鉴权洪峰不在保护范围内。 |
+| A7 | **`/v1/**` 上没有处理器的 404/405 返回 Spring 默认体**，不是 OpenAI 形状。D1/D4 轮**逐条复现**，形状与 M3 那次逐字相同。 | `docs/CONVENTIONS.md` §4 开头的引用块、`.superpowers/sdd/m3-acceptance.md` §11.7 | M4 **不改**（属打磨，登记在 README）。Task 17 的验收里**保留**这条复现（它现在是一条「已知且未变」的对照）。 |
+| A8 | **`ApiKeyView.UNUSABLE` 已无任何生产调用方**（D4 把过滤器的空 Mono 兜底换成了 `AdminResolution.unavailable()`）。 | D4 修复轮的窄口径复审记录、`aihub-common` 的 javadoc | M4 **二选一**：给 `DEL` 路径一个用途（Task 9 的「已吊销」视图语义可以复用它）或删掉它。**不要把死代码留在共享类型上**。 |
+| A9 | **控制面故障 ⇒ 503 `service_unavailable`，且故障结论不被缓存**（D4 裁的）。M4 新增的 `/api/**` 必须遵守同一条纪律：**不要把平台故障伪装成凭证错误**（D16 就是这条纪律的直接应用）。 | `docs/CONVENTIONS.md` §4/§5、`.superpowers/sdd/m3-acceptance.md` §11.6 | Task 6 的 D16 分支 + Task 17 的文档收口。 |
+| A10 | **限流与配额是两件事**，M3 只做限流（QPS/burst），配额整体属 M4；**不要把 429 `rate_limit_exceeded` 与配额混为一谈**。 | `docs/CONVENTIONS.md` §6.6 末、M3 计划决策 12 | **Task 12/13**（D6 定了配额的数据面错误码是 `insufficient_quota`）。 |
+| A11 | **`channel.models_json` 的语义未定**（M3 登记为「M4 的控制台一并定」）。 | M3 计划「不做的事」、README | **D14：定为展示用**，路由仍以 `model_route` 为唯一真相。 |
+| A12 | **主动探活属 M4**（M3 只做「失败后标记」）。 | M3 计划「不做的事」 | **Task 11**（`POST /api/channels/{id}/probe`）。 |
+| A13 | **网关的 meter 只覆盖 `POST /v1/chat/completions` 一个端点**：`GET /v1/models`、未鉴权/未注册的响应都不落 `request_log`。 | README 已知边界、CONVENTIONS §6.5 | M4 **不改**（配额按「请求」计数时要知道这一点：`/v1/models` 不计费也不扣配额，Task 13 的配额过滤器只作用于 chat/completions）。 |
+| A14 | **没有配置写入方**（M3 决策 16）：`aihub:config:snapshot` 只能靠 TTL 或人工 `DEL` 失效；`ConfigClient.invalidate()` 今天**只清本地**，紧接着仍会采用 Redis 里的旧条目。 | `ConfigClient.invalidate()` 的 javadoc（自己就登记了这条缺口） | Task 4 的修复点。 |
+| A15 | **Docker/Maven 的既有陷阱清单**（`-Dtest=A,B` 逗号、`-am`、退出码不可信、陈旧 `.class`、`--pull never`、`BUILDX_CONFIG` 必须重定向进工作区、`[System.IO.File]` 不认 `Set-Location`、中文文档禁 `Get-Content`）。 | 全局约束的「本机环境前提」；M3 计划同一节 | 每条都已在全局约束里复述，**不要重新踩**。 |
+
+---
+
+## 附录 B：执行顺序、并行边界与共享契约的落地顺序
+
+**必须串行的前置链**（共享契约的存在性）：
+
+```
+Task 1 (V2: audit_log / config_version / 两个索引)
+  ├─> Task 3 (版本水位)  ──┐
+  ├─> Task 2 (失效契约)  ──┴─> Task 4 (网关订阅 + invalidate 修复)   ← M4 验收标准的前置，**最先做完**
+  └─> Task 7 (审计服务, 需要 audit_log) ─> Task 8/9/10 (CRUD 写路径都要审计)
+Task 5 (bcrypt 验证 + 令牌契约) ─> Task 6 (登录 + 过滤器) ─> Task 8/9/10/11
+Task 12 (配额契约 QuotaScript/Keys/Period) ─> Task 13 (网关 QuotaFilter) ─> Task 14 (internal reserve)
+Task 12 ─> Task 15 (对账)
+Task 6/8/9/10/11 ─> Task 16 (管理台静态页)
+全部 ─> Task 17 (文档收口 + 全栈验收)
+```
+
+**可以并行的**（互不共享文件、也互不共享契约：
+`Task 2 ∥ Task 3`、`Task 5 ∥ Task 1`、`Task 8 ∥ Task 9 ∥ Task 10`、`Task 12 ∥ Task 16 的静态资源骨架`。
+**不允许并行**：任何两个都要改同一个 `ConfigSnapshotService` / `application.yml` / `CONVENTIONS.md` 的任务 —— 那些文件在多个任务里出现，必须串行（工作树里还有一个第二写入者）。
+
+**契约落地顺序（违反就是「跨任务占位」，评审会打回）**：
+
+1. `V2__m4_console.sql` 的**列与索引**必须在 Task 7/9/11 之前存在（Task 1）。
+2. `ConfigInvalidateTopology.CHANNEL` 与 `ConfigInvalidateCodec` 的**载荷格式**必须在 Task 2 落地，Task 4 才能订阅 —— 两端共用同一常量，**不许各写一份字面量**。
+3. `ConsoleToken`/`ConsoleClaims` 的**字段与角色常量**必须在 Task 5 落地，Task 6 才能签发/校验；Task 16 的前端只读 `role` 字符串。
+4. `QuotaScript`/`QuotaKeys`/`QuotaPeriod`/`QuotaDecision` 的**签名与 Lua 的 ARGV 顺序**必须在 Task 12 落地，Task 13/14/15 才能用；**Lua 脚本与键布局只有一份实现**（与 `RateLimitScript` 同一纪律）。
+5. `/api/**` 的**错误码与信封**（`UNAUTHORIZED` / `FORBIDDEN` / `CONFIGURATION_ERROR` / `INVALID_PARAM` / `NOT_FOUND`）在 Task 6 定型，后续所有控制器复用同一套 `ErrorCode`，**不要新增私有错误体**。（`ErrorCode` 现有成员：`INVALID_PARAM(400)`、`UNAUTHORIZED(401)`、`FORBIDDEN(403)`、`NOT_FOUND(404)`、`RATE_LIMITED(429)`、`QUOTA_EXCEEDED(429)`、`UPSTREAM_ERROR(502)`、`INTERNAL_ERROR(500)`；M4 **只新增** `CONFIGURATION_ERROR(500)`。注意 `QUOTA_EXCEEDED` 是 **admin 信封**里的码，数据面用的是 `insufficient_quota`，两者别混。）
+
+---
+
+## 附录 C：M4 结束时「完成」的定义
+
+1. 全反应堆 `mvn -B clean test` 绿，且报告**实测**数字（基线 501，M4 之后必然更多）；`aihub-gateway` 的测试仍然不依赖 Docker / 活 Redis / 活 broker。
+2. 一条迁移（V2）、一个依赖（`spring-security-crypto`）之外，**没有任何越界改动**；`SchemaMigrationTest` 的迁移清单断言是**显式**的。
+3. 「控制面配置 → 数据面生效全链路打通」在真实 compose 全栈上**可重复演示**：通过控制台/API 新建或修改一条渠道/路由，数据面在**秒级**内可见（对比 A1 的 101 秒），**并且**过程中不需要人工删 `aihub:config:snapshot`。
+4. 配额链路可演示：设一个小的 `token_limit` → 超额请求拿到 **429 `insufficient_quota`**（数据面 OpenAI 形状，**不是** `rate_limit_exceeded`）→ 对账任务按 `request_log` 重算 `billing_daily` 并报告偏差。
+5. 审计可演示：每一次写操作都有 `audit_log` 行，且**任何一行都不含**明文密钥 / 口令 / 密文 / 令牌。
+6. 文档三处同步：`docs/CONVENTIONS.md`（新错误码 + 控制台/配额小节 + 迁移纪律）、`README.md`（做了什么 + 怎么用管理台 + 已知边界）、设计文档（§6.2 的 `QUOTA_EXCEEDED` 标注为已被 `insufficient_quota` 取代）。
+7. 所有**残余**都写进 README 的已知边界（配额 fail-open、吊销本地 ≤30s、对账只报告不自动改账、`billing_daily.cost = 0`、`localStorage` 令牌的 XSS 代价、A3 的 2 秒 Redis 超时、A6 未鉴权不限流、A7 的 404/405 形状）。
+---
+
+## 附录 E：独立评审的处置记录（**逐条**，含未修的）
+
+本计划在提交后经过一次独立评审（只读、逐条对代码与 jar 核验），结论是 **Needs work before execution：7 Critical / ~15 Important**。下面把每一条都记下来 —— **包括没有修的**。评审的意义在于「没有一个发现被静默丢掉」。
+
+### E.1 Critical（7 条，全部已修）
+
+| # | 发现 | 处置 |
+|---|---|---|
+| C1 | `ServerWebExchangeUtils.cacheRequestBodyAndRequest` **在 Spring 6.2.19 里不存在**（`spring-web` 连 `web/server/support/` 包都没有），D17 与 Task 13 的片段编译不过；而且原片段的顺序是「释放 join 出来的 buffer，再把**原** exchange 传下去」——正好会把请求体在转发前 free 掉 | 改成 `DataBufferUtils.join` → 复制进 `byte[]` → **先复制再释放** → `ServerHttpRequestDecorator` + `exchange.mutate().request(...).build()` → 把**装饰过的** exchange 传下去。Task 13 的片段与 D17 一起改 |
+| C2 | 给 `GatewayConfigProperties`（record）加第 5 个分量会打断 **8 处** `new GatewayConfigProperties(...)`（`ConfigCacheTest` 7 + `ModelsControllerTest` 1），而那两个文件不在 Task 4 的 Files 里，Step 4 却要求 `ConfigCacheTest` 绿 | 新增独立的 `ConfigInvalidateProperties`（`aihub.config.invalidate-subscription`）+ `ConfigInvalidateSubscriptionConfig`，**不碰** `GatewayConfigProperties` |
+| C3 | Task 3 三重失败：① 水位持久化后 `ConfigSnapshotServiceTest` 的「空库 version=0」会红；② 测试里的构造器签名（5 参）与既有的 5 参不同、与计划的 6 参也不符；③ **在 `@Transactional(readOnly = true)` 的 `snapshot()` 里写库** → MySQL + Connector/J 的 `readOnlyPropagatesToServer` 默认开 → `ERROR 1792`，打坏的正是 `GET /internal/config/snapshot` | ① 新增 `ConfigSnapshotServiceTest` 的 `@BeforeEach` 显式归零水位 + 用例更名，理由写在测试里；② 明确声明构造器变 6 参并列出必须跟改的调用方；③ **`currentVersion()` 变纯读**，水位只在写入路径（`bumpAndPublish`）抬升 —— D5 一并改写，并登记「raw SQL 删除仍可能回退一次」的残余 |
+| C4 | Task 1 会让 `SchemaMigrationTest` 留下红：`allTenTablesExist` 断言**恰好 10 张表**；期望的 `Tests run: 3` 也错（会是 6）；还说「保留 Flyway 调用不变」——那个类**根本没有** Flyway API，它用 `JdbcTemplate` 数历史表 | 三处一起改：断言改成 JDBC 查 `flyway_schema_history`（不引 Flyway API）、`allTenTablesExist` → `allTwelveTablesExist`（10→12）、期望值改 6；并撤掉「钉住校验和」的说法（只钉 version + description） |
+| C5 | Task 17 的 compose 验收**跑不起来**：`docker-compose.yml` 的 env 是**显式白名单**，没有 `AIHUB_CONSOLE_SECRET` → 容器里 secret 为空 → D16 fail-closed → 登录 500，第 2–7 步全废 | 全局约束新增一条：Task 17 **必须**改 `docker-compose.yml`（admin 加 `AIHUB_CONSOLE_SECRET`；gateway 加 `AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION`，验收第 4 步的反证要用它）+ `.env.example` 加生成方法；除这三处外不许再动 compose |
+| C6 | Task 13 的校正点**不存在**：`ChatRelayController` 看不到 `usage`（`UsageCapture` 是 `RelayMetering` 内部物，usage 只在 `metering.toEvent(signal)` 被物化，那句在 `doFinally`） | 新增 `QuotaCorrector` 并**明确改法**：把 `doFinally` 那一行展开成「`toEvent` → `publish`（既有行为不变）→ `quotaCorrector.correct(event)`」；File Structure 与 Task 13 的 Files 一并补上 |
+| C7 | `raiseTo` 的返回值断言**不可能同时成立**（ODKU 更新已存在行返回 2；Connector/J 默认 `useAffectedRows=false` 即置了 `CLIENT_FOUND_ROWS`，更新成相同值又返回 1）；`bumpAndPublish` 里用 affected rows 判断"发生了什么"的写法同样无意义 | Task 1 的用例改成**只断言值**的语义（并写明为什么不断言 affected rows）；`bumpAndPublish` 改成「先 `raiseTo(now)`、再读一次 `current()` 取 max」 |
+
+### E.2 Important（15 条）
+
+| # | 发现 | 处置 |
+|---|---|---|
+| I1 | Task 12 的 `reserve()` 把 `tokenLimit` 写死 1000，于是「0 = 不限」那条用例自相矛盾；两条用例还共用同一个 `(tenant, period)` 桶 | **已修**：`reserve(tenantId, estimatedTokens, tokenLimit)`；两个用例各用独立 `tenantId`（101 / 102） |
+| I2 | `QuotaFilter` 的阻塞 Redis 调用没有 `subscribeOn`，违反 `RateLimitFilter` 与 CONVENTIONS §6.6 的「判定整体在 LIMITER_SCHEDULER 上」 | **已修**：片段末尾加 `.subscribeOn(LIMITER_SCHEDULER)` 并写明理由（网关侧 Redis 超时仍是 2 秒） |
+| I3 | `QuotaResolver` 说「按 `tenant + api_key`」——但 `quota` 表**没有** `api_key_id` 列，D13 自己也说桶是租户级 | **已修**：File Structure 与 Task 13 的 Consumes 都改成 **`tenant_id + period`**，并加一句「别把配额和限流的两维搞混」 |
+| I4 | `channelKeyService.currentVersion()` 方法名不存在（真名 `currentKeyVersion()`） | **已修** |
+| I5 | 附录 B 列的 `VALIDATION_ERROR` 在 `ErrorCode` 里不存在（真名 `INVALID_PARAM`） | **已修**：改成 `INVALID_PARAM`，并顺手把 `ErrorCode` 现有成员与「admin 的 `QUOTA_EXCEEDED` ≠ 数据面的 `insufficient_quota`」写在同一条里 |
+| I6 | 登录的防枚举只做了一半：用户名不存在时**不跑** bcrypt，约 100 ms 的时序照样能枚举用户 | **已修**：Task 6 明确要求不存在时也对一个常量 dummy bcrypt 哈希跑一次 `matches` |
+| I7 | `ConsoleToken.verify` 声称「任何失败都抛 `IllegalArgumentException`」，但片段里的 Jackson `read(...)` 抛的是**受检**异常，漏出来就是 500 而不是 401；`sub` 与 `userId` 的映射也没写 | **已修**：Produces 里加「必须 `catch (RuntimeException \| JsonProcessingException)` 转 IAE」；载荷注释改成「固定五个字段，`sub` ↔ `userId` 写死这一对」 |
+| I8 | 两条测试在自己那个任务里不可能通过：Task 6 断言 `GET /console/index.html` 200（那些文件 Task 16 才有）；Task 4 的 `ApplicationContextRunner` 只喂了 `StringRedisTemplate`+`ConfigClient`，而 `RedisMessageListenerContainer` 需要 `RedisConnectionFactory`，且 `ConfigSubscriber` 是 `@Component` 不会被 `withUserConfiguration(ConfigConfig.class)` 注册 | **部分修**：Task 4 的接线测试改成**专用** `ConfigInvalidateSubscriptionConfig` + mock 的 `RedisConnectionFactory`/`ConfigSubscriber`，并加「关掉开关就没有 bean」的反向断言。**未修**：Task 6 的那条静态资源断言 —— 见 E.3 |
+| I9 | `invalidateAllCaches()` 把水位重置成 `NO_VERSION`，等于拆掉了「挡住在飞的旧回填重新毒化共享条目」的唯一护栏；而失效消息里的 `version` 只用于打日志 | **已修**：签名改成 `invalidateAllCaches(long version)`，水位**抬到消息里的版本**；用例改成「版本 5 的写入被拒、版本 9 的写入放行」 |
+| I10 | 三处已登记但无归属：① README 里「区分 503 与 key-not-found 的计数器」是 M4 待办；② 附录 A8 要求 M4 给 `ApiKeyView.UNUSABLE` 一个结论；③ **审计没有读取路径**（而审计是 M4 交付物） | ① **未做，登记为仍未做**（理由：网关到 M6 才开放 `/actuator/metrics`，今天没有暴露面；运维信号是 ERROR 日志 + 新增的 503 状态码）——README 的已知边界要保留这一条；② **已修**：Task 9 Step 3 明确删除该常量并同步 `ApiKeyToolingTest`（若删不掉就说明还有调用方，要在报告里给结论）；③ **已修**：Task 11 新增 `AuditQueryService` + `GET /api/audit`（强制 tenant + 时间范围、分页有上界） |
+| I11 | Task 15 的 UPSERT 没有任何 Mapper 方法承载；`VALUES()` 在 8.4 已 deprecated；`RequestLogQueryService.page` 的 mapper 方法与 `RequestLogView` 也没定义 | **已修**：UPSERT 定为 `BillingDailyMapper.recomputeDaily(from, to)`（并写明「行别名对 `INSERT ... SELECT` 有语法限制，先在真库上试，采用哪种要在报告里登记」）；`RequestLogView`/`AuditLogView` 与分页上界写进 Task 11；并补了「`usage_missing`/`client_disconnected` 是已知近似值，偏差计数天然包含它们」的口径提醒 |
+| I12 | Task 7 的 RED 测试用了 Task 8 才有的 `ChannelCreateRequest`/`ChannelView`，而 Task 7 排在前面；`AuditService.record` 里的 `MAPPER.writeValueAsString` 抛受检异常且未处理 | **已修**：Task 7 改用自己的事务探针（不依赖 Task 8），并显式要求 catch 受检异常 → `IllegalStateException` |
+| I13 | Task 9 把接口签名留到实现时决定（「先读代码再决定」），违反本计划自己的「无占位符」规则 | **已修**：Task 9 Step 3 给出 `ApiKeyCreateRequest`/`ApiKeyCreated`/`ApiKeyView` 与 `ApiKeyAdminService` 的完整签名，并把「生成逻辑只许有一份」写成硬约束 |
+| I14 | 相对 M3 计划（9078 行、每步都给完整代码），M4 把若干任务的 Step 2–4 收成一句话，测试草图里还出现 `post/get/jsonPath/read/postBytes/stubQuota/activeRowsFor/createTenantPolicy/TestSupport::get` 等未定义 helper，以及 `AbstractIntegrationTest` 并不提供的字段 | **部分修**：全局约束新增一条，写清 admin 集成测试的既有惯用法（`@SpringBootTest(RANDOM_PORT)` + `TestRestTemplate` + 显式 `HttpEntity`，基类是 `AbstractIntegrationTest`，它**不提供** `redis`/`upstream`/`container`/各 Mapper 字段），并明确「全文那些 helper 是**行为伪代码**，每个任务的 Step 1 必须落成真实的 `TestRestTemplate` 调用」。**残余（诚实说）**：M4 仍然刻意比 M3 更依赖实施者去写代码细节 —— 这是**有意的取舍**（把体积花在决策与验收判据上），但它要求实施者与评审者都更严格；如果执行时发现某个任务的接口不够定死，**按「跨任务占位」处理：停下来把它补进计划再继续**，不要临场发挥 |
+| I15 | `QuotaDecision.java` 没进顶层 File Structure；某行把「日志索引」标成 D11（D11 是 API Key 的显式 DEL）；Task 15 的依赖漏了 Task 11 | **已修**：三处都改（`QuotaDecision` 补进表里、索引改标 D1/索引在 V2、任务索引的 Task 15 依赖改成 `11, 12`） |
+
+### E.3 仍未修（**明确登记**，不要当成已经解决）
+
+1. **Task 6 的 `theConsoleAssetsAreNotBehindTheTokenFilter`**（I8 的后半）：它断言 `GET /console/index.html` 200，而那些文件到 Task 16 才存在。**执行到 Task 6 时**：把这条断言**删掉**（登录页的可访问性由 Task 16 的 `ConsoleStaticResourceTest` 覆盖），或者把 Task 16 的静态资源骨架前移到 Task 6 —— 二选一，并在报告里说明选了哪个。
+2. **I10①（503 vs key-not-found 的计数器）**：M4 不做，README 保留为 M4 之后仍未做项。
+3. **`audit_log.tenant_id` 可空、而 `AuditService.record(long tenantId, …)` 是原始类型**：`LOGIN_FAILURE` 这类没有租户的事件会写 `0` 而不是 `NULL`。执行时二选一：把参数改成 `Long` 并在登录失败时传 `null`，或保留 `0` 并在 README 登记「0 = 无租户上下文」。**必须选一个并登记**。
+4. **`QuotaEstimator` 的 `maxInMemoryBytes`**：它读请求体，而网关还有计量侧的捕获上限（`aihub.metering.max-capture-bytes`）。**上限必须小于计量侧上限**，否则控制器先失败、计量根本看不到这次请求。执行 Task 13 时确认这两个数字的关系并写进配置注释。
+5. **`MeteringSchedulingConfig`**：评审指出它可能只是 `@EnableScheduling`、`@Scheduled` 应当直接标在 job 上 —— Task 15 的 Files 里列了它；执行时若确实只是 `@EnableScheduling`，**不要**为了「让 Files 清单成立」而制造一次无意义改动（改动清单以实际需要为准，报告里说明即可）。
+6. **§10 的测试覆盖率目标（核心链路 ≥70%）** 在本计划里**没有被测量**：M4 收口时若时间允许，用 JaCoCo 量一次并写进 README；不允许在没有测量数据的情况下声称达成。
+
+### E.4 六条承重技术论断的评审结论（记录，供执行时参照）
+
+| # | 论断 | 结论 | 计划里的处置 |
+|---|---|---|---|
+| 1 | 分区表上 `ALTER TABLE request_log ADD KEY` | **对**（8.4 对二级索引是 in-place、不重建表、允许并发 DML）；但原caveat 里「不能在线加分区」那句是无关且错的 | 已改：caveat 只说「分区表加二级索引仍需 DDL 窗口，本机演示数据量下无影响」 |
+| 2 | Flyway 描述串是 `m4 console`、把断言改成 2 条是**加强** | **对**（count + version + description 是原断言的超集）；但**不**等于钉住校验和 | 已改：撤掉「校验和」的说法（E.1-C4） |
+| 3 | `cacheRequestBodyAndRequest` | **错**（不存在） | 已改成 `ServerHttpRequestDecorator`（E.1-C1） |
+| 4 | 配额 Lua 的原子性与「0 = 不限」 | **对**；返回形状可解析但**欠规格**（`List<Long>` 需 `Number.longValue()`；>2^53 的限额在 Lua double 下会丢精度；畸形 ARGV 会让脚本报错 → 过滤器 fail-open 静默失效） | 计划要求 `parse` 用 `Number.longValue()`；**执行时**：限额值做上界校验（例如 `<= 2^53`），并对「脚本返回非预期形状」单独计数（不要与「Redis 不可用」共用同一个降级计数器） |
+| 5 | HS256 控制台令牌 | **在其声明范围内成立**（算法服务端写死、不读请求 header、恒定时间比较、查 `exp`）；但**没有**密钥长度/熵下限（空串有处理，6 字符的弱密钥没有） | 计划要求：`aihub.console.secret` **长度 < 32 字符即启动 WARN 并拒绝登录**（与 `AesGcmChannelCipher` 在构造期拒绝 16 字节主密钥同一纪律）——执行任务 5/6 时落地，并各有一条用例 |
+| 6 | 对账 UPSERT 与 `uk_billing_daily` + UTC `DATE()` | **对**（幂等键正确、UTC 存储下 `DATE()` 就是 UTC 日期、WHERE 范围保留分区裁剪）；`VALUES()` 已 deprecated；近似行（`usage_missing`/`client_disconnected`）会被计入偏差 | 已改：mapper 方法 + 行别名/`VALUES()` 的处置 + 近似行口径（E.2-I11） |
+
+### E.5 评审提出的两条范围问题（登记，不偷偷扩也不偷偷砍）
+
+- **有 spec 依据但本计划未交付**：§6.2 的「修正并告警偏差」被 D12 降级为「只报告」（**已登记**，理由是对账任务自动改账会把因 DLQ 延迟而尚未补全的账改坏）；§10 的覆盖率目标未测量（E.3-6）。
+- **本计划构建了 §7.3 没列的端点**：`PUT /api/tenants`、`/api/routes` CRUD、`/api/rate-limits` CRUD、`/api/quotas` CRUD、`POST /api/channels/{id}/rotate-key`、`/api/api-keys/{id}/enable`、`DELETE /api/api-keys/{id}`。它们**有** §12（渠道/Key/租户管理）与 §6.1（密钥轮换）的依据，但评审指出其中 **`/api/api-keys/{id}/enable`、`DELETE` 与 `PUT /api/tenants` 对本里程碑的验收标准（控制面配置 → 数据面生效）价值最低**。**保留**它们（删除接口是密钥管理的常识性配套，且 Task 16 的界面不一定用到），但执行时**优先级排在能演示验收标准的链路之后**：如果时间不够，先交付 8/9/10/13/17，把 enable/DELETE 与 `PUT /api/tenants` 放到最后（并在报告里说明）。
+
+---
+
+## 附录 F：第二轮（复评后）的处置记录 —— 以及**仍未修**的部分
+
+第二轮是**窄口径复评**（只查：22 条修正是否真落进正文、这轮修改有没有引入新矛盾、E.3 的未修项是否登记得可接受、E.4 两条加强项是否落成任务要求）。结论是 **Needs another correction round**。
+它最有价值的发现是一类**我自己的模式性错误**：修正只写进了**任务正文**，而**决策表 / 架构段 / File Structure / 任务标题 / `git add` 清单**里留着旧话 —— 于是同一个事实在文档里有两种说法，而实施者会先读决策表（「实施者按此执行、不要自由发挥」）。
+
+### F.1 第二轮已修（逐条对应复评的编号）
+
+| 编号 | 问题 | 处置 |
+|---|---|---|
+| N1 | **架构（第 7 行）、D4 决策行、File Structure 的 `ConfigCache` 行、Task 4 标题与验收判据**仍写「**重置**写入水位」，而改后的正文要求「**抬到消息版本，绝不重置**」—— 决策表与实现自相矛盾 | 四处全部改口为「抬到失效消息里的版本（**绝不重置成 `NO_VERSION`**）」，D4 里补上理由（重置会拆掉挡在飞旧回填的唯一护栏） |
+| N2 | Task 4 的 RED 证据引用了**不存在**的用例名（旧版遗留） | 改成真实用例名 `invalidationDropsTheSharedEntryAndRaisesTheWatermarkToTheInvalidatedVersion`，并写清它红在哪两点 |
+| N3 | 装配的所有权三方冲突：D4/File Structure/Task 4 Step 3 说 `ConfigConfig`，而 Files/Interfaces/两个 context-runner 用例要求 **`ConfigInvalidateSubscriptionConfig`** | D4 的影响面、File Structure（换成两个新文件的行）、Step 3 的散文统一到 `ConfigInvalidateSubscriptionConfig`，并显式写「**不要**改 `ConfigConfig`」 |
+| N4 | `QuotaCorrector`（以及 `QuotaConfigProperties`/`QuotaConfig`）不在 gateway 的 File Structure 表里 —— 而附录 E 声称"一并补上" | **部分修**：`ConfigInvalidate*` 两个新文件已补进表里；**`QuotaCorrector`/`QuotaConfigProperties`/`QuotaConfig` 仍未补**（见 F.2） |
+| N5 | `GET /api/audit` 的两条链路不在 File Structure、不在任务索引、不在 Task 11 的 `git add` 里 → **两个新文件永远不会被提交** | **部分修**：Task 11 的 `git add` 已补上 `AuditQueryService.java` + `AuditController.java`；**File Structure 两张表与任务索引那一行仍未补**（见 F.2） |
+| N6 | Task 9 的 Interfaces 仍写着被取代的 `revoke(long apiKeyId, String reason)` | 改成 Step 3 里定死的那一组（`create/list/disable/enable/delete`），并注明「**不再有 `revoke(long, String)` 这个签名**」 |
+| N7 | Step 3 要求删 `ApiKeyView.UNUSABLE` 并改 `ApiKeyToolingTest`，但两者既不在 Files 也不在 `git add` 里 | 两处都补上 |
+| N8 | Task 3 要求改 `ConfigSnapshotServiceTest.java`，但 Step 5 的 `git add` 只 stage 了两个文件 | 已补 |
+| N9 | 全局约束要求改 `docker-compose.yml`，但 Task 17 的 Files 与 `git add` 都没有它 | 两处都补上（并写明不改它的后果：第 2–7 步在容器里全是 500/401） |
+| N10 | `禁止无界扫描（D11）` —— D11 是 API Key 的显式 DEL，标签错 | 改成「索引在 V2，见 D1」 |
+| N11 | Task 1 的水位用例断言**绝对值** `0`，而水位行活在 JVM 级共享容器里（Task 2/3 都会把它抬到 ~1.76e12）→ 全量跑必然因执行顺序变红 | 断言前**显式归零** `config_version`，并把隐患写进注释（与 `ConfigSnapshotServiceTest` 的 `@BeforeEach` 同一处理） |
+| N12 | Task 7 的 `auditLogMapper.selectCount(null)).isZero()` 是全表计数断言，共享容器 + Task 1/8/9/10 的审计写入让它依赖执行顺序 | 加注释说明正确做法（`@BeforeEach` 清空，或断言**增量**）—— 这条是**注释级**处置，见 F.2 的说明 |
+| N13 | Task 4 的接线测试给不出 `ConfigInvalidateProperties` bean，而 `@Bean` 需要它；`@ConfigurationProperties` record 必须被显式启用 | File Structure 行 + Step 3 散文都写明**必须带 `@EnableConfigurationProperties(ConfigInvalidateProperties.class)`** |
+| N14 | 「两种都行…只能选一种」的岔口，与钉死的 `invalidate()` 签名冲突 | **去掉岔口**：把签名定成 `invalidate(long version)`（Interfaces、两个测试调用、`ConfigSubscriber` 片段、`ConfigClient` 片段、File Structure 两行、任务索引一行，共 7 处一起改），并写明为什么水位必须来自消息里的版本 |
+| C3 ② 的一处错误陈述 | E.1-C3② 声称要"列出必须跟改的调用点"，但仓库里**没有**任何 `new ConfigSnapshotService(` 调用点（测试是 `@Autowired` 的），前提本身是假的 | Task 3 的 Interfaces 里加了**更正**，改成「加参数对调用点透明，真正要改的是那个测试的断言」 |
+
+### F.2 第二轮**仍未修**（必须明确，不许当成已解决）
+
+1. **N4 残余**：gateway 的 File Structure 表里没有 `QuotaCorrector` / `QuotaConfigProperties` / `QuotaConfig`（Task 13 的 Files 里有）。**执行 Task 13 时**：以 Task 13 的 Files 为准，并顺手把三行补进 File Structure 表（或接受"File Structure 是索引、Files 才是权威"这条口径，在报告里说明）。
+2. **N5 残余**：`AuditQueryService` / `AuditController` / `GET /api/audit` 还没进 File Structure 两张表与任务索引的 Task 11 那一行（`git add` 已补，所以**不会丢提交**）。
+3. **E.4 的两条加强项仍只在附录里，没有落成任务要求** —— 复评明确说这算缺陷（附录是记录，不是实施者找需求的地方）：
+   - **(a) 配额限额的上界校验**（Lua double 在 >2^53 会丢整数精度）**与「脚本返回形状异常」要单独计数**（不要和 `aihub.quota.degraded` 共用）：Task 12/13 正文里**没有**这条要求。
+   - **(b) `aihub.console.secret` 的最小长度/熵要求**（空串有 D16 处理，6 字符的弱密钥没有）：Task 5/6 正文里**没有**这条要求，也**没有**短密钥的测试用例。
+4. **E.3 的两条 caveat**：
+   - **Item 1**（Task 6 的 `theConsoleAssetsAreNotBehindTheTokenFilter` 在 Task 16 之前不可能通过）：**仍然只写在 E.3 里**，Task 6 的 Step 1 还列着它、Step 4 还要求它绿 —— 所以 Task 6 按字面**执行不了**。执行时按 E.3 的二选一处理，但**它本该写进 Task 6 的步骤**。
+   - **Item 4**（配额读体的上限必须小于 `aihub.metering.max-capture-bytes`）：同样只在 E.3 里，Task 13 的配置文字里没有。
+5. **N12 只是注释级处置**：Task 7 的断言本身仍是全表计数，执行时要么加 `@BeforeEach` 清理、要么改成增量断言 —— 目前只有注释在提醒。
+
+### F.3 结论与下一步
+
+第二轮把 **12 项新矛盾里的 9 项**（N1/N2/N3/N6/N7/N8/N9/N10/N11/N13/N14 + C3 的更正）真正落到了正文，剩下的 **5 条**（N4 残余、N5 残余、E.4 的两条、E.3 的两条 caveat、N12 的断言本体）都**明确列在上面**，没有一条是"以为改了其实没改"。
+
+**因此这份计划现在的状态是：Critical 全部落实、Important 全部落实或显式登记；剩下的都是「附录里有要求、任务正文里没有」这一类，需要第三轮把它们搬进正文。** 按本仓库的纪律，**第三轮窄口径复评（只查 F.2 这 5 条）之后才动手执行 Task 1** —— 因为 F.2 的第 3 条（配额上界与密钥长度）是**安全/正确性**要求，只写在附录里等于没有。
+
+### F.4 第三轮开工前的收口：F.2 那 5 条已全部搬进正文
+
+在开第三轮复评**之前**，F.2 列的 5 条已经逐条落到任务正文里（否则第三轮只会把 F.2 原样念一遍）：
+
+| F.2 条目 | 落到哪里 |
+|---|---|
+| 1. N4 残余：`QuotaCorrector` / `QuotaConfigProperties` / `QuotaConfig` 不在 File Structure | 已补进 gateway 的 File Structure 表；顺带把那句不准确的「`ChatRelayController` 拿到 `usage` 后校正」改成「`doFinally` 里 `publish` 之后调 `quotaCorrector.correct(event)`」 |
+| 2. N5 残余：审计读取链路不在表里/索引里 | `AuditQueryService`（aihub-service 表）、`AuditController`（aihub-web 表）、任务索引 Task 11 的交付物加 `GET /api/audit` |
+| 3a. E.4-(a)：配额限额上界 + 脚本形状异常独立计数 | **Task 12** 的 Produces 写明：`QuotaScript.parse` 用 `((Number) …).longValue()`、形状不对抛 `IllegalStateException`、限额 > **2^53** 被 `QuotaAdminService.update` 以 `INVALID_PARAM` 拒绝（含用例）；**Task 13** 的 Produces 写明 `aihub.quota.degraded`（Redis 不可用）与 **`aihub.quota.script_error`**（脚本形状异常）**必须分开计数** |
+| 3b. E.4-(b)：控制台密钥长度下限 | **Task 6** 写明：空串按 D16，**长度 < 32 字符同样 `CONFIGURATION_ERROR` + 启动 WARN**，并**必须有一条短密钥用例**（与 AES 主密钥构造期拒绝 16 字节同一纪律） |
+| 4a. E.3 caveat 1：Task 6 那条不可能通过的静态资源断言 | Task 6 的 Step 1 里**删掉**该用例，改成一条明确的要求（「本任务不要写 `/console/index.html` → 200；它属 Task 16」） |
+| 4b. E.3 caveat 4：读体上限与计量捕获上限的关系 | **Task 13** 的 Produces 写明 `aihub.quota.max-in-memory-bytes` **必须小于** `aihub.metering.max-capture-bytes` |
+| 5. N12：Task 7 的全表计数断言 | 断言改成**增量**（先记基线、再断言回滚后没有新增），不再依赖执行顺序 |
+
+于是第三轮复评的检查面变成「这 7 处是否真的在正文里 + 有没有引入新矛盾」。**注意：F.2 与 F.4 本身不构成"需求所在地"** —— 如果第三轮发现某条又只落在附录里，那就是同一类缺陷的重犯。
