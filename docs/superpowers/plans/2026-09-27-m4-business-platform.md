@@ -6,7 +6,7 @@
 
 **Architecture:** 控制面仍是 admin 独占 MySQL 真相源（决策 A 延续），gateway 仍然**不连数据库**。新增的三条链路：① **写路径**：`/api/**`（控制台令牌）→ 服务层（`aihub-service`）→ MySQL + **审计行** + **Redis Pub/Sub 失效广播**；② **失效路径**：gateway 订阅 `aihub:config:invalidate`，收到后**同时**清本地 Caffeine、**删共享 Redis 快照条目**、**把写入水位抬到失效消息里的版本（绝不重置）**，然后按需回源 admin —— 这是设计文档 §6.3 明文要求的机制，M3 因为「没有写入方」而按决策 16 推迟到本里程碑；③ **配额路径**：gateway 在鉴权之后、上游之前用 **Redis + Lua 原子预扣**（键 `aihub:quota:{tenantId}:{period}`），余额不足直接 **429 `insufficient_quota`**；拿到真实 `usage` 后**补扣/退回**差额；计量事件照旧经 MQ 落 `request_log`（幂等），每日 02:00 的对账任务按 `request_log` 重算 `billing_daily` 并与 Redis 计数比对（**只报告与告警，不自动改账**）。管理台是**零构建**的静态单页（vanilla JS + `fetch`，放在 `aihub-web` 的 `static/` 下），由 admin 自己伺服 —— 不引前端框架、不引 Spring Security 的过滤器链、不引 JWT 库。
 
-**Tech Stack:** Java 21（编译目标，运行于 JDK 25.0.2）、Spring Boot 3.5.16、Spring MVC（admin）+ WebFlux（gateway）、Spring Data Redis 7（Lettuce 同步 API）+ Lua + **Pub/Sub**、MyBatis-Plus 3.5.17、MySQL 8.4、Flyway、RabbitMQ 3.13、**`org.springframework.security:spring-security-crypto`（唯一新增生产依赖，只为 bcrypt 口令哈希）**、自研 HS256 控制台令牌（JDK `javax.crypto`，与既有 `InternalHmac` 同一手法）、JUnit 5 + AssertJ + Mockito、Testcontainers（admin 侧）、宿主 `com.sun.net.httpserver.HttpServer` 夹具 + WireMock（gateway 侧）、Maven 3.9.12。
+**Tech Stack:** Java 21（编译目标，运行于 JDK 25.0.2）、Spring Boot 3.5.16、Spring MVC（admin）+ WebFlux（gateway）、Spring Data Redis 7（Lettuce 同步 API）+ Lua + **Pub/Sub**、MyBatis-Plus 3.5.17、MySQL 8.4、Flyway、RabbitMQ 3.13、**`org.springframework.security:spring-security-crypto`（生产依赖之一，只为 bcrypt 口令哈希；另一处是 Task 2 裁决的 `io.micrometer:micrometer-core`，见全局约束的修订）**、自研 HS256 控制台令牌（JDK `javax.crypto`，与既有 `InternalHmac` 同一手法）、JUnit 5 + AssertJ + Mockito、Testcontainers（admin 侧）、宿主 `com.sun.net.httpserver.HttpServer` 夹具 + WireMock（gateway 侧）、Maven 3.9.12。
 
 ## Global Constraints
 
@@ -89,7 +89,7 @@
 
 ## File Structure
 
-M4 新增/修改的文件（`改` = 修改既有文件；**依赖变更只有一处**：`aihub-service` 加 `spring-security-crypto`；**迁移只有一条**：`V2__m4_console.sql`）：
+M4 新增/修改的文件（`改` = 修改既有文件；**依赖变更恰好两处**，都在 `aihub-service`、都由 Boot BOM 管版本：`micrometer-core`（Task 2 裁决）与 `spring-security-crypto`（Task 5）；**迁移只有一条**：`V2__m4_console.sql`）：
 
 ### aihub-common（main 作用域**仍然零第三方**）
 
@@ -1319,8 +1319,32 @@ void rotatingTheKeyReEncryptsToTheCurrentMasterKeyVersion() { /* rotate-key → 
 void aMalformedModelsJsonIsRejectedWithInvalidParam() { /* "not-json" → 400 + code=INVALID_PARAM（D14） */ }
 
 @Test
-void everyWritePublishesAnInvalidationMessage() { /* 用真 Redis 订阅，断言收到 channel.create / channel.update */ }
+void everyWritePublishesAnInvalidationMessage() {
+    // 用真 Redis 订阅，断言收到 channel.create / channel.update（**正向**）。
+    // ⚠️ 只写正向是不够的（Task 2 的独立评审把这一条标成里程碑级的洞）：**必须同时有反向用例**
+    // —— 见下面的 rolledBackWritePublishesNothingAndDoesNotRaiseTheWatermark。两条一起才构成
+    // 「提交后才发布」这个不变量；只有正向时，「发布发生在事务里」也能全绿。
+}
+
+@Test
+void rolledBackWritePublishesNothingAndDoesNotRaiseTheWatermark() {
+    // 造一个**必然回滚**的写：服务层方法写完渠道后抛异常 → 事务回滚。
+    long watermarkBefore = configVersionMapper.current();
+    assertThatThrownBy(() -> channelAdminService.createThenFail(request)).isInstanceOf(IllegalStateException.class);
+    // ① 频道上**一条消息都没有**（用真 Redis 订阅 + 有界等待，等不到才是通过）；
+    assertThat(received.poll(2, TimeUnit.SECONDS)).as("回滚的写绝不许发布失效消息").isNull();
+    // ② 水位**没有被抬高**（发布路径里的 raiseTo 也不许跑）。
+    assertThat(configVersionMapper.current()).isEqualTo(watermarkBefore);
+    // ③ 渠道也没落库（证明这次写真的回滚了，否则上面两条是假绿）。
+    assertThat(channelMapper.selectCount(null)).isZero();
+}
 ```
+
+> ⚠️ **机制必须在这里定死（Task 2 的评审要求「先命名机制」）**：Task 8 给 `ConfigChangePublisher`（Task 2 建的类，**本任务的 Files 必须列上它**）加一个方法
+> `void publishAfterCommit(String reason)`：若 `TransactionSynchronizationManager.isSynchronizationActive()`，
+> 就 `registerSynchronization(new TransactionSynchronization() { public void afterCommit() { bumpAndPublish(reason); } })`；
+> **没有活动事务时直接 `bumpAndPublish(reason)`**（并把这个分支写进 javadoc）。
+> 为什么必须 `afterCommit` 而不是在事务里调：`bumpAndPublish` 自己会**写数据库水位**；在事务里调、随后回滚，会让「已广播的版本 V」高于「持久水位」，而 Task 4 收到 V 之后会把网关的水位抬到 V —— 于是**真实但更旧的**快照会被 `writeRedis`/lastGood 双双拒绝，共享条目一直是空的、每个实例每轮 TTL 都要回源 admin，直到某次成功的写超过 V 才自愈（有界、能自愈，但**静默**）。Task 9/10 的写路径一律调 `publishAfterCommit(...)`，不许直接调 `bumpAndPublish`。
 
 - [ ] **Step 2: 跑它确认失败** → 404（`/api/channels` 未映射）
 
@@ -1358,6 +1382,7 @@ git commit -m "feat(console): tenant and channel CRUD with encrypted keys and in
 - Produces:
   - `POST /api/api-keys`（响应 `data.plaintextKey` **仅此一次**）、`GET /api/api-keys`、`POST /api/api-keys/{id}/disable`、`POST /api/api-keys/{id}/enable`、`DELETE /api/api-keys/{id}`
   - `ApiKeyAdminService.create(ApiKeyCreateRequest, Actor) : ApiKeyCreated`、`list(long tenantId) : List<ApiKeyView>`、`disable(long apiKeyId, Actor)`、`enable(long apiKeyId, Actor)`、`delete(long apiKeyId, Actor)` —— 三个写方法都要：改状态 + 审计 + **`redis.delete(ApiKeyCacheCodec.CACHE_KEY_PREFIX + keyHash)`**（**不再有 `revoke(long, String)` 这个签名**，见 N6 的处置：以 Step 3 里定死的那一组为准）
+    - **每个写方法都要发布失效**（D11：API Key 的停用/启用/删除也必须广播）：调 `configChangePublisher.publishAfterCommit("apikey.disable")` 这一族 reason，**不许直接调 `bumpAndPublish`**（机制与理由见 Task 8 的定死说明）。因此**本任务的 Files 必须列出 `aihub-service/.../config/ConfigChangePublisher.java`**（Task 2 建的类，这里加调用不改它）。Task 2 的独立评审点名：Task 9 的 Interfaces 此前**完全没提**发布，这就是那条要求漏掉的地方。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1462,7 +1487,13 @@ void updatingATenantPolicyDeactivatesThePreviousActiveRowForThatDimension() {
 void aKeyLevelPolicyAndATenantLevelPolicyCoexist() { /* 两个维度互不干扰 */ }
 
 @Test
-void bothWritesPublishAnInvalidationMessage() { }
+void bothWritesPublishAnInvalidationMessage() {
+    // **不许留空占位**（Task 2 的评审点名：空 `{ }` 的用例是假绿）。两条断言都要：
+    // ① 建一条路由 → 频道上收到 route.create；② 改一条租户级策略（先停用旧行、再插新行）→
+    //    收到 rate_limit.update，且**只收到一条**（一次写 = 一次广播）。
+    // 反向那一半由 Task 8 的 rolledBackWritePublishesNothingAndDoesNotRaiseTheWatermark 覆盖，
+    // 这里可以只做正向；但**必须**断言消息内容里的 reason 与 version，而不是只断言"收到了东西"。
+}
 ```
 
 - [ ] **Step 2–4: 失败 → 实现 → 通过**
