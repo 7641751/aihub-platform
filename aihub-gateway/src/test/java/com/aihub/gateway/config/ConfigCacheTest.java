@@ -10,6 +10,7 @@ import com.aihub.common.config.ConfigSnapshotCodec;
 import com.aihub.common.config.ModelRouteDescriptor;
 import com.aihub.gateway.admin.AdminClient;
 import com.aihub.gateway.upstream.UpstreamProperties;
+import com.github.benmanes.caffeine.cache.Ticker;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
@@ -18,7 +19,11 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import reactor.core.publisher.Mono;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
@@ -26,6 +31,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -113,6 +119,42 @@ class ConfigCacheTest {
 
     private ConfigClient client(AdminClient adminClient) {
         return new ConfigClient(cache(), adminClient, upstream, properties, registry);
+    }
+
+    /**
+     * 可推进的假时钟：{@code ConfigCache} 的 Caffeine TTL（{@link Ticker}，纳秒）与
+     * {@code ConfigClient} 的冷却窗口（{@link Clock}，毫秒）读的是**同一个**计数器。
+     *
+     * <p>它只服务于那些「必须观察到某个 TTL 窗口**之内**的状态」的用例：用真实时钟写这种断言等于
+     * 把用例的成败交给调度器（GC / CI 负载 / 整反应堆并发）。推进是显式的 —— 测试说「150 ms 过去了」
+     * 才是真的过去了，而不是「希望 150 ms 里没有别的线程抢走 CPU」。
+     */
+    private static final class FakeClock extends Clock {
+
+        private final AtomicLong millis = new AtomicLong();
+
+        Ticker ticker() {
+            return () -> millis.get() * 1_000_000L;
+        }
+
+        void advance(Duration duration) {
+            millis.addAndGet(duration.toMillis());
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return Instant.ofEpochMilli(millis.get());
+        }
     }
 
     /**
@@ -534,25 +576,31 @@ class ConfigCacheTest {
     }
 
     /**
-     * {@code invalidate()} 只丢本地层：本地副本与 Redis 的版本**相同**（渠道不同）时，
-     * 失效之后必须重新读到 Redis 的那一份。
+     * 失效必须**真的丢掉本地层**：本地副本与 Redis 的版本**相同**（渠道不同）时，失效之后仍然
+     * 服务那份陈旧的本地副本，就说明「失效」是空实现。
+     *
+     * <p>{@code invalidate(long)} 现在还会删共享条目并把水位抬到该版本（D4）—— 那两半由
+     * {@code ConfigInvalidateContractTest} 钉住，**不在这里**断言：Mockito 的普通桩不会因为
+     * {@code delete()} 而改变 {@code get()} 的返回值，用它证明「共享条目被删掉了」是假的。
+     * 本用例因此只量本地层让位（以及「让位之后不会再把失效前那份答出去」）。
      *
      * <p>brief 原本的断言是 {@code verify(values, atLeast(2)).get(REDIS_KEY)} —— 那个断言**不会失败**：
-     * 每次 {@code current()} 都要做一次版本探测，所以哪怕 {@code invalidate()} 是空实现，
+     * 每次 {@code current()} 都要做一次版本探测，所以哪怕 {@code invalidate} 是空实现，
      * 两次读也一定是 2 次 {@code get}。而且那个版本号本身是错的（原用例只调了一次
      * {@code current()}，压根达不到 2 次）。这里改成直接量**本地层本身**是否被清掉：
      * 版本号刻意与 Redis 相同，{@code fromRedis.version() > local.version()} 不成立，
      * 于是「没有真的失效」就一定会拿着陈旧的本地副本答下去。
      */
     @Test
-    void invalidateDropsTheLocalLayerOnly() {
+    void invalidationDropsTheLocalCopySoTheStaleLocalSnapshotIsNeverServedAgain() {
         // Redis 里是 v5/id=22；本地被塞进同样 v5 但渠道不同的陈旧副本。
         when(values.get(ConfigCache.REDIS_KEY)).thenReturn(ConfigSnapshotCodec.encode(snapshot(5L, 22L)));
         ConfigCache cache = cache();
         cache.putLocal(snapshot(5L, 99L));
         ConfigClient client = new ConfigClient(cache, adminReturning(Optional::empty), upstream, properties, registry);
 
-        client.invalidate();
+        // 消息里带的版本就是这份共享条目的版本（5）：清本地、删共享条目、水位抬到 5。
+        client.invalidate(5L);
 
         assertThat(cache.local()).as("invalidate() 必须清掉本地层").isEmpty();
 
@@ -815,23 +863,34 @@ class ConfigCacheTest {
      * {@link #olderSnapshotNeverOverwritesANewerOneInEitherCacheLayer} 钉住，本修复没有放宽它。
      */
     @Test
-    void equalVersionIsRewrittenToRedisAfterBothCacheLayersLapse() throws Exception {
+    void equalVersionIsRewrittenToRedisAfterBothCacheLayersLapse() {
         when(values.get(anyString())).thenReturn(null);
         AtomicInteger adminCalls = new AtomicInteger();
         GatewayConfigProperties shortLived = new GatewayConfigProperties(Duration.ofMillis(80),
                 Duration.ofMinutes(10), 300, Duration.ofMillis(80));
-        ConfigCache cache = cache(shortLived);
+        // 假时钟：Caffeine 的本地 TTL 与 ConfigClient 的冷却窗口接在**同一个**读数上。
+        //
+        // 为什么必须这样：本用例的判别点是「两级缓存都过期之后，同一个版本必须被重新写回 Redis」
+        // （等号放行，三次复审修复 1）。用真实时钟时它有两个互相拉扯的时间要求 —— 先要 80 ms TTL 与
+        // 80 ms 冷却窗口**都**过去（否则第二跳根本到不了 admin），然后还必须在**紧接着的 80 ms 之内**
+        // 观察到刚填回本地的那个条目（旧断言 `assertThat(cache.local()).isPresent()`）。
+        // 后一半是纯运气：任何 ≥80 ms 的停顿（GC、CI 负载、整反应堆并发）都会把它翻成空。
+        // M4 Task 1 的全量跑里实测红过一次（FAIL/PASS/PASS），机制就是这一条。
+        // 推进假时钟取代 `Thread.sleep(150)`，断言一条都没有放宽。
+        FakeClock clock = new FakeClock();
+        when(redis.opsForValue()).thenReturn(values);
+        ConfigCache cache = new ConfigCache(redis, shortLived, clock.ticker());
         ConfigClient client = new ConfigClient(cache, adminReturning(() -> {
             adminCalls.incrementAndGet();
             return Optional.of(snapshot(10L, 44L)); // 控制面没有变化：每次都是同一个 v10
-        }), upstream, shortLived, registry);
+        }), upstream, shortLived, registry, clock);
 
         assertThat(client.current().version()).as("第一次读：回源并回填两级").isEqualTo(10L);
         verify(values).set(eq(ConfigCache.REDIS_KEY), eq(ConfigSnapshotCodec.encode(snapshot(10L, 44L))),
                 eq(shortLived.snapshotTtl()));
 
         // 本地 80 ms TTL 与 80 ms 冷却窗口都过去（Redis 那份按 fixture 也已经读空）。
-        Thread.sleep(150L);
+        clock.advance(Duration.ofMillis(150));
         assertThat(cache.local()).as("前置条件：本地副本必须已经过期").isEmpty();
         clearInvocations(values);
 

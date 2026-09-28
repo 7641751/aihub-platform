@@ -163,7 +163,9 @@ class FailoverRelayTest {
         for (long channelId : new long[]{11L, 12L, 13L, 14L}) {
             circuitBreaker.clear(channelId);
         }
-        configClient.invalidate();
+        // 夹具复位（不是广播）：0 低于本夹具 admin 会给出的任何版本（它每次 +1），因此既清掉两级缓存
+        // 又不会挡住紧接着的回填。生产路径是 ConfigSubscriber 传进来的**消息版本**（D4）。
+        configClient.invalidate(0L);
     }
 
     /** 任何仍在等放行的握手都要放掉：假上游只有一条 dispatch 线程，留着会拖住后面的用例。 */

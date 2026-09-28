@@ -4,6 +4,7 @@ import com.aihub.common.config.ConfigSnapshot;
 import com.aihub.common.config.ConfigSnapshotCodec;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Ticker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -16,7 +17,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * —— 回源、singleflight 与版本比对都在 {@link ConfigClient} 里，这样本类只关心「怎么存取」。
  *
  * <p>本地只有**一个** key（整个快照是一份文档），因此 Caffeine 的 {@code maximumSize} 只是形式上的
- * 兜底；真正的失效手段是 TTL 与 {@link #invalidateLocal()}。
+ * 兜底；真正的失效手段是 TTL 与两个失效入口（{@link #invalidateLocal()} /
+ * {@link #invalidateAllCaches(long)}，后者的语义见那条 javadoc）。
  *
  * <p>Redis 侧用 {@link ConfigSnapshotCodec} 的分隔符载荷（决策 4），而不是 JSON：
  * 「缓存载荷」与「本地载荷」共用一份编解码只需维护一个转义器。**这不是跨服务契约**
@@ -62,11 +64,26 @@ public class ConfigCache {
     private final AtomicLong observedRedisVersion = new AtomicLong(NO_VERSION);
 
     public ConfigCache(StringRedisTemplate redis, GatewayConfigProperties properties) {
+        this(redis, properties, Ticker.systemTicker());
+    }
+
+    /**
+     * 测试专用接缝：本地 TTL 的读数改由注入的 {@link Ticker} 提供。
+     *
+     * <p>它存在的理由是**一条真实的时间脆点**：`ConfigCacheTest` 里有一条用例必须观察到
+     * 「一个刚写入、TTL 只有 80 ms 的本地条目」，而用真实时钟做这件事意味着任何 ≥80 ms 的停顿
+     * （GC、CI 负载、整反应堆并发跑）都会把它翻成空 —— 那条用例实测在全量跑里红过一次
+     * （FAIL/PASS/PASS）。推进假时钟能把它变成**确定**的，而不必放宽任何断言。
+     *
+     * <p>生产走 {@link Ticker#systemTicker()}（单调的纳秒读数），与改动前完全一致。
+     */
+    ConfigCache(StringRedisTemplate redis, GatewayConfigProperties properties, Ticker ticker) {
         this.redis = redis;
         this.properties = properties;
         this.local = Caffeine.newBuilder()
                 .maximumSize(Math.max(1, properties.maxLocalSnapshotSources()))
                 .expireAfterWrite(properties.localTtl())
+                .ticker(ticker)
                 .build();
     }
 
@@ -86,6 +103,31 @@ public class ConfigCache {
 
     public void invalidateLocal() {
         local.invalidateAll();
+    }
+
+    /**
+     * 失效的**完整**含义：本地、共享条目、写入水位三者一起动。
+     *
+     * <p>只清本地是 M3 登记的缺口：紧接着的 {@code resolve()} 会读到 Redis 里**同样陈旧**的
+     * 共享条目并采用它，于是「配置变了」这个信号对多实例部署完全没有效果（实测 101 秒仍不可见）。
+     *
+     * <p><b>水位要抬到消息里的版本，而不是重置成 {@code NO_VERSION}</b>：重置会拆掉
+     * 「挡住在飞的旧回填把刚删掉的陈旧条目写回去」的唯一护栏 —— 那等于让这次失效白做。
+     *
+     * @param version 失效消息里带的版本（权威的"控制面已经到过这里"的证据）
+     */
+    public void invalidateAllCaches(long version) {
+        local.invalidateAll();
+        // **先抬水位、再删条目**（顺序是承重的）：水位一旦抬到 version，任何比它旧的**在飞回填**
+        // 都会被 writeRedis 挡住；反过来的顺序（先删、后抬）留出一个窗口，一条更旧的回源结果可以
+        // 在两者之间把刚删掉的陈旧条目写回共享缓存 —— 那正是这条护栏要挡的东西。
+        observedRedisVersion.accumulateAndGet(version, Math::max);
+        try {
+            redis.delete(REDIS_KEY);
+        } catch (RuntimeException e) {
+            // 删不掉只是「共享那一层没清干净」：本地已失效、水位已抬，回源仍会写回新版本。
+            log.warn("删除共享配置快照失败（本地已失效，回源仍会写回新版本）: {}", e.toString());
+        }
     }
 
     /**

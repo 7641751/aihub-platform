@@ -13,6 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Mono;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -64,9 +65,12 @@ import java.util.concurrent.atomic.AtomicReference;
  * <b>名额必须在每一个终态（成功 / 空 / 异常 / 取消超时）上释放</b> —— 只在成功时释放会让
  * 「第一次回源失败」的那次空信号被永久重放，实例再也回不到 admin（详见 {@link #refresh()}）。
  *
- * <p><b>没有 Pub/Sub 失效监听器（决策 16）</b>：M4 之前没有发布方，写了就是一条永远不执行的
- * 死路径，只能靠「直接调监听器」自证。M3 的收敛手段是**版本比对 + TTL**
- * （{@link #invalidate()} 因此只是将来监听器的挂载点，当前无人调用）。
+ * <p><b>主动失效（D4，M4 接通）</b>：{@link ConfigSubscriber} 订阅
+ * {@code aihub:config:invalidate}，收到一条有效消息后调 {@link #invalidate(long)}。失效必须
+ * **同时**清本地层、删共享条目 {@link ConfigCache#REDIS_KEY}、并把写入水位抬到消息里的版本
+ * （见 {@link ConfigCache#invalidateAllCaches(long)}）—— 只清本地是 M3 登记的缺口
+ * （{@code docs/CONVENTIONS.md} §6.6 记的 10 分钟上界就是这么来的）。M3 的兜底收敛手段
+ * 「版本比对 + TTL」仍然保留。
  *
  * <p><b>线程模型</b>：{@link #current()} 会被 event loop（过滤器/控制器）调用，而
  * {@code AdminClient} 是 WebClient（异步，不阻塞）；Redis 侧只有一次同步 get/set，因此这里
@@ -108,6 +112,8 @@ public class ConfigClient {
     private final UpstreamProperties upstream;
     /** 回源冷却窗口（{@code aihub.config.refresh-cooldown}）与两级缓存的 TTL 都在这里。 */
     private final GatewayConfigProperties properties;
+    /** 时间基准（冷却窗口与降级日志节流）。生产是 {@link Clock#systemUTC()}，测试可注入假时钟。 */
+    private final Clock clock;
     private final AtomicReference<Mono<ConfigSnapshot>> inFlight = new AtomicReference<>();
     /**
      * **永不失效**的最近一次成功快照（决策 6 的「哪怕已过期」）。
@@ -125,9 +131,9 @@ public class ConfigClient {
     private final Counter refreshedCounter;
     private final Counter refreshFailuresCounter;
     /**
-     * 下一次允许回源的最早时刻（{@code System.currentTimeMillis()} 基准），`0` = 立即可回源。
+     * 下一次允许回源的最早时刻（{@link #clock} 基准），`0` = 立即可回源。
      * 在**每一次回源尝试开始时**推进，与这次尝试成功还是失败无关（见 {@link #markAttemptWindow()}）；
-     * {@link #invalidate()} 显式把它清回 `0`。
+     * {@link #invalidate(long)} 显式把它清回 `0`。
      */
     private final AtomicLong nextAttemptAt = new AtomicLong();
     /**
@@ -153,15 +159,32 @@ public class ConfigClient {
      */
     public ConfigClient(ConfigCache cache, AdminClient adminClient, UpstreamProperties upstream,
                         GatewayConfigProperties properties) {
-        this(cache, adminClient, upstream, properties, Metrics.globalRegistry);
+        this(cache, adminClient, upstream, properties, Metrics.globalRegistry, Clock.systemUTC());
     }
 
     public ConfigClient(ConfigCache cache, AdminClient adminClient, UpstreamProperties upstream,
                         GatewayConfigProperties properties, MeterRegistry registry) {
+        this(cache, adminClient, upstream, properties, registry, Clock.systemUTC());
+    }
+
+    /**
+     * 测试专用接缝：冷却窗口与降级日志节流的时间基准改由注入的 {@link Clock} 提供。
+     *
+     * <p>它存在的理由是**一条真实的时间脆点**：`ConfigCacheTest` 里那条「两级缓存都过期之后
+     * 同版本必须被重新写回 Redis」的用例，既要等本地 80 ms TTL 过期、又要等 80 ms 冷却窗口过去，
+     * 之后还必须在**下一个 80 ms 之内**观察到刚填回本地的条目。用真实时钟时，任何 ≥80 ms 的停顿
+     * 都会把那条断言翻成空（全量跑里实测红过一次）。把本地 TTL（{@code ConfigCache} 的
+     * {@code Ticker}）与这里的时间基准接到同一个假时钟上，整条用例就变成确定的 —— 断言一条不动。
+     *
+     * <p>生产走 {@link Clock#systemUTC()}，与改动前的 {@code System.currentTimeMillis()} 同源。
+     */
+    ConfigClient(ConfigCache cache, AdminClient adminClient, UpstreamProperties upstream,
+                 GatewayConfigProperties properties, MeterRegistry registry, Clock clock) {
         this.cache = cache;
         this.adminClient = adminClient;
         this.upstream = upstream;
         this.properties = properties;
+        this.clock = clock;
         this.refreshedCounter = registry.counter(REFRESHED_METRIC);
         this.refreshFailuresCounter = registry.counter(REFRESH_FAILURES_METRIC);
         // 版本号是「两级缓存是否收敛」唯一的对外信号：本地命中而 Redis 已经前进（或反之）
@@ -249,7 +272,7 @@ public class ConfigClient {
      * 以及要不要播报一条降级 WARN。
      */
     private boolean inCooldown() {
-        long now = System.currentTimeMillis();
+        long now = clock.millis();
         long blockedUntil = nextAttemptAt.get();
         if (blockedUntil == 0L || now >= blockedUntil) {
             return false;
@@ -387,7 +410,7 @@ public class ConfigClient {
 
     /** 把冷却窗口推后到「现在 + {@code refreshCooldown}」。只在这里写 {@link #nextAttemptAt}。 */
     private void markAttemptWindow() {
-        nextAttemptAt.set(System.currentTimeMillis() + Math.max(0L, properties.refreshCooldown().toMillis()));
+        nextAttemptAt.set(clock.millis() + Math.max(0L, properties.refreshCooldown().toMillis()));
     }
 
     /** 真正的回源 + 双回填。**只会被 singleflight 的赢家订阅一次**。 */
@@ -456,7 +479,7 @@ public class ConfigClient {
      * 日志的取舍绝不能变成锁。
      */
     private void logDegradedOncePerEpisode(String message, Object... arguments) {
-        long now = System.currentTimeMillis();
+        long now = clock.millis();
         boolean firstOfEpisode = degraded.compareAndSet(false, true);
         long last = lastDegradedLogAt.get();
         if (now - last < COOLDOWN_LOG_INTERVAL_MILLIS) {
@@ -499,20 +522,15 @@ public class ConfigClient {
     }
 
     /**
-     * 失效本地缓存，并**同时放行冷却窗口**：失效是「配置刚刚变了」的显式信号（未来的 Pub/Sub
-     * 监听器会用它，见决策 16），此时不该让一次陈旧的失败尝试挡住立刻重新回源。
+     * 收到失效广播时调用。
      *
-     * <p><b>登记的缺口：它今天其实带不来一次回源（三次复审记录，不修）</b>。本方法只清本地层，
-     * 紧接着 {@link #resolve()} 仍会读到 Redis 里那份**同样陈旧的**共享条目并采用它 —— 于是
-     * 调用方根本走不到回源，上面那句 {@code nextAttemptAt.set(0L)} 是空转的；Redis 的写入水位
-     * （{@code ConfigCache} 的 {@code observedRedisVersion}）也不会因此重置。**真正的失效必须
-     * 同时绕过/清掉二级缓存**（删除 {@code ConfigCache.REDIS_KEY}，或带上一个「忽略已知版本」的
-     * 标记，并把水位一起处理掉），否则多实例部署下「配置变了」这个信号只影响本进程的本地层。
-     * M4 之前没有发布方（决策 16），因此本轮只登记。
+     * @param version 失效消息里的版本。**它就是新的水位**：清掉共享条目之后，一个在飞的、
+     *                更旧的回源结果必须被 {@code writeRedis} 挡住，而唯一的挡板就是这个水位。
+     *                用本地的 {@code visibleVersion} 当水位是不够的 —— 它可能比控制面刚推进到的版本更旧。
      */
-    public void invalidate() {
+    public void invalidate(long version) {
+        cache.invalidateAllCaches(version);
         nextAttemptAt.set(0L);
-        cache.invalidateLocal();
     }
 
     /**

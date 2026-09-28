@@ -226,7 +226,9 @@ class WireMockChannelFaultInjectionTest {
         for (NamedStub stub : stubs) {
             circuitBreaker.clear(stub.channelId());
         }
-        configClient.invalidate();
+        // 夹具复位（不是广播）：0 低于本夹具 admin 会给出的任何版本，因此既清掉两级缓存
+        // 又不会挡住紧接着的回填。生产路径是 ConfigSubscriber 传进来的**消息版本**（D4）。
+        configClient.invalidate(0L);
     }
 
     // --- 用例 -------------------------------------------------------------

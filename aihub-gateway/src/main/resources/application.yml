@@ -56,6 +56,11 @@ aihub:
     # 两次回源尝试之间的最小间隔：抑制 admin 快速失败时的重试风暴（尝试一开始就推后窗口）。
     # 5s 与回源等待上限同量级，又比本地 TTL（30s）小一个数量级 —— 恢复后最多 5s 就能重新拿到快照。
     refresh-cooldown: 5s
+    # 配置失效订阅（D4）：生产默认**开**。它是「控制面配置 → 数据面生效」的主动失效通道
+    # （订阅 aihub:config:invalidate），关掉就退回 M3 的 TTL 收敛（最长 10 分钟）。
+    # Task 17 的验收用它做反证：把 AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION 设成 false，
+    # 变更应当重新退回「要等 TTL」的行为。
+    invalidate-subscription: ${AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION:true}
   # 数据面限流（仅 /v1/**）。默认开：限流是保护上游的手段，不该靠部署时记得打开。
   # 关掉它 = 完全不做判定（过滤器直接放行），桶的本机容量上界仍然保留。
   ratelimit:
