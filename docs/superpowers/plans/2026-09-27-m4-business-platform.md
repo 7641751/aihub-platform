@@ -705,6 +705,8 @@ git commit -m "fix(config): make the snapshot version monotonic with a persisted
 > ⚠️ **`ConfigCacheTest.equalVersionIsRewrittenToRedisAfterBothCacheLayersLapse`（约 842 行）是一个先存的真实时钟脆点**，M4 Task 1 的全量跑里实测到了它（第一次全量 `aihub-gateway` 只红这一条，单独重跑该模块 350/350 全绿，那个类三次 FAIL/PASS/PASS）。独立评审核实过：**不是 Task 1 造成的**（该文件在两个提交里 blob 一致，本次提交没碰网关任何文件）；机制是「第 842 行必须观察到一个**刚写入、TTL 只有 80 ms** 的本地条目」（`ConfigCache.java:69` 的 `expireAfterWrite(localTtl)`，测试把 localTtl/cooldown 都设成 80 ms），任何 ≥80 ms 的停顿都会把它翻成空（失败那次该用例耗 3.47 s，通过时约 1 s）。
 >
 > **本任务要把它变确定**（它正好改 `ConfigCache`/`invalidate` 这一段）：**首选**给 `ConfigCache` 注入 `Ticker`/`Clock` 并在测试里推进它，替掉 `Thread.sleep(150)`；**次选**断言那个**守卫**（版本比对/水位）而不是「一个 80 ms 的条目还在」。**禁止**用「允许重跑一次」或加长 sleep 来"修" —— 那只是把脆点藏起来，而 Task 17 的全量 `mvn clean test` 要引用这条证据。
+>
+> **第二个先存脆点（admin 侧，2026-09-28 实测）**：RedisTokenBucketIntegrationTest.concurrentRequestsNeverExceedBurst 在全量跑时因 RedisCommandTimeoutException: Command timed out after 500 millisecond(s)（evalSha）红了，单独跑 11/11 绿、全量重跑也绿。独立评审核实：**不是超发**（它的真断言是 llowed == burst / denied / Redis 侧 	okens == 0，而超时在 	ry 块里**先于**那些断言发生，所以报的是「500 ms 内没拿到结果」而不是「多放了」），属负载/时序假红，且与 Task 3 无关。**归属：admin 侧的测试硬化（Task 15 收口时一并处理，或用 per-test 的更大 Redis 命令超时）** —— 不要塞给 Task 4（Task 4 是网关侧）。**两个脆点都不许用「放宽断言」或「允许重跑一次」来修**：isEqualTo(burst)、	okens == 0、以及网关那个 80 ms 新鲜度断言都必须原样保留。
 
 **Files:**
 - Create: `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigSubscriber.java`
