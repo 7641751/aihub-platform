@@ -435,7 +435,12 @@ void roundTripsVersionAndReason() {
 void escapesTheDelimiterAndNewlinesInTheReason() {
     var msg = new ConfigInvalidateMessage(42L, "weird|reason\\with\nnewline\r");
     String wire = ConfigInvalidateCodec.encode(msg);
-    assertThat(wire.chars().filter(c -> c == '|').count()).as("分隔符必须只出现一次").isEqualTo(1);
+    // ⚠️ **不能数裸字符 `|`**：转义表把 `|` 变 `\|`，那里面**仍然含一个 `|`** —— 于是
+    // `filter(c -> c == '|').count()` 无论做不做转义都是 2，这个断言零判别力（Task 2 实测到并纠正）。
+    // 要数的是**未转义的分隔符**（跳过一个字符后遇到的第一个 `|`）：
+    assertThat(countUnescapedDelimiters(wire)).as("分隔符必须只出现一次").isEqualTo(1);
+    // 并且把线格式**钉成固定向量**（与 MeteringEventCodecTest 的字段序断言同一纪律）：
+    assertThat(wire).isEqualTo("42|weird\\|reason\\\\with\\nnewline\\r");
     assertThat(ConfigInvalidateCodec.decode(wire)).isEqualTo(msg);
 }
 
@@ -581,7 +586,7 @@ git commit -m "feat(config): add the config-invalidate Pub/Sub contract and the 
 ```
 
 **验收判据：** 频道名与线格式是**一份**实现（`aihub-common` 的常量 + codec），发布只在写成功后发生，发布失败**不**影响业务结果且有计数器与 WARN。
-**RED 证据：** codec 类不存在导致编译失败（契约缺失是硬红）；`escapesTheDelimiterAndNewlinesInTheReason` 若不做转义会红在「分隔符出现了两次」上（判别性）。
+**RED 证据：** codec 类不存在导致编译失败（契约缺失是硬红）；`escapesTheDelimiterAndNewlinesInTheReason` 的判别力由**变异**证明 —— 把 `escape` 关掉（`encode` 直接拼 reason）后该用例在这一行变红（`expected: 1L but was: 2L`），打开转义即绿。（**更正**：本计划此前把这条写成「若不做转义会红在『分隔符出现了两次』上」—— 那句话对旧断言不成立，旧断言数的是**裸 `|` 字符**，而 `\|` 里也有一个 `|`，所以两种实现下计数都是 2、零判别力。Task 2 实测发现，已改成数**未转义**分隔符 + 钉固定向量。）
 
 ---
 
