@@ -111,6 +111,17 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
     /**
      * 至少一次投递 + 幂等消费：同一份载荷投两次，库里只能有一行。
      * 反证：消费端若用 {@code now()} 生成 created_at，本用例会看到两行（Task 8 已用服务级用例证明）。
+     *
+     * <p><b>为什么不能靠"栅栏行出现 ⇒ 重复消息已经处理完"这条推理</b>：它隐含"队列是单消费者 FIFO"这条
+     * 假设。Testcontainers 的 broker 与队列是整个 JVM 共享的单例，而 Spring 的测试上下文缓存不关，
+     * 于是只要本类之前存在**另一个**装着 {@code @RabbitListener} 的活上下文，队列上就有**两个**消费者：
+     * 重复消息与栅栏消息可能被不同的消费者取走，"栅栏落库"就不再蕴含"重复消息的 INFO 已经打出来"。
+     * 实测（只用既有类、surefire 反序）该假设会以同一句断言变红 —— 那是**顺序**问题，不是幂等坏了。
+     *
+     * <p>所以这里对"重复消息的 INFO"改成**有界轮询**：{@code MeteringConsumer} 的 logger 是全局的，
+     * 挂在它上面的 appender 会捕获**任何**消费者实例打出的记录，所以"这条 INFO 真的出现了"仍然
+     * 只能是「重复消息到达了消费者并在消费端被幂等丢弃」。轮询等的是异步观测，不是放宽断言：
+     * 若重复消息**从未**被重新投递/消费，轮询到超时后断言照样红。
      */
     @Test
     void theSameEventTwiceInsertsExactlyOneRow() throws Exception {
@@ -121,20 +132,26 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
         awaitRows(requestId, 1, Duration.ofSeconds(10));
 
         // 挂 appender 到消费者**自己的** logger 上（机制与摘除理由见
-        // undecodablePayloadEndsUpInTheDeadLetterQueue / attachConsumerAppender）。窗口只包住
-        // 「重复投递 + 栅栏」这两条消息。
+        // undecodablePayloadEndsUpInTheDeadLetterQueue / attachConsumerAppender）。
+        // 窗口必须把**轮询与断言**一起包住：摘了 appender 再读，读到的是空列表而不是"记录没出现"。
         ListAppender<ILoggingEvent> appender = attachConsumerAppender();
         String fenceRequestId = "req-mq-idempotent-fence";
+        List<ILoggingEvent> duplicateConsumed;
         try {
             send(payload);   // 重复投递
 
             // 时序栅栏：重复投递之后再投一条**不同**的事件，并等它真的落库。
             // 只断言 count==1 是不够的 ——「第二条根本没投出去 / 消费链路已经停了」同样给出 count==1 的绿色，
             // 那样的绿色什么也没证明。栅栏消息能落库，证明重复投递之后链路仍在投递且仍在消费。
-            // 队列是单消费者 FIFO：栅栏行出现时，排在它前面的重复消息必然已经整条处理完（含它那条 INFO 日志），
-            // 所以下面读 appender 既不必按固定时长 sleep，也不会与消费者线程抢时间。
             send(MeteringEventCodec.encode(event(fenceRequestId, 1_800_000_001_777L)));
             awaitRows(fenceRequestId, 1, Duration.ofSeconds(10));
+
+            // 栅栏只证明**链路还活着**，证明不了**重复的那条消息本身到达过消费者**：「重复被消费并
+            // 幂等丢弃」与「重复压根没投出去（路由错 / 断链）」在 count==1 上是同一个观测值。
+            // 消费者对**首次**投递走 inserted=true 的 DEBUG 分支，只有 sink 报告「已落库」时才打这条 INFO，
+            // 因此该 INFO 记录的存在本身就是「重复消息到达了消费者、并在消费端被幂等丢弃」的直接证据。
+            // 有界轮询（而不是假设它此刻已经打完）：见方法注释。
+            duplicateConsumed = awaitInfoRecordsMentioning(appender, requestId, Duration.ofSeconds(10));
         }
         finally {
             detachConsumerAppender(appender);
@@ -144,12 +161,9 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
                 .as("时序栅栏：栅栏事件必须真的落库，否则说明这次绿色是「消息根本没被消费」")
                 .isEqualTo(1);
 
-        // 栅栏仍然证明不了**重复的那条消息本身到达过消费者**：「重复被消费并幂等丢弃」与
-        // 「重复压根没投出去（路由错 / 断链）」在 count==1 上是同一个观测值。
-        // 消费者对**首次**投递走 inserted=true 的 DEBUG 分支，只有 sink 报告「已落库」时才打这条 INFO，
-        // 因此该 INFO 记录的存在本身就是「重复消息到达了消费者、并在消费端被幂等丢弃」的直接证据。
-        assertThat(infoRecordsMentioning(appender, requestId))
-                .as("重复投递的消息必须真的到达消费者并在消费端被幂等丢弃（这条 INFO 只可能来自重复消费）")
+        assertThat(duplicateConsumed)
+                .as("重复投递的消息必须真的到达消费者并在消费端被幂等丢弃（这条 INFO 只可能来自重复消费）；"
+                        + "10 秒内没等到就说明重复消息没有被重新投递/消费，绿色无从谈起")
                 .isNotEmpty();
 
         assertThat(rows(requestId)).as("同一载荷投两次，只能有一行").isEqualTo(1);
@@ -267,6 +281,29 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
         return records(appender, Level.INFO).stream()
                 .filter(record -> mentionsRequestId(record, requestId))
                 .toList();
+    }
+
+    /**
+     * 有界轮询等那条 INFO 出现（MQ 是异步的，而且队列上可能不止一个消费者 —— 见
+     * {@code theSameEventTwiceInsertsExactlyOneRow} 的方法注释）。
+     *
+     * <p>轮询的依据不是"睡够时间"，而是"出现即可返回"：{@code MeteringConsumer} 用的是全局 logger，
+     * appender 会捕获**任何**消费者实例打出的记录，所以"等到了"这条事实本身仍然只可能来自
+     * 「重复消息真的被消费过」。找不到就返回空列表，由调用方断言红 —— 不允许把超时当成功。
+     */
+    private static List<ILoggingEvent> awaitInfoRecordsMentioning(ListAppender<ILoggingEvent> appender,
+                                                                  String requestId, Duration timeout)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        List<ILoggingEvent> found = List.of();
+        while (System.nanoTime() < deadline) {
+            found = infoRecordsMentioning(appender, requestId);
+            if (!found.isEmpty()) {
+                return found;
+            }
+            Thread.sleep(100);
+        }
+        return found;
     }
 
     private void drainDeadLetterQueue() {
