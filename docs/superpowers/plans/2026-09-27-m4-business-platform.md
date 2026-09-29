@@ -1070,7 +1070,7 @@ git commit -m "feat(console): add the HS256 console token with a server-pinned a
 - Modify: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/error/GlobalExceptionHandler.java`（**只改 javadoc**：`ErrorCode` 因本任务的 `CONFIGURATION_ERROR` 从 8 个常量变成 9 个，原注释「只有 8 个常量」失真）
 - Modify: `aihub-admin/aihub-service/src/main/java/com/aihub/service/console/ConsoleClaims.java`（**只改 javadoc**：只读口径含 `OPTIONS`，见 D10）
 - Modify: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/metering/MeteringConsumerIntegrationTest.java`（去掉「单消费者 FIFO」时序假设，换成有界轮询；见附录 G3）
-- Modify: `aihub-admin/aihub-service/src/test/java/com/aihub/service/console/ConsoleTokenTest.java`（补密钥归一化判别用例 + 恰好 32 字符可用性）
+- Modify: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ConsoleTokenTest.java`（补密钥归一化判别用例 + 恰好 32 字符可用性）。⚠️ **它在 `aihub-web` 的测试树里，不在 `aihub-service`**（`aihub-service/src/test` 整个目录不存在；`ConsoleTokenTest` 与 `ConsoleToken` 分属不同模块，同名包只是巧合）
 - Test: 新增一条**真 Spring 上下文**的空密钥集成用例（命名由实现者定，落在 `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/` 下；手工装配的 standalone MockMvc 不算，见附录 G4）
 
 **Interfaces:**
@@ -1209,7 +1209,6 @@ git add aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/SysUserEntity.j
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ \
         aihub-admin/aihub-web/src/main/resources/application.yml \
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/error/GlobalExceptionHandler.java \
-        aihub-admin/aihub-service/src/test/java/com/aihub/service/console/ \
         aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ \
         aihub-admin/aihub-web/src/test/java/com/aihub/admin/metering/MeteringConsumerIntegrationTest.java
 git commit -m "feat(console): add console login and the /api/** token filter with two roles"
