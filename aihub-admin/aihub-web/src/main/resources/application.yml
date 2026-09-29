@@ -58,6 +58,12 @@ aihub:
   # 渠道主密钥（AES-256，只来自环境变量；不落库、不进镜像、不打日志）。生成方法见 .env.example。
   channel:
     master-key: ${AIHUB_CHANNEL_MASTER_KEY:}
+  # 控制台令牌（D3/D16）。密钥与 TTL 都由 ConsoleAuthFilter（守 /api/**）与 ConsoleTokenService
+  # （签发/校验）读取；"是否可用"的判据只有一份（ConsoleTokenService.isSecretUsable）。
+  console:
+    # 控制台令牌的签名密钥：**只来自环境变量，刻意没有默认值**（空 = 门关着，见 D16）。
+    secret: ${AIHUB_CONSOLE_SECRET:}
+    token-ttl: 2h
   # 开发专用演示数据（两条同模型渠道 + 一条租户级限流策略 + 一条 key 级限流策略）。默认关闭：它是写入路径，
   # 不该在生产启动时自动改数据；真渠道的 base-url / 密钥必须由运维提供。
   # 打开方式见 README / .env.example：AIHUB_DEMO_SEED_ENABLED=true + 主密钥 + 两条渠道的明文密钥。
