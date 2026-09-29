@@ -904,7 +904,9 @@ git commit -m "fix(config): honour the invalidation broadcast, drop local+shared
   - `public record ConsoleClaims(long userId, long tenantId, String role, long issuedAtEpochSecond, long expiresAtEpochSecond)`
   - `ConsoleToken.issue(byte[] secret, ConsoleClaims claims) : String`
   - `ConsoleToken.verify(byte[] secret, String token) : ConsoleClaims`（**任何失败都抛 `IllegalArgumentException`**：格式 / base64 / 签名 / 过期 / claims 缺失或类型不对）
-    - ⚠️ **必须把一个 `catch (RuntimeException | JsonProcessingException e)` 包在解析段外面并转成 `IllegalArgumentException`**：Jackson 抛的是**受检**的 `JsonProcessingException`，忘了包就会让它穿透到过滤器外面变成 **500**，而契约要求的是 **401**（`ConsoleAuthFilter` 只接 `IllegalArgumentException`）。
+    - ⚠️ **必须把解析段整个包在 `catch` 里并转成 `IllegalArgumentException`，而且 catch 的类型是 `IOException`（不是 `JsonProcessingException`）**：`ObjectMapper.readTree(byte[])` 声明的是受检 `IOException`，而 `JsonProcessingException extends JacksonException extends IOException` —— 写成 `catch (RuntimeException | JsonProcessingException)` **编译不过**（Task 5 实测，`javap` 已证实）。漏了这一步，受检异常会穿透到过滤器外面变成 **500**，而契约要求 **401**（`ConsoleAuthFilter` 只接 `IllegalArgumentException`）。
+    - ⚠️ **密钥是配置故障，不是凭证故障**：签名密钥为 `null`/空时 `SecretKeySpec` 抛的是 `IllegalArgumentException`，但 `hmac` 会把它包成 **`IllegalStateException`** —— 这是**刻意**的（与 503-vs-401 同源：绝不把平台故障伪装成凭证错误）。因此：**token 级失败 → IAE；密钥问题 → ISE**，`verify` 的 javadoc 必须写清这个区分，且**两侧都要有测试**。另外密钥来自 `aihub.console.secret`（UTF-8 字节），**空/短密钥那一支由 Task 6 的过滤器与登录接口自己判**（D16），不要指望 `verify` 替它做。
+    - ⚠️ **`verify` 不校验 `role`**：它只返回载荷。未知角色必须由 Task 6 **fail-closed**（D10：只认 `ADMIN`/`VIEWER`，其余按无权处理）。同理 **`exp ≤ 2h` 不由 `verify` 保证** —— 没有最大存活期校验，**签发方必须自己封顶 TTL**。
   - 常量 `ConsoleClaims.ROLE_ADMIN = "ADMIN"`、`ConsoleClaims.ROLE_VIEWER = "VIEWER"`
 
 - [ ] **Step 1: 先验证依赖能拉到（**在写任何代码之前**）**
@@ -923,7 +925,10 @@ private static final byte[] SECRET = "m4-console-test-secret".getBytes(UTF_8);
 
 @Test
 void roundTripsClaims() {
-    ConsoleClaims claims = new ConsoleClaims(7L, 1L, ConsoleClaims.ROLE_ADMIN, 1_700_000_000L, 1_700_007_200L);
+    // ⚠️ **夹具必须是固定的「未来」常量**：原稿写的 1_700_000_000/1_700_007_200 是 **2023-11-14/15**，
+    // 相对本机时钟（2026）永远过期，`roundTripsClaims` 因此**永远不可能通过**（Task 5 实测：第一次 GREEN
+    // 就红在 "expired"）。用 4_000_000_000/4_000_007_200（= 2096-10-02 UTC）。过期用例仍用过去的常量。
+    ConsoleClaims claims = new ConsoleClaims(7L, 1L, ConsoleClaims.ROLE_ADMIN, 4_000_000_000L, 4_000_007_200L);
     assertThat(ConsoleToken.verify(SECRET, ConsoleToken.issue(SECRET, claims))).isEqualTo(claims);
 }
 
@@ -959,8 +964,12 @@ void aTokenSignedWithAnotherSecretIsRejected() {
 }
 
 @Test
-void aTokenWhoseHeaderClaimsAlgNoneIsRejectedBecauseTheAlgorithmIsServerSide() {
-    // 手工拼一个 alg:none 的令牌（签名段为空）—— 校验方**根本不看请求里的 header**
+void aThreeSegmentTokenWithAnAlgNoneHeaderIsRejectedBySignatureComparisonNotByShape() {
+    // ⚠️ **不要用「签名段为空」的拼法**：`header + "." + payload + "."` 在 Java 的 `String.split` 下
+    // 只切出 **2 段**（末尾空串被丢掉），于是它被三段式形状检查拒掉 —— **无论校验方看不看请求 header**。
+    // 这条用例因此是**空的**（Task 5 实测：变异体 9 条过 8 条，它照样绿）。真正判别的是下面这种：
+    // **三段齐全、header 声明 alg:none、签名段非空但无效（例如 3 字节）、载荷完全合法** ——
+    // 只有「看到 alg:none 就跳过签名比较」的实现才会放行它。先断言段数，再断言拒绝。
     String header = b64("{\"alg\":\"none\",\"typ\":\"JWT\"}");
     String payload = b64("{\"sub\":\"7\",\"tenantId\":\"1\",\"role\":\"ADMIN\",\"exp\":9999999999}");
     assertThatIllegalArgumentException().isThrownBy(() -> ConsoleToken.verify(SECRET, header + "." + payload + "."));
@@ -1038,7 +1047,7 @@ git commit -m "feat(console): add the HS256 console token with a server-pinned a
 ```
 
 **验收判据：** 令牌是 `header.payload.signature`；篡改载荷/签名、换密钥、过期、`alg:none` **全部**被拒；依赖从镜像可解析。
-**RED 证据：** 六个用例在类不存在时编译失败；其中 `aTokenWhoseHeaderClaimsAlgNone` 与 `roundTripsClaims` 在「校验方读请求 header」的错误实现下会红（判别性）。
+**RED 证据：** 六个用例在类不存在时编译失败（契约缺失是硬红）。判别力**要看哪条杀掉哪种变异**：`roundTripsClaims` 杀掉「签名输入里丢掉 `parts[0]`」的变异；`aThreeSegmentTokenWithAnAlgNoneHeader…` 杀掉「看到 `alg:none` 就跳过签名比较」的变异（Task 5 实测：该变异体 9 条过 8 条，只红在这一条）。（**更正**：本计划此前写「`aTokenWhoseHeaderClaimsAlgNone` 在『校验方读请求 header』的错误实现下会红」—— 那是**假的**：旧拼法只有 2 段，看不看 header 都会被形状检查拒掉，零判别力。已按上面的拼法改写。）
 
 ---
 
@@ -1068,6 +1077,10 @@ git commit -m "feat(console): add the HS256 console token with a server-pinned a
   - 请求属性 `ConsoleAuthFilter.ATTRIBUTE_CLAIMS = "aihub.consoleClaims"`
   - **`ConsoleAuthController` 同时提供一个 `GET /api/ping`**（返回 `{"code":"OK","message":"success","data":{"userId":…,"tenantId":…,"role":…}}`，取自 `ATTRIBUTE_CLAIMS`）。它存在的唯一理由是**给本任务的鉴权用例一个真实存在的靶子**：`/api/**` 在 Task 6 里只有登录一个映射，而 Task 8 的 `/api/tenants` 还没写出来（F3）
   - ⚠️ **本任务的两个正向用例不许引用 `/api/tenants`**（那是 Task 8 的）：带令牌 200 的那一半打 `GET /api/ping`；`VIEWER` 只读角色的对照也用 `GET /api/ping`（200）与 `POST /api/ping`（403，写方法被拒 —— 拦在过滤器里，和具体控制器无关）
+  - ⚠️ **本任务不许假设 `verify` 会替它做三件事**（Task 5 的评审逐条点名，都是「契约之外」的行为）：
+    1. **空/短密钥**：`verify` 对 `null`/空密钥抛的是 **`IllegalStateException`（配置故障）而不是 IAE** —— 这是刻意的（与 503-vs-401 同源）。所以**本任务必须自己判 `aihub.console.secret` 为空或 < 32 字符**（D16：`/api/**` 一律 401，登录回 `CONFIGURATION_ERROR`），**不能**指望 `verify` 给 401。密钥用 **UTF-8 字节**，且必须与签发端一致。
+    2. **角色**：`verify` **只返回载荷，不校验 `role`**。未知角色（不在 `ADMIN`/`VIEWER` 里）**必须 fail-closed**（D10），由本任务的过滤器判。
+    3. **TTL**：`verify` **没有最大存活期校验**（不看 `iat` 与 `exp` 的关系）。**签发端必须自己封顶 `exp − iat ≤ 2h`**（D3），本任务的登录接口负责这件事。
 
 - [ ] **Step 1: 写失败测试**
 
