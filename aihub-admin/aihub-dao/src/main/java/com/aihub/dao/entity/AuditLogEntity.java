@@ -4,7 +4,7 @@ import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 
-import java.time.Instant;
+import java.time.LocalDateTime;
 
 /**
  * 对应 Flyway V2 的 {@code audit_log} 表：M4 控制面写操作的审计承载物（决策 D1/D8）。
@@ -12,6 +12,14 @@ import java.time.Instant;
  * <p>审计行由服务层在**业务写事务内**显式写入（{@code AuditService.record(...)}），
  * 因此这里只承载非敏感字段的变更摘要：{@code detail} 绝不放 API Key 明文、渠道明文密钥、
  * {@code api_key_cipher} 密文、主密钥或控制台口令/令牌。
+ *
+ * <p>{@code createdAt} 用 {@link LocalDateTime} 而不是 {@code Instant}：{@code created_at} 是
+ * **无时区**的 {@code DATETIME(3)}，{@code AuditService} 显式按 UTC 墙上时间写入
+ * （{@code LocalDateTime.ofInstant(clock.instant(), ZoneOffset.UTC)}）。
+ * 用 {@code Instant} 会让 MyBatis 走 {@code getTimestamp().toInstant()}，而驱动把它按**连接时区**
+ * 解释 —— 本机实测同一条 UTC 墙钟的行读回来会**早 8 小时**（JVM 是 Asia/Shanghai），
+ * 且按 {@code Timestamp} 绑定的时间范围查询会静默查 0 行。理由与 {@code RequestLogEntity} 一致
+ * （CONVENTIONS §7：时间统一 {@code datetime(3)} 且按 UTC 存）。
  */
 @TableName("audit_log")
 public class AuditLogEntity {
@@ -26,7 +34,7 @@ public class AuditLogEntity {
     private String targetId;
     private String detail;      // 非敏感字段的变更摘要；**绝不放密钥/口令/密文**
     private String requestId;
-    private Instant createdAt;
+    private LocalDateTime createdAt;
 
     public Long getId() {
         return id;
@@ -100,11 +108,11 @@ public class AuditLogEntity {
         this.requestId = requestId;
     }
 
-    public Instant getCreatedAt() {
+    public LocalDateTime getCreatedAt() {
         return createdAt;
     }
 
-    public void setCreatedAt(Instant createdAt) {
+    public void setCreatedAt(LocalDateTime createdAt) {
         this.createdAt = createdAt;
     }
 }
