@@ -43,27 +43,21 @@ import static org.assertj.core.api.Assertions.assertThat;
  * ——真正的判据是信封逐字节相同（这正是本类断言 equalTo 而不是断言两个 code 的原因）；
  * 时序那一半由 {@code ConsoleAuthFilterTest#aMissingUserStillPaysTheBcryptCost} 在单元层钉住。
  *
- * <p><b>为什么本上下文要关掉 MQ 监听器</b>（{@code spring.rabbitmq.listener.simple.auto-startup=false}）：
- * Testcontainers 的 broker 是**整个 JVM 共享**的，队列也是共享的。本类因为要注入合成密钥而必然是一个
- * **独立**的 Spring 上下文（{@code @TestPropertySource} 会改变上下文缓存的键，这是不可避免的：密钥必须有值），
- * 于是一旦它排在 {@code MeteringConsumerIntegrationTest}（包名 {@code metering} 排在 {@code console} 之后）
- * 之前，broker 上就同时挂了**两个**消费者。那个既有用例的绿色建立在一条明确写下的假设上
- * ——"队列是单消费者 FIFO：栅栏行出现时，排在它前面的重复消息必然已经整条处理完"（见该用例的注释），
- * 而两个消费者会让这条推理失效：栅栏可能被另一个消费者先处理，断言读 appender 时重复消息的 INFO 还没打出来。
+ * <p><b>为什么本上下文不再关掉 MQ 监听器</b>：本类因为要注入合成密钥而必然是一个**独立**的 Spring
+ * 上下文（{@code @TestPropertySource} 会改变上下文缓存的键，这是不可避免的：密钥必须有值），
+ * 而 Testcontainers 的 broker 与队列是**整个 JVM 共享**的，于是本类活在场上时队列上会同时挂
+ * **两个**消费者。早先本类用 {@code spring.rabbitmq.listener.simple.auto-startup=false} 把自己的
+ * 监听器关掉来回避这个问题 —— 那是一处**合法的**临时缓解，但它把本上下文变成了生产接线的**不忠实副本**
+ * （将来若有人往本类里加一条 MQ 相关断言，会因为它压根没在消费而静默恒真）。
  *
- * <p>实测（原始日志见报告 §7）：{@code -Dtest=ConsoleLoginIntegrationTest,MeteringConsumerIntegrationTest}
- * **3/3 红**（`theSameEventTwiceInsertsExactlyOneRow`，`Expecting actual not to be empty`）；
- * 把本类排除后整个 admin 套件 **113/113 绿**；而在**既有**类上做同样的竞争
- * （`InternalAuthFilterContextPathTest,MeteringConsumerIntegrationTest`）**4/4 绿** ——
- * 因为 surefire 的 filesystem 顺序把它排在 metering **之后**，竞争根本没发生。
- * 所以本类关掉自己的监听器：本用例判的是 HTTP 鉴权，与 MQ 消费无关，不该在共享 broker 上多挂一个消费者。
- * <b>残余（登记给后续任务）</b>：这条 fragility 仍然存在 —— Task 7–16 只要再在 {@code metering} 之前
- * 新增一个带独立上下文的集成测试类，同一个用例会以同样的方式变红；真正的修法是让那个用例不再依赖
- * "单消费者 FIFO"（例如改成轮询 DB/等待 INFO 出现），但那个文件不在本任务的 11 个文件范围内。
+ * <p>那个缓解已随 {@code MeteringConsumerIntegrationTest} 的修复一并删除：该用例原先依赖
+ * "队列是单消费者 FIFO"这条**顺序假设**（两个消费者会让它红），现在改成对"重复消息的 INFO"做
+ * **有界轮询**，因此多一个消费者不再影响它的结论，本上下文也就恢复成忠实的生产接线。
+ * 实测（原始日志见 {@code m4-task-6-fix-report.md}）：在修复前删掉那一行，本类与 metering 一起跑
+ * 就会红在 {@code MeteringConsumerIntegrationTest.java:153}；修复后同样的组合绿。
  */
 @TestPropertySource(properties = {
-        "aihub.console.secret=" + ConsoleLoginIntegrationTest.SECRET,
-        "spring.rabbitmq.listener.simple.auto-startup=false"
+        "aihub.console.secret=" + ConsoleLoginIntegrationTest.SECRET
 })
 class ConsoleLoginIntegrationTest extends AbstractIntegrationTest {
 

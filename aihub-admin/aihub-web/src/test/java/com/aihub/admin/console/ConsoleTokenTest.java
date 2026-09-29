@@ -2,6 +2,7 @@ package com.aihub.admin.console;
 
 import com.aihub.service.console.ConsoleClaims;
 import com.aihub.service.console.ConsoleToken;
+import com.aihub.service.console.ConsoleTokenService;
 import org.junit.jupiter.api.Test;
 
 import javax.crypto.Mac;
@@ -41,6 +42,9 @@ class ConsoleTokenTest {
 
     private static final byte[] SECRET = "m4-console-test-secret".getBytes(StandardCharsets.UTF_8);
 
+    /** 用**服务**（{@link ConsoleTokenService}）立的密钥夹具：纯 ASCII 且 ≥32 字符，便于加首尾空白。 */
+    private static final String PLAIN_SECRET = "m4-console-test-secret-0123456789abcdef";
+
     /**
      * "仍然有效"的令牌夹具（{@code iat}/{@code exp} 为 UTC epoch 秒）。
      *
@@ -58,6 +62,81 @@ class ConsoleTokenTest {
     private static final long ACTIVE_EXP = 4_000_007_200L;
 
     private static final Base64.Encoder B64 = Base64.getUrlEncoder().withoutPadding();
+
+    /**
+     * 同一把密钥、只在末尾多一个**换行**（{@code echo} / {@code docker --env-file} / K8s Secret 的经典事故）
+     * 的两个 {@link ConsoleTokenService} 必须互相认识对方的令牌。
+     *
+     * <p><b>判别力</b>：校验"密钥够不够长"时用的是 {@code strip()} 之后的值，而 HMAC 若直接用**未 strip**
+     * 的原值，那么"被验证的密钥"与"被使用的密钥"就不是同一串字节 —— 一条测试环境里带换行的密钥
+     * 就会把线上签出的令牌全部变成 401。所以本用例以**令牌**为准，而不是以长度判断为准。
+     *
+     * <p>注意必须用**服务**（{@link ConsoleTokenService}）的 {@code issue}/{@code verify}，
+     * 不能用 {@link ConsoleToken} 的静态方法：静态方法拿的是调用方传进来的字节，
+     * 本来就不会替调用方做规范化，也就经受不到这条纪律。
+     */
+    @Test
+    void aTrailingNewlineInTheSecretDoesNotChangeTheSigningKey() {
+        ConsoleClaims claims = new ConsoleClaims(7L, 1L, ConsoleClaims.ROLE_ADMIN, ACTIVE_IAT, ACTIVE_EXP);
+        ConsoleTokenService plain = service(PLAIN_SECRET);
+        ConsoleTokenService withNewline = service(PLAIN_SECRET + "\n");
+        ConsoleTokenService withSpaces = service("  " + PLAIN_SECRET + "  ");
+
+        // 带换行的签出、干净的校验
+        assertThat(withNewline.verify(plain.issue(claims)))
+                .as("末尾带换行的密钥签出的令牌，必须能被干净密钥的实例校验（被验证的密钥必须是实际使用的密钥）")
+                .isEqualTo(claims);
+        // 干净的签出、带换行的校验（反方向）
+        assertThat(plain.verify(withNewline.issue(claims)))
+                .as("干净密钥签出的令牌，必须能被末尾带换行/首尾带空格的实例校验")
+                .isEqualTo(claims);
+        assertThat(withSpaces.verify(plain.issue(claims)))
+                .as("首尾空格与换行同罪：三种写法必须是**同一串**密钥字节")
+                .isEqualTo(claims);
+    }
+
+    /**
+     * 上面那条用例一旦红在手写的第一个断言上，就**证明不了反方向**（干净的签出、带空白的校验）。
+     * 这条把两个方向拆成两条独立断言：缺陷是"两串字节不相等"，两个方向的红都是同一条缺陷的直接观测。
+     */
+    @Test
+    void aPlainSecretAndAWhitespacePaddedSecretInteroperateInBothDirections() {
+        ConsoleClaims claims = new ConsoleClaims(7L, 1L, ConsoleClaims.ROLE_VIEWER, ACTIVE_IAT, ACTIVE_EXP);
+        ConsoleTokenService plain = service(PLAIN_SECRET);
+        ConsoleTokenService withNewline = service(PLAIN_SECRET + "\n");
+        ConsoleTokenService withSpaces = service("  " + PLAIN_SECRET + "  ");
+
+        assertThat(withNewline.verify(plain.issue(claims)))
+                .as("方向一：干净密钥签出 → 末尾带换行的密钥校验")
+                .isEqualTo(claims);
+        assertThat(plain.verify(withNewline.issue(claims)))
+                .as("方向二：末尾带换行的密钥签出 → 干净密钥校验")
+                .isEqualTo(claims);
+        assertThat(plain.verify(withSpaces.issue(claims)))
+                .as("方向三：首尾带空格的密钥签出 → 干净密钥校验")
+                .isEqualTo(claims);
+    }
+
+    /**
+     * 恰好 {@link ConsoleTokenService#MIN_SECRET_LENGTH} 个字符的密钥必须**端到端可用**：
+     * 签发一张令牌，再用同一个实例校验回来。
+     *
+     * <p>没有这条用例时，32 字符的边界只被"登录回 401 而不是 500"钉住 —— 那只证明它没被当成配置故障，
+     * 完全不证明它能签出并验回一张令牌（例如把下限写成"必须**大于** 32"就会让 32 字符的密钥
+     * 在签发端无声地不可用）。
+     */
+    @Test
+    void aSecretOfExactlyTheMinimumLengthIssuesAndVerifiesAToken() {
+        String exactlyMinimum = "0123456789abcdef0123456789abcdef";
+        assertThat(exactlyMinimum).hasSize(ConsoleTokenService.MIN_SECRET_LENGTH);
+        ConsoleTokenService service = service(exactlyMinimum);
+        ConsoleClaims claims = new ConsoleClaims(7L, 1L, ConsoleClaims.ROLE_VIEWER, ACTIVE_IAT, ACTIVE_EXP);
+
+        assertThat(service.secretUsable()).as("32 字符是**含**在下限内的").isTrue();
+        assertThat(service.verify(service.issue(claims)))
+                .as("恰好 32 字符的密钥必须能签发**并**验回一张令牌（不只是不报配置故障）")
+                .isEqualTo(claims);
+    }
 
     @Test
     void roundTripsClaims() {
@@ -188,6 +267,11 @@ class ConsoleTokenTest {
 
     private static ConsoleClaims claims() {
         return new ConsoleClaims(7L, 1L, ConsoleClaims.ROLE_VIEWER, ACTIVE_IAT, ACTIVE_EXP);
+    }
+
+    /** 走**生产构造器**（Spring 注入的那个），不自己补任何规范化：规范化必须是生产代码的责任。 */
+    private static ConsoleTokenService service(String secret) {
+        return new ConsoleTokenService(secret, ConsoleTokenService.MAX_TOKEN_TTL);
     }
 
     private static String b64(String raw) {

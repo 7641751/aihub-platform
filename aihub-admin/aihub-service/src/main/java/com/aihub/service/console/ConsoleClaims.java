@@ -22,6 +22,12 @@ public record ConsoleClaims(long userId, long tenantId, String role, long issued
     /** 控制台管理员：{@code /api/**} 可读可写。 */
     public static final String ROLE_ADMIN = "ADMIN";
 
-    /** 控制台只读用户：{@code /api/**} 仅 GET/HEAD。 */
+    /**
+     * 控制台只读用户：{@code /api/**} 仅 GET/HEAD/OPTIONS。
+     *
+     * <p>{@code OPTIONS} 也在只读集合内，与 {@code ConsoleAuthFilter.READ_METHODS} 一致：
+     * 它是**无副作用**的（CORS 预检要用），所以放行它不等于给了只读用户任何写能力。
+     * 真正要 403 的是 POST/PUT/PATCH/DELETE。
+     */
     public static final String ROLE_VIEWER = "VIEWER";
 }

@@ -36,6 +36,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 
 /**
@@ -248,6 +249,42 @@ class ConsoleAuthFilterTest {
                         + "它证明的是「被拦下来的是角色，不是方法」（响应体=%s）", body(write))
                 .isEqualTo(405);
         assertThat(code(write)).isEqualTo("INVALID_PARAM");
+    }
+
+    /**
+     * {@code VIEWER + OPTIONS} 必须**不是** 403：{@code READ_METHODS} 含 {@code OPTIONS}
+     * （与 plan 的代码片段一致），因为它是无副作用的 CORS 预检方法，放行它不给只读用户任何写能力。
+     *
+     * <p><b>为什么不断言 200</b>：MVC 的 {@code OPTIONS} 处理取决于 handler 的映射与
+     * {@code DispatcherServlet} 的 {@code dispatchOptionsRequest}，断言一个具体状态码就把本用例绑在
+     * 框架细节上，而这里要钉的是**过滤器的决定**。判据是"不是 403/FORBIDDEN"：把 {@code OPTIONS}
+     * 从 {@code READ_METHODS} 里删掉，本用例立刻红（过滤器会回 403 并带上 FORBIDDEN 信封）。
+     *
+     * <p>对照组是同一把 VIEWER 令牌的 POST：仍然必须 403 —— 证明本用例里的 OPTIONS 不是因为
+     * "只读角色被整体放行"才通过的。
+     */
+    @Test
+    void viewerOptionsIsNotForbiddenWhileViewerPostStillIs() throws Exception {
+        buildConsole(SECRET);
+        String viewer = ConsoleToken.issue(secretBytes(SECRET),
+                claims(ConsoleClaims.ROLE_VIEWER, ACTIVE_IAT, ACTIVE_EXP));
+
+        MvcResult options = mvc.perform(options(PING_PATH).header(HttpHeaders.AUTHORIZATION, "Bearer " + viewer))
+                .andReturn();
+        assertThat(options.getResponse().getStatus())
+                .as("VIEWER 的 OPTIONS 必须**不是** 403：它是无副作用的 CORS 预检方法，"
+                        + "READ_METHODS 含它。若这里红了，说明过滤器把 OPTIONS 也当成写操作拒了"
+                        + "（响应体=%s）", body(options))
+                .isNotEqualTo(403);
+        assertThat(body(options))
+                .as("而且不能是那份 FORBIDDEN 信封（405/200 都可能，403 的 admin 信封才是过滤器拒了它）")
+                .doesNotContain("FORBIDDEN");
+
+        MvcResult write = mvc.perform(post(PING_PATH).header(HttpHeaders.AUTHORIZATION, "Bearer " + viewer)).andReturn();
+        assertThat(write.getResponse().getStatus())
+                .as("对照：同一把 VIEWER 令牌的 POST 仍然必须 403（响应体=%s）", body(write))
+                .isEqualTo(403);
+        assertThat(code(write)).isEqualTo("FORBIDDEN");
     }
 
     @Test

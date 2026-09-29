@@ -26,13 +26,18 @@ import java.time.Duration;
  * <p>两个谓词（{@link #secretUsable()}、{@link #tokenTtlMisconfigured()}）只给启动告警用；
  * 请求路径上的判定必须走 {@link ConsoleTokenService}（它拿的是同一份配置，且是唯一的判据出口）。
  *
- * @param secret   令牌的 HMAC 密钥（UTF-8 字节）；空 = 门关着（D16），**永不生成默认值**
+ * @param secret   令牌的 HMAC 密钥（UTF-8 字节）；空 = 门关着（D16），**永不生成默认值**。
+ *                 构造期经 {@link ConsoleTokenService#normalizeSecret(String)} 规范化（首尾空白去掉），
+ *                 因此 {@link #secret()} 的长度、{@link #secretUsable()} 的判定与签发端真正使用的
+ *                 密钥字节是同一个值 —— 启动 WARN 里报的长度不可能与可用性判据矛盾
  * @param tokenTtl 令牌存活期；超出 {@link ConsoleTokenService#MAX_TOKEN_TTL} 时由签发端夹到 2 小时
  */
 public record ConsoleProperties(String secret, Duration tokenTtl) {
 
     public ConsoleProperties {
-        secret = secret == null ? "" : secret;
+        // 规范化必须走 ConsoleTokenService 的那**一个**入口：这里再写一次 strip() 就等于又开了一个
+        // "被验证的值"，而启动 WARN 报的长度正是从这里读的（长度与可用性判据必须同源）。
+        secret = ConsoleTokenService.normalizeSecret(secret);
         tokenTtl = tokenTtl == null ? ConsoleTokenService.MAX_TOKEN_TTL : tokenTtl;
     }
 

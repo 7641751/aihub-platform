@@ -79,9 +79,14 @@ public class GlobalExceptionHandler {
     }
 
     /**
-     * ErrorCode 只有 8 个常量，没有 METHOD_NOT_ALLOWED / UNSUPPORTED_MEDIA_TYPE，
+     * ErrorCode 有 9 个常量（INVALID_PARAM、UNAUTHORIZED、FORBIDDEN、NOT_FOUND、RATE_LIMITED、
+     * QUOTA_EXCEEDED、UPSTREAM_ERROR、CONFIGURATION_ERROR、INTERNAL_ERROR），
+     * 但**没有** METHOD_NOT_ALLOWED / UNSUPPORTED_MEDIA_TYPE，
      * 405、415 只能归到 INVALID_PARAM；其余状态码取语义最接近的专用常量，
      * 无法对应的（如 503）一律 INTERNAL_ERROR。
+     * <p>
+     * CONFIGURATION_ERROR（500）刻意不在这张表里：它不由 HTTP 状态码反推，只经 BizException 明确指定
+     * （见 {@link #handleBizException}），否则任何 500 都会被误标成"平台配置故障"。
      */
     private ErrorCode errorCodeFor(HttpStatusCode status) {
         return switch (status.value()) {

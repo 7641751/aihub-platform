@@ -21,7 +21,8 @@ import java.time.Duration;
  *       所以"exp − iat ≤ 2h"只能在**签发端**保证 —— {@link #tokenTtl()} 返回的就是已按
  *       {@link #MAX_TOKEN_TTL} 夹过的值。</li>
  *   <li><b>密钥字节</b>：签发与校验共用 {@link #secretBytes()}（UTF-8），两边一致这件事不靠约定，
- *       靠只有一个出口。</li>
+ *       靠只有一个出口。而那个出口读的是**构造期规范化过一次**的字段（{@link #normalizeSecret(String)}），
+ *       所以 {@link #isSecretUsable(String)} 判过的那串字符与 HMAC 真正用的字节必然同一。</li>
  * </ol>
  *
  * <p><b>密钥为空的语义是"门关着"，不是"用默认值"</b>（D16）：本类**没有**默认密钥，也不会生成一把
@@ -52,18 +53,37 @@ public class ConsoleTokenService {
 
     public ConsoleTokenService(@Value("${aihub.console.secret:}") String secret,
                                @Value("${aihub.console.token-ttl:2h}") Duration tokenTtl) {
-        this.secret = secret == null ? "" : secret;
+        this.secret = normalizeSecret(secret);
         this.tokenTtl = clamp(tokenTtl);
+    }
+
+    /**
+     * 密钥的**唯一**规范化入口：{@code null} → {@code ""}，其余一律 {@code strip()}。
+     *
+     * <p><b>为什么必须有且只有这一处</b>：判"密钥是否够长"用的是 {@code strip()} 之后的值，而 HMAC 用的是
+     * 实际存下来的字节 —— 只要这两者来自不同的表达式，"被验证的密钥"与"被使用的密钥"就会在大意时分开。
+     * {@code AIHUB_CONSOLE_SECRET} 末尾多一个换行是经典事故（{@code echo}、{@code docker --env-file}、
+     * K8s Secret 都会带），那会让"校验通过"的密钥与"签名用"的密钥不是同一串字节：同一进程内签发/校验
+     * 恰好都用同一个错误值所以看不出问题，一旦签发与校验两端的环境变量写法不同（滚动发布、多副本），
+     * 全部令牌立刻 401。规范化一次、存下来，判据与密钥字节就是**同一个值**，这件事不靠约定。
+     *
+     * <p>选择"规范化"而不是"拒绝首尾空白"：运维眼里的密钥长度就是 strip 后的长度，
+     * 拒绝会让一个末尾换行的密钥在启动时静默变成"门关着"（现象是 401/500），比规范化更难排查。
+     */
+    public static String normalizeSecret(String secret) {
+        return secret == null ? "" : secret.strip();
     }
 
     /**
      * 密钥是否**可用**：非空白且不短于 {@link #MIN_SECRET_LENGTH} 字符。
      *
      * <p>唯一的判据：登录接口（回 {@code CONFIGURATION_ERROR}）与过滤器（一律 401）都调它，
-     * 任何一处自己写"是不是空"都迟早与另一处漂移。
+     * 任何一处自己写"是不是空"都迟早与另一处漂移。这里也**必须**自己规范化：
+     * 调用方传进来的可能是未规范化的原值，而判据不许依赖调用方是否记得先 strip。
      */
     public static boolean isSecretUsable(String secret) {
-        return secret != null && !secret.isBlank() && secret.strip().length() >= MIN_SECRET_LENGTH;
+        String normalized = normalizeSecret(secret);
+        return !normalized.isEmpty() && normalized.length() >= MIN_SECRET_LENGTH;
     }
 
     public boolean secretUsable() {
