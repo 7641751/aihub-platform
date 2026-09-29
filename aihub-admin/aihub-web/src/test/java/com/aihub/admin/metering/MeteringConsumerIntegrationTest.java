@@ -10,6 +10,8 @@ import com.aihub.common.meter.MeteringEventCodec;
 import com.aihub.common.meter.MeteringTopology;
 import com.aihub.mq.meter.MeteringConsumer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -34,6 +36,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 幂等与死信这两条只能这样测：内存假实现测不到 broker 的 reject/DLX 行为与 MySQL 的唯一键。
  */
 class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
+
+    /** 幂等用例里**重复投递**的那个 id。判据用例与集成用例共用这一处定义，不许各写一份字面量。 */
+    private static final String DUPLICATE_REQUEST_ID = "req-mq-idempotent";
+
+    /**
+     * 时序栅栏事件的 id —— 它**以重复 id 为前缀**（{@code req-mq-idempotent-fence}）。
+     * 这个形状正是旧 {@code \b} 判据会误判的输入，因此这里显式命名而不是就地拼接。
+     */
+    private static final String FENCE_REQUEST_ID = DUPLICATE_REQUEST_ID + "-fence";
 
     @Autowired
     private RabbitTemplate rabbitTemplate;
@@ -125,7 +136,7 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
      */
     @Test
     void theSameEventTwiceInsertsExactlyOneRow() throws Exception {
-        String requestId = "req-mq-idempotent";
+        String requestId = DUPLICATE_REQUEST_ID;
         String payload = MeteringEventCodec.encode(event(requestId, 1_800_000_000_999L));
 
         send(payload);
@@ -135,7 +146,7 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
         // undecodablePayloadEndsUpInTheDeadLetterQueue / attachConsumerAppender）。
         // 窗口必须把**轮询与断言**一起包住：摘了 appender 再读，读到的是空列表而不是"记录没出现"。
         ListAppender<ILoggingEvent> appender = attachConsumerAppender();
-        String fenceRequestId = "req-mq-idempotent-fence";
+        String fenceRequestId = FENCE_REQUEST_ID;
         List<ILoggingEvent> duplicateConsumed;
         try {
             send(payload);   // 重复投递
@@ -149,7 +160,12 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
             // 栅栏只证明**链路还活着**，证明不了**重复的那条消息本身到达过消费者**：「重复被消费并
             // 幂等丢弃」与「重复压根没投出去（路由错 / 断链）」在 count==1 上是同一个观测值。
             // 消费者对**首次**投递走 inserted=true 的 DEBUG 分支，只有 sink 报告「已落库」时才打这条 INFO，
-            // 因此该 INFO 记录的存在本身就是「重复消息到达了消费者、并在消费端被幂等丢弃」的直接证据。
+            // 因此该 INFO 记录的存在就是「重复消息到达了消费者、并在消费端被幂等丢弃」的直接证据
+            // —— 但**仅当** request_id 过滤真的把栅栏 id 排除在外时才成立：栅栏消息自己也会打
+            // 一模一样的 INFO 行（它的 request_id 只比重复 id 多一个 `-fence` 后缀）。
+            // 那个前提由 mentionsRequestId 的 `(?![\w-])` 收尾边界提供，并由
+            // anIdThatExtendsTheDuplicateIdIsNotItsRecord 钉住；边界一坏，本用例对
+            // 「重复消息从未被投递」就是**假绿**（见 m4-task-6-fix-report.md 的变异实验）。
             // 有界轮询（而不是假设它此刻已经打完）：见方法注释。
             duplicateConsumed = awaitInfoRecordsMentioning(appender, requestId, Duration.ofSeconds(10));
         }
@@ -162,7 +178,11 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
                 .isEqualTo(1);
 
         assertThat(duplicateConsumed)
-                .as("重复投递的消息必须真的到达消费者并在消费端被幂等丢弃（这条 INFO 只可能来自重复消费）；"
+                .as("重复投递的消息必须真的到达消费者并在消费端被幂等丢弃。这条 INFO 只可能来自重复消费"
+                        + "—— 前提是 request_id 过滤把「以重复 id 为前缀的另一个 id」（栅栏 id）排除在外，"
+                        + "该前提由 mentionsRequestId 的 `(?![\\w-])` 边界提供并被 "
+                        + "anIdThatExtendsTheDuplicateIdIsNotItsRecord 钉住；收尾边界一旦退化成 `\\b`，"
+                        + "栅栏自己的 INFO 就会满足这里，本断言对「重复消息从未被投递」变成假绿。"
                         + "10 秒内没等到就说明重复消息没有被重新投递/消费，绿色无从谈起")
                 .isNotEmpty();
 
@@ -266,16 +286,79 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
 
     /**
      * 形如 {@code request_id=<id>} 的日志片段必须按**整词**匹配，不能用 {@code contains}：
-     * 本用例的栅栏事件 id（{@code req-mq-idempotent-fence}）是重复事件 id 的超串，
+     * 本用例的栅栏事件 id（{@code req-mq-idempotent-fence}）是重复事件 id 的**前缀超串**，
      * {@code contains} 会把栅栏的日志也算成重复消息的日志。
+     *
+     * <p><b>为什么"整词"不能用 {@code \b} 表达</b>：{@code \b} 只要求"词字符与非词字符的交界"。
+     * 栅栏 id 里 {@code idempotent} 的 {@code t} 与随后的 {@code -} 之间**恰好**就有一个这样的交界，
+     * 于是 {@code request_id=req-mq-idempotent-fence} 会被旧判据
+     * （{@code request_id=} + {@code \Qreq-mq-idempotent\E} + {@code \b}）判成**重复 id 的记录**。
+     * 收尾边界必须改成 {@code (?![\w-])}：重复 id 之后**不允许**再跟词字符或连字符，
+     * "另一个以重复 id 开头的 id"因此一律不算数。
+     *
+     * <p>这条负向先行断言是承重的：{@code theSameEventTwiceInsertsExactlyOneRow} 里
+     * "那条 INFO 只可能来自重复消费"的陈述，正是**依赖**它把栅栏 id 排除在外才成立
+     * （见 {@link #anIdThatExtendsTheDuplicateIdIsNotItsRecord}）。
+     *
+     * <p>判据只吃一个纯字符串，所以它可以脱离容器与 broker 被直接钉住 —— 下面两组
+     * {@code @ParameterizedTest} 就是干这个的；本类虽然继承集成基类（会起容器），
+     * 那两组用例本身既不发消息也不碰数据库。
      */
-    private static boolean mentionsRequestId(ILoggingEvent record, String requestId) {
-        return Pattern.compile("request_id=" + Pattern.quote(requestId) + "\\b")
-                .matcher(record.getFormattedMessage())
+    static boolean mentionsRequestId(String message, String requestId) {
+        return Pattern.compile("request_id=" + Pattern.quote(requestId) + "(?![\\w-])")
+                .matcher(message)
                 .find();
     }
 
-    /** 消费者自己打的 INFO 记录只有「重复消费、已幂等丢弃」这一条，故按 request_id 过滤即可定位它。 */
+    /** 日志记录的判据：只把 {@link ILoggingEvent} 的格式化消息取出来，交给纯字符串版本。 */
+    private static boolean mentionsRequestId(ILoggingEvent record, String requestId) {
+        return mentionsRequestId(record.getFormattedMessage(), requestId);
+    }
+
+    /**
+     * 反向：**以重复 id 为前缀的另一个 id** 的记录，不能算成重复 id 的记录。
+     * 首条就是真实世界里唯一会出现的形状（栅栏消息自己那条 INFO 行），其余是同一类边界的变体。
+     */
+    @ParameterizedTest(name = "以 " + DUPLICATE_REQUEST_ID + " 为前缀的 id 不算它自己的记录：[{0}]")
+    @ValueSource(strings = {
+            // 真实形状：栅栏消息被当成"重复"时，MeteringConsumer 打出来的就是这一行
+            "计量事件重复消费，已幂等丢弃 request_id=req-mq-idempotent-fence created_at=2027-01-15T08:00:01.777Z",
+            "request_id=req-mq-idempotent-fence",
+            // 尾随数字：`\b` 也拦得住它，但换成 startsWith / 删掉收尾边界就会漏
+            "request_id=req-mq-idempotent2",
+    })
+    void anIdThatExtendsTheDuplicateIdIsNotItsRecord(String message) {
+        assertThat(mentionsRequestId(message, DUPLICATE_REQUEST_ID))
+                .as("以重复 id 为前缀的另一个 id 不是重复 id：[%s]", message)
+                .isFalse();
+    }
+
+    /**
+     * 正向：重复 id 自己的记录必须被认出来，包括**恰好以 id 收尾**（后面什么都没有）这一种 ——
+     * 收尾边界若写坏成"什么都不匹配"，这条会红。
+     */
+    @ParameterizedTest(name = DUPLICATE_REQUEST_ID + " 自己的记录必须被认出：[{0}]")
+    @ValueSource(strings = {
+            // 真实形状：重复消息被幂等丢弃时打的那一行（MeteringConsumer.java:79）
+            "计量事件重复消费，已幂等丢弃 request_id=req-mq-idempotent created_at=2027-01-15T08:00:00.999Z",
+            // 恰好以 id 收尾：后面就是字符串终点
+            "request_id=req-mq-idempotent",
+            // 以 id 收尾、后面跟一个空格再接别的内容
+            "request_id=req-mq-idempotent created_at=2027-01-15T08:00:00.999Z",
+    })
+    void theDuplicateIdsOwnRecordIsRecognised(String message) {
+        assertThat(mentionsRequestId(message, DUPLICATE_REQUEST_ID))
+                .as("重复 id 自己的记录必须被认出：[%s]", message)
+                .isTrue();
+    }
+
+    /**
+     * 消费者自己打的 INFO 记录只有「重复消费、已幂等丢弃」这一条，故按 request_id 过滤即可定位它。
+     *
+     * <p>要点在 {@code request_id=} 之后的**收尾边界**：栅栏事件也会打同一条 INFO，只有它的
+     * request_id 不同（{@code req-mq-idempotent-fence}）。见
+     * {@link #mentionsRequestId(String, String)}。
+     */
     private static List<ILoggingEvent> infoRecordsMentioning(ListAppender<ILoggingEvent> appender,
                                                              String requestId) {
         return records(appender, Level.INFO).stream()
@@ -288,8 +371,14 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
      * {@code theSameEventTwiceInsertsExactlyOneRow} 的方法注释）。
      *
      * <p>轮询的依据不是"睡够时间"，而是"出现即可返回"：{@code MeteringConsumer} 用的是全局 logger，
-     * appender 会捕获**任何**消费者实例打出的记录，所以"等到了"这条事实本身仍然只可能来自
-     * 「重复消息真的被消费过」。找不到就返回空列表，由调用方断言红 —— 不允许把超时当成功。
+     * appender 会捕获**任何**消费者实例打出的记录，所以"等到了"这条事实仍然只可能来自
+     * 「重复消息真的被消费过」—— <b>前提是 {@link #mentionsRequestId(String, String)} 的
+     * {@code (?![\w-])} 收尾边界真的把「以重复 id 为前缀的另一个 id」排除掉了</b>。
+     * 少了这个前提，「等到了」也可能只是**栅栏自己的** INFO 行：栅栏消息同样会被消费、同样可能
+     * （在消费端分支坏掉时）打出这条 INFO，而它的 request_id 以重复 id 为前缀。
+     * 收尾边界的两个方向由 {@link #anIdThatExtendsTheDuplicateIdIsNotItsRecord} 与
+     * {@link #theDuplicateIdsOwnRecordIsRecognised} 钉住。
+     * 找不到就返回空列表，由调用方断言红 —— 不允许把超时当成功。
      */
     private static List<ILoggingEvent> awaitInfoRecordsMentioning(ListAppender<ILoggingEvent> appender,
                                                                   String requestId, Duration timeout)
