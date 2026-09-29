@@ -34,9 +34,17 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
     private static final String RESOLVE_PATH = "/internal/api-keys/resolve";
 
     /**
-     * {@code expire_at} 往返的容差（毫秒）：只给 {@code Instant.now()} 的纳秒被 {@code DATETIME(3)}
-     * 截断留位。原来的 1 **秒**容差是本次收紧掉的那一半 —— 它宽到足以把「基准错」这类偏差的一部分
-     * 吞掉，而对「这个值到底以什么基准落库」这个问题，1 秒和 8 小时只差一个数量级。
+     * {@code expire_at} 往返的容差（毫秒）。**取 1 ms 的理由（2026-09-29 独立评审 M-2 更正）**：
+     * {@code Instant.now()} 带纳秒，而 MySQL 的 {@code DATETIME(3)} 是**四舍五入**（不是截断）到毫秒 ——
+     * 评审实测 {@code .821768400 → .822}，误差 {@code +231600 ns}，因此**正确实现上的确定性上界是
+     * ≤ 0.5 ms**，1 ms 有 2 倍余量（评审 30 次往返、3 个 JVM 时区实测最坏 {@code 481200 ns}，全绿）。
+     *
+     * <p>**取 1 ms 的坏理由（已删除）**：曾经写在这里的「1 秒容差宽到会把基准错吞掉、收紧后任何
+     * 时区级偏差都不可能被吃掉」在事实层面是**错的** —— 本条断言走实体往返，而实体往返在两种基准下
+     * 都**自洽**（写入与读回走同一次连接时区换算、互相抵消），所以它**从来**看不见基准错：修复前的
+     * 变异体（字段换回裸 {@code Instant}）实测让这条用例**保持全绿**。基准的判别力在
+     * {@link #expireAtIsStoredOnTheUtcWallClockBasisSharedByItsSiblingColumns()}（它读的是**原始列**），
+     * 不在这个容差上。收紧本身仍然值得保留：它让「往返精确」这件事成为一个有意义的断言。
      */
     private static final long EXPIRY_ROUND_TRIP_TOLERANCE_MILLIS = 1L;
 
@@ -188,11 +196,12 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
         assertThat(view.expireAt())
                 .as("回源读回 null 等于把有期限的 key 变成永不过期的 key")
                 .isNotNull();
-        // 容差 1 ms：{@code datetime(3)} 只存到毫秒，而 Instant.now() 带纳秒 —— 截断最多 1 ms，
-        // 从前的 1 秒容差是**故意留白的**：它同时兜住了「JVM 默认时区被带上」这类错误，而这次
-        // 收紧到 1 ms 之后，任何时区级别的偏差（本机 8 小时）都不可能再被容差吃掉。
+        // 容差 1 ms：MySQL 把 {@code Instant.now()} 的纳秒**四舍五入**到毫秒（实测 .821768400 → .822，
+        // 误差 +231600 ns），所以正确实现上的确定性上界是 ≤ 0.5 ms。这里**不是**在靠容差挡基准错：
+        // 实体往返在两种基准下都自洽（写入与读回走同一次连接时区换算），修复前的变异体实测让本用例
+        // 保持全绿 —— 基准的判别在同类的 expireAtIsStoredOnTheUtcWallClockBasisSharedByItsSiblingColumns。
         assertThat(Duration.between(expireAt, view.expireAt()).abs())
-                .as("datetime(3) 只有毫秒精度：唯一允许的误差是纳秒被截断的那不到 1 ms")
+                .as("datetime(3) 只有毫秒精度：唯一允许的误差是纳秒被进位的那不到 1 ms")
                 .isLessThanOrEqualTo(Duration.ofMillis(EXPIRY_ROUND_TRIP_TOLERANCE_MILLIS));
         assertThat(view.usable()).isTrue();
     }
@@ -209,8 +218,16 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
      * 判别力只能来自裸 JDBC：本用例读的是列本身，不是实体。裸 SQL 写入方（seeder、运维、
      * 以及将来的 {@code where expire_at > now()} 比较）看到的正是这一格。
      *
+     * <p><b>判别力的方言条件（2026-09-29 独立评审 I-1）</b>：本用例读的是**列**，能判别写入基准，
+     * 但差异只在连接时区**不是 UTC** 时才出现 —— 生产方言（{@code serverTimezone=UTC}）下，裸
+     * {@code Instant} 写出来的列与显式 UTC 写出来的列**逐位相同**（评审实测 old − new = 0），
+     * 因此本用例在生产方言上对两个实现都绿。生产方言下的判别由
+     * {@code TimeBasisIsConnectionFlavourIndependentTest}（故意钉非 UTC 连接时区的独立上下文）承担；
+     * 本用例在生产方言（{@link com.aihub.admin.support.AbstractIntegrationTest} 的方言）下
+     * 承担的是「发布 URL 下 {@code expire_at} 的基准确实是 UTC」这条**生产等同性**断言。
+     *
      * <p>容差 {@value #EXPIRY_ROUND_TRIP_TOLERANCE_MILLIS} ms：只给 {@code Instant.now()} 的
-     * 纳秒被 {@code DATETIME(3)} 截断留位。8 小时 = 28800000 ms，比它大七个数量级。
+     * 纳秒被 {@code DATETIME(3)} 进位留位。8 小时 = 28800000 ms，比它大七个数量级。
      */
     @Test
     void expireAtIsStoredOnTheUtcWallClockBasisSharedByItsSiblingColumns() {

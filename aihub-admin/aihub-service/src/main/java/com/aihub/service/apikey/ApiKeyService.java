@@ -87,9 +87,10 @@ public class ApiKeyService {
      *
      * <p><b>这个换算是承重的</b>：实体字段是 {@code LocalDateTime}（不做时区换算的载体），
      * 库里的那串数字就是 UTC 墙上时间。若这里直接塞 {@code Instant}（或让字段退回 {@code Instant}），
-     * 驱动会按 **JVM 默认时区**（本机 Asia/Shanghai）折墙上时间，实体往返虽然自洽，但列里的值与
-     * 兄弟列差 8 小时 —— 裸 SQL 写入方、以及将来 {@code where expire_at > now()} 的比较都会错。
-     * 基准只写在这里与 {@link #loadFromDb} 的读回处各一次，不依赖 JVM 设置。
+     * 驱动会按 **JDBC 连接时区**折墙上时间（连接时区解析成 LOCAL 时就是 JVM 默认时区，本机
+     * Asia/Shanghai），实体往返虽然自洽，但列里的值与兄弟列差 8 小时 —— 裸 SQL 写入方、以及将来
+     * {@code where expire_at > now()} 的比较都会错。基准只写在这里与 {@link #loadFromDb} 的读回处
+     * 各一次，**不依赖连接参数也不依赖 JVM 设置**。
      */
     @Transactional
     public IssuedKey mint(String tenantName, String keyName, Instant expireAt) {
@@ -132,9 +133,24 @@ public class ApiKeyService {
      * {@link LocalDateTime}；这里显式声明基准折回 {@link ApiKeyView} 需要的**瞬时**
      * （{@code toInstant(ZoneOffset.UTC)}）。
      *
-     * <p>不这么做（字段留 {@code Instant}、或在这里用 {@code Timestamp}）会让驱动按 **JVM 默认
-     * 时区**解释那一格，读出的瞬时整整差 8 小时（本机 Asia/Shanghai）——而
-     * {@link ApiKeyView#usable()} 正是拿这个瞬时与 {@code Instant.now()} 比的，落在鉴权路径上。
+     * <p>不这么做（字段留 {@code Instant}、或在这里用 {@code Timestamp}）时，驱动会按 **JDBC 连接时区**
+     * 解释那一格；连接时区解析成 LOCAL（URL 不带 {@code serverTimezone} / {@code connectionTimeZone}）时
+     * 用的就是 **JVM 默认时区**，于是**原始列**里会存本地墙上时间，与兄弟列差一个时区偏移
+     * （本机 Asia/Shanghai = 8 小时）—— 裸 SQL 写入方（seeder / 运维）、以及任何
+     * {@code where expire_at > now()} / {@code utc_timestamp()} 的比较都落在另一个基准上。
+     *
+     * <p><b>更正（2026-09-29 独立评审 I-2）</b>：这里曾经写着「读出的瞬时整整差 8 小时，而
+     * {@link ApiKeyView#usable()} 正是拿这个瞬时与 {@code Instant.now()} 比的，落在鉴权路径上」——
+     * 那条是**错的**。修复前的实体往返是**自洽**的（写入与读回走同一次连接时区换算、互相抵消），
+     * 评审实测往返偏差 231600 ns、{@code usable()} 判定一直正确，**key 并没有提前 8 小时过期**。
+     * 本次修复纠正的是**原始列的基准与兄弟列不一致**（以及由此产生的裸 SQL / 跨列比较错），
+     * 不是鉴权判定错。措辞以 {@link ApiKeyEntity} 的类注释为准。
+     *
+     * <p><b>为什么基准必须写在代码里</b>：发布的两个 URL 都钉了 {@code serverTimezone=UTC}
+     * （{@code aihub-admin/aihub-web/src/main/resources/application.yml:8}、{@code docker-compose.yml:65}），
+     * 而在那种方言下旧读法与新读法**逐位相等**（评审实测 old − new = 0）—— 旧代码在生产上
+     * 没有可观测差异。本次改动的价值是**不再依赖那个连接参数**（也不依赖 JVM 时区）：
+     * {@code LocalDateTime} + 显式 {@code ZoneOffset.UTC} 在任何方言下都给出同一个答案。
      */
     private Optional<ApiKeyView> loadFromDb(String keyHash) {
         ApiKeyEntity entity = apiKeyMapper.selectOne(new LambdaQueryWrapper<ApiKeyEntity>()

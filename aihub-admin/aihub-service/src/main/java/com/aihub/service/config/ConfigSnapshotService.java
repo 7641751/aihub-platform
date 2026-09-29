@@ -148,7 +148,8 @@ public class ConfigSnapshotService {
      * {@code datetime} 这一列类型**不带时区** —— 库里那串数字就是 UTC 墙上时间本身。
      * {@link LocalDateTime} 正是「不做任何时区换算」的载体，驱动对它原样搬运；而
      * {@code java.sql.Timestamp}（以及任何走 {@code Instant} 字段的映射）会把这串墙上时间按
-     * **JVM 默认时区**解释成瞬时 —— 本机是 Asia/Shanghai，于是版本整整早 8 小时
+     * **JDBC 连接时区**（解析成 LOCAL 时就是 **JVM 默认时区**）解释成瞬时 —— 本机是 Asia/Shanghai，
+     * 于是那条连接上的版本整整早 8 小时
      * （实测：库里 {@code 2026-09-29T14:04:36.652} 被读成 {@code 1790661876652}，真值
      * {@code 1790690676652}，差 {@code -28800000} ms）。
      *
@@ -157,6 +158,15 @@ public class ConfigSnapshotService {
      * 于是 Task 3 的验收判据（配置改动在数秒内生效）静默不成立。今天这条路径大部分被
      * {@code ConfigChangePublisher}（用 {@code System.currentTimeMillis()} 抬水位）盖住，
      * 剩下的正是**裸 SQL / seeder** 这条只有 {@code max(updated_at)} 可用的路径。
+     *
+     * <p><b>触发条件与更正（2026-09-29 独立评审 I-1）</b>：上面的 8 小时偏差只在
+     * **JDBC 连接时区不是 UTC** 时出现 —— URL 不带 {@code serverTimezone} / {@code connectionTimeZone}
+     * 时驱动按 **JVM 默认时区**解释（本仓库的**测试** URL 当时正是这种方言），本机 Asia/Shanghai
+     * 于是差 8 小时。**发布的两个 URL 都钉了 {@code serverTimezone=UTC}**
+     * （{@code application.yml:8}、{@code docker-compose.yml:65}），评审在那条连接上实测旧读法与新读法
+     * **逐位相等**（{@code old − new = 0}），{@code -Duser.timezone=UTC} 下旧实现同样 {@code delta = 0}
+     * ⇒ **旧代码在生产上没有可观测差异**。本次改动的价值是**不再依赖那个连接参数、也不依赖
+     * JVM 默认时区**。纪律：连接时区仍要**显式钉死**（发布 URL 已经这么做），但新代码不许依赖它。
      *
      * <p>{@code toInstant(ZoneOffset.UTC)} 把「无时区的墙上时间」显式声明成 UTC 瞬时 ——
      * 基准写在代码里，不依赖任何 JVM 默认设置。

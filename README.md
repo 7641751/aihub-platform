@@ -98,6 +98,12 @@ M3 新增的边界：
 - **admin 侧的快照装配既不检测版本回退、也不为此告警**（更正：这里与 `docs/CONVENTIONS.md` 此前都承诺过一条**并不存在**的 WARN）。`ConfigSnapshotService` 只是对三张表各取一次 `max(updated_at)` 再取最大值，它没有「上一次 version」这个概念，发现不了回退、也发现不了同一毫秒撞车；该类唯一的 WARN 是「同一维度存在多条 ACTIVE 限流策略」，与版本无关。因此上面那条版本回退缺口**今天没有任何缓解措施** —— 既没有高水位持久化，也没有任何可观测信号，关闭它是 **M4** 的条目。
 - **Redis 仍然没有密码**（`requirepass`）与网络隔离加固 —— 未在 M3 做（M3 已收口），仍是对生产部署的要求（见 `docs/CONVENTIONS.md` 第 6 节）。
 
+M4 新增的边界（时间基准，2026-09-29，独立评审 `a14e209` 的产物）：
+
+- **把 `expire_at` 的解释从「连接时区」改成「UTC」是一次**数据含义变更**，方向上是 fail-open**（评审 I-4）。`api_key.expire_at` 现在按 UTC 墙上时间解释（实体用 `LocalDateTime` + 显式 `ZoneOffset.UTC`）。**发布配置下没有风险**：`application.yml` 与 `docker-compose.yml` 的 JDBC URL 都带 `serverTimezone=UTC`，旧代码在那条连接上写进去的本来就是 UTC 墙上时间（评审实测新旧读法 `old − new = 0`）。但**任何**用非 UTC 连接（覆盖了 `SPRING_DATASOURCE_URL` 而没带该参数、或用旧的本地/测试配置跑过写入）写下的行，其 `expire_at` 存的是 JVM 本地墙钟；改按 UTC 解释之后这些行的瞬时**整体后移**一个时区偏移（本机 8 小时）⇒ **已经过期的 key 在最长 8 小时里仍然可用**（fail-open）。处理办法二选一：按该偏移 `UPDATE api_key SET expire_at = expire_at - INTERVAL <offset>`，或**重新签发**受影响的 key（更稳：行本身无法可靠区分基准）。同一次改动也会把这类行的 `updated_at` 从「连接时区墙钟」改读成 UTC，表现为一次向前的版本跳变（无害）。**没有**启动检查、也**没有**自动迁移 —— 这是已知边界，不是已关闭项。
+- **时间基准不再依赖连接参数与 JVM 时区**：配置快照水位（`ConfigSnapshotService.maxUpdatedAt`）与 API Key 过期（`ApiKeyService` 的写入/读回）都走 `LocalDateTime` + 显式 `ZoneOffset.UTC`，因此 JDBC URL 上删掉 `serverTimezone=UTC`、或换一个时区的 JVM/CI 镜像都不会改变结果。**纪律**：新时间列照抄这个写法；连接时区仍然要**显式钉死**（发布 URL 已经这么做）—— 代码不依赖它 ≠ 可以随便配（见 `docs/CONVENTIONS.md` §7 第 2 条）。
+- **列的基准现在用数据库自己的 UTC 时钟断言，但数据库**会话**时区没有被应用钉住**（评审 I-3 的残余）：V1 的配置表用 `DEFAULT CURRENT_TIMESTAMP(3)` / `ON UPDATE CURRENT_TIMESTAMP(3)` 生成时间列，那写的是**数据库会话时区**的墙上时间，而应用侧把它当 UTC 读。今天容器是 `@@session.time_zone = SYSTEM` + `@@system_time_zone = UTC`，`ConfigSnapshotServiceTest` 与 `ConnectionTimeZoneFlavourTest` 现在会断言这一点（会话时区一旦不是 UTC 就会红），但**没有**任何配置把会话时区钉成 UTC（`serverTimezone=UTC` 只钉驱动的换算时区，不会改会话）—— 换一台默认时区不是 UTC 的 MySQL，配置版本会整体偏移一个时区。
+
 
 ## 技术栈
 

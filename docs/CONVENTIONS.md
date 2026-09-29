@@ -276,19 +276,44 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - 分区边界只声明**上界**，最低的那个分区是下无界的：所以「时间戳早于最早分区」**不会**落库失败
   （2020 年的时间戳照样进 `p202609`）。真正会被判死信的是**超出 `DATETIME` 值域**的时间戳（`ERROR 1292`）。
 - **`datetime(3)` 必须映射成 Java `LocalDateTime` 并在应用侧显式按 UTC 写入；不要用 `Instant`，也不要依赖
-  `DEFAULT CURRENT_TIMESTAMP(3)`。** 两条实测理由（2026-09-29，Task 7 的独立评审在真容器里量出来的）：
+  `DEFAULT CURRENT_TIMESTAMP(3)`。** 三条实测理由 + 一条必须记住的数据含义变更（2026-09-29，Task 7 的
+  独立评审在真容器里量出来的；第 2 条已按 2026-09-29 的第二次独立评审 `a14e209` 更正 ——
+  原文把只在非 UTC 连接上出现的偏差写成了生产缺陷）：
   1. `DEFAULT CURRENT_TIMESTAMP(3)` 写的是**数据库会话时区**的墙上时间。Testcontainers 的 MySQL 基准恰好是
      UTC（`NOW(3) == UTC_TIMESTAMP(3)`），所以今天两张表看起来一致 —— 但一旦某台 MySQL 不是 UTC，同一个列
      就会出现**两种基准**（应用显式写 UTC、默认值写本地）。基准不能取决于数据库服务器的时区配置。
-  2. MyBatis 用 `getTimestamp()` 读 `datetime`，而它按 **JVM 默认时区**解释那个墙上时间。本机 JVM 是
-     Asia/Shanghai，于是 `getTimestamp().toInstant()` 与实体里的 `Instant` 字段都**早了整整 8.0 小时**。
-     实测后果最要命的一条：同一个 ±10 分钟窗口，用 `LocalDateTime`(UTC) 绑定能查到 **1/1** 行，用
-     `Timestamp`/`Instant` 绑定查到 **0 行** —— 驱动把边界推后 8 小时，**最近 8 小时写的行全部不可见**。
-     而 `LocalDateTime` 字段 + 显式 UTC 赋值（`LocalDateTime.ofInstant(clock.instant(), ZoneOffset.UTC)`，
-     见 `RequestLogService`）读写对称、没有隐式转换。
-  3. 所以新增时间列**照抄 `RequestLogService` 的写法**。写测试时**不要拿数据库的钟和数据库的钟对** —— 那正好
-     把这个 8 小时错误盖住（Task 7 第一版就是这么写的，1 小时容差 + 双 DB 钟比较，全绿但错）。要断言
-     「读回来的 `LocalDateTime` 按 UTC 折算成 `Instant` 后，与 `Instant.now()` 相差在秒级」。
+  2. MyBatis 用 `getTimestamp()` 读 `datetime`，而它按**哪个时区**解释那个墙上时间，取决于
+     **JDBC 连接时区**：**只有连接时区解析成 LOCAL 时**（URL 不带 `serverTimezone` / `connectionTimeZone`，
+     即 Testcontainers 返回的无参数 URL）驱动才按 **JVM 默认时区**解释它。本机 JVM 是 Asia/Shanghai，
+     于是 `getTimestamp().toInstant()` 与实体里的 `Instant` 字段都**早了整整 8.0 小时**；最要命的后果是
+     **时间范围查询**：驱动把边界整体推后一个时区偏移，命中的是**另一个窗口**的行 —— 复核实测同一个
+     ±10 分钟窗口在无参数连接上 `LocalDateTime`(UTC) 绑定命中 **1/4** 行、`Timestamp` 绑定命中 **3/4** 行，
+     而在 `serverTimezone=UTC` 连接上两种绑定都是 **4/4**。
+     **这不是「生产上正在发生的错误」**：发布的两个 URL 都钉了 `serverTimezone=UTC`
+     （`application.yml:8`、`docker-compose.yml:65`），第二次独立评审在那条连接上实测**旧写法与新写法
+     逐位相等**（`channel.updated_at` 与 `api_key.expire_at` 两个列的 `old − new` 都是 **0**）。
+     真正的结论是**纪律**，不是「生产在错」：
+     **① 连接时区必须显式钉死**（发布 URL 已经这么做，新环境照抄；新代码**不许**依赖它）；
+     **② 基准写在代码里**：`LocalDateTime` 字段 + 显式 UTC 赋值
+     （`LocalDateTime.ofInstant(clock.instant(), ZoneOffset.UTC)`，见 `RequestLogService`）读写对称、
+     没有隐式转换，在任何连接方言与任何 JVM 时区下都给同一个答案。
+  3. 所以新增时间列**照抄 `RequestLogService` 的写法**。写测试时**不要**用「拿数据库的钟和数据库的钟对」
+     去证明**折常量**是对的 —— 那正好把这个错误盖住（Task 7 第一版就是这么写的，1 小时容差 + 双 DB 钟
+     比较，全绿但错）。要断言「读回来的 `LocalDateTime` 按 UTC 折算成 `Instant` 后，与 `Instant.now()`
+     相差在秒级」。**例外**：可以、而且**应该**用数据库**自己的 UTC 时钟**（`UTC_TIMESTAMP(3)`）去钉
+     **列的基准** —— 它和上面那条是**两条独立**的信息：前者钉「列里存的是不是 UTC」，后者钉「应用折得
+     对不对」。`ConfigSnapshotServiceTest` 现在两条都有，并且在会话时区不是 UTC 时额外要求这一格
+     **不**落在 `NOW(3)`（会话时钟）附近。会话时区本身没有被应用钉住（`@@session.time_zone = SYSTEM`），
+     这是已经登记的残余（独立评审 I-3）。
+  4. **把 `expire_at` 的解释从「连接时区」改成「UTC」是一次**数据含义变更**，方向上 fail-open
+     （2026-09-29 独立评审 I-4）**：已经按 LOCAL 方言（旧代码 + 非 UTC 连接）写进库的
+     行，其 `api_key.expire_at` 存的是 **JVM 本地墙钟**；改用 UTC 解释之后，这些行的瞬时**整体后移**一个
+     时区偏移（本机 8 小时）—— 也就是**已经过期的 key 在最长 8 小时里仍然可用**（fail-open）。
+     `config_version` / 配置表的 `updated_at` 同样被改读，但表现为一次**向前**的版本跳变（无害）。
+     本仓库发布的两个 URL 都钉了 `serverTimezone=UTC`，因此**在发布配置下不存在这种行**（旧代码写进去的
+     已经是 UTC）；但任何覆盖了 `SPRING_DATASOURCE_URL` 而没有带该参数、或升级前用非 UTC 连接跑过的
+     环境，都需要一次性处理：按该偏移 `UPDATE` 这批 `expire_at`，或直接**重新签发**受影响的 key
+     （更稳：行本身无法可靠区分基准，见 README「已知边界」的 M4 条目）。
 - **`eq(column, null)` 恒不成立，而 MyBatis-Plus 不会替你忽略它**：
   `LambdaQueryWrapper.eq(AuditLogEntity::getTenantId, null)` 生成 `WHERE (tenant_id = ?)`、参数是 `null`
   ⇒ 恒为 UNKNOWN ⇒ **静默返回 0 行**（既不报错也不忽略条件）。实测：`eq(null)` 得 0 行，`isNull()` 得 1 行，
@@ -312,6 +337,24 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - **admin 的集成测试要真起容器**：本机必须让 Testcontainers 找到 Docker，即
   `DOCKER_HOST=tcp://127.0.0.1:2375`（用户级 `~/.testcontainers.properties` 里也写着同一个值；缺了它
   `AbstractIntegrationTest` 会直接 `IllegalStateException` 而不是静默跳过）。
+- **admin 集成测试的连接时区方言是显式选择，不是巧合**（2026-09-29 第二次独立评审的产物）：
+  `AbstractIntegrationTest` 用 `TestContainers.utcFlavouredJdbcUrl()` 把 `spring.datasource.url` 钉成
+  **生产方言**（`serverTimezone=UTC`，与 `application.yml:8` / `docker-compose.yml:65` 同类）；
+  `com.aihub.admin.time.TimeBasisIsConnectionFlavourIndependentTest` 用
+  `TestContainers.nonUtcFlavouredJdbcUrl()`（`connectionTimeZone=Asia/Shanghai` —— 一个**固定的非 UTC 区**）
+  起一个**独立上下文**，专门证明时间基准与连接时区无关。在此之前测试 URL 是 Testcontainers
+  返回的裸 URL ⇒ 落在 **LOCAL** 方言（= 跑测试的 JVM 默认时区）、与生产**相反**，而没有任何地方写下来，
+  于是「RED 证据」看起来像一个生产缺陷（见 §7 第 2 条）。三个决定与它们的理由：
+  1. **主体套件跑生产方言**：它断言的是生产上会发生的行为；而且 UTC 钉死之后结果**不随跑测试的 JVM
+     时区变化**（LOCAL 方言下本机 Asia/Shanghai 与一个 UTC 的 CI 镜像会得到不同的数字，套件不可复现）。
+  2. **判别「代码依赖不依赖连接时区」的用例自己起一个非 UTC 方言的上下文**：
+     那条性质只在连接时区不是 UTC 时可观测。**必须钉一个固定区，不能靠 LOCAL** —— LOCAL 的行为随 JVM
+     默认时区变化，在 UTC 的机器/CI 镜像上与 UTC 行为完全一致，判别力**静默归零**（评审 I-1(b) 指出的
+     盲区）。该类的方言用例把这件事量出来：固定区下 `Timestamp` 载体的读数恒定偏离 UTC 折 8 小时，
+     而裸 URL（LOCAL）下的读数等于 JVM 时区的解释 —— 后者只作为「评审之前套件跑的是什么」的**记录**。
+  3. **方言被断言，不会被静默移动**：`ConnectionTimeZoneFlavourTest` 读回
+     `spring.datasource.url`（字符串级，任何 JVM 时区下都有效）、做驱动行为探针、并断言数据库**会话**
+     时钟就是 UTC。将来谁删掉 `serverTimezone=UTC`，它会红，而不是让整个套件换一个方言继续跑。
 - **断言一个异步副作用之前，必须先等它发生**（有界等待）：被观测的调用如果是「发后不管」的
   （例如 `aihub-gateway` 的 Redis 回填 `subscribeOn(...).subscribe()`），那么「它跑完了没有」与
   `block()` 返回的时刻**没有先后关系**。M2 收口时在这里踩过一次：`ApiKeyFilterContractTest` 的

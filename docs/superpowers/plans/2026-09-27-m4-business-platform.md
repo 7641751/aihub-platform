@@ -22,14 +22,21 @@
 - **M1 的字节级透传是铁律**且本里程碑不改动它：上游状态码 / `Content-Type` / 响应体字节在流式与非流式下都原样回写；唯一合法的切换时机仍是「响应尚未提交」。**新增的 `QuotaFilter` 必须排在鉴权之后、限流之后、且在响应提交之前只做一次判定**，绝不能在中途改写已提交的响应。
 - **明文密钥的边界**（M1/M3 已确立，本里程碑新增两处约束）：① API Key 明文**只在创建响应里返回一次**，此后任何接口（含列表、审计、日志、管理台页面）都不许再出现它；② 渠道明文密钥只在 seeder / 控制台**写入**时短暂出现在服务层内存里，**绝不**进审计、日志、指标、响应体。
 - **禁止读 / 打印 / echo `.env` 或任何密钥文件**；不要执行 `docker compose config` 或任何会把 `.env` 插值打进 stdout 的命令。判断某个环境变量是否存在时**只判断是否为空**。M1 曾因此泄漏过一次真实上游 key。
-- **两条「静默给错答案」的数据库陷阱（2026-09-29，Task 7 的独立评审在真容器里实测；Task 8/9/10/11 一律适用）**：
+- **两条「静默给错答案」的数据库陷阱（2026-09-29，Task 7 的独立评审在真容器里实测；Task 8/9/10/11 一律适用；第 1 条已按 2026-09-29 的第二次独立评审更正）**：
   1. **`datetime(3)` 必须映射成 Java `LocalDateTime` 并在应用侧显式按 UTC 写入**
      （`LocalDateTime.ofInstant(clock.instant(), ZoneOffset.UTC)`，照抄 `RequestLogService`），
      **不要用 `Instant`**，也**不要**依赖 `DEFAULT CURRENT_TIMESTAMP(3)`（那写的是数据库会话时区）。
-     MyBatis 用 `getTimestamp()` 读，而它按 **JVM 默认时区**解释墙上时间：本机（Asia/Shanghai）会读回
-     **早 8.0 小时**的值。最要命的实测后果是**时间范围查询**——同一个 ±10 分钟窗口，绑
-     `LocalDateTime`(UTC) 查到 1/1 行，绑 `Timestamp`/`Instant` 查到 **0 行**（驱动把边界推后 8 小时，
-     最近 8 小时写的行全部不可见）。**Task 11 的日志/审计时间范围查询必须绑 `LocalDateTime`(UTC)。**
+     **连接时区必须显式钉死，而且新代码不许依赖它。** 驱动按哪个时区解释墙上时间取决于 **JDBC 连接时区**：
+     **只有连接时区解析成 LOCAL 时**（URL 不带 `serverTimezone` / `connectionTimeZone`）才按 **JVM 默认时区**
+     解释，本机（Asia/Shanghai）因此读回**早 8.0 小时**。**但这不是生产上正在发生的错误**：
+     发布的两个 URL 都钉了 `serverTimezone=UTC`（`application.yml:8`、`docker-compose.yml:65`），
+     第二次独立评审在那条连接上实测**旧写法与新写法逐位相等（`old − new = 0`，两个列都是 0）**，
+     而**测试** URL 恰好相反 —— 它是 Testcontainers 返回的**裸 URL**（无参数 ⇒ LOCAL），这个不对称
+     当时没有任何地方写下来，正是「RED 看起来像生产缺陷」的原因（现已显式化，见 `docs/CONVENTIONS.md` §8）。
+     窗口对照也只在非 UTC 连接上复现：复核实测同一个 ±10 分钟窗口在无参数连接上 `LocalDateTime`(UTC) 绑定
+     命中 **1/4** 行、`Timestamp` 绑定命中 **3/4** 行，而在 `serverTimezone=UTC` 连接上两种绑定都是 **4/4**。
+     所以这是一条**纪律**（① 连接时区显式钉死；② 基准写在代码里，不依赖连接参数也不依赖 JVM），
+     而不是一条「生产在错」的记录。**Task 11 的日志/审计时间范围查询必须绑 `LocalDateTime`(UTC)。**
   2. **`eq(column, null)` 恒不成立，MyBatis-Plus 不会替你忽略它**：生成 `col = ?`（参数 `null`）⇒ 恒为
      UNKNOWN ⇒ **静默返回 0 行**。按**可选维度**（`tenant_id`、`api_key_id`）过滤**必须**用
      `isNull()`/`isNotNull()`。Task 8/9/10 的列表查询与 Task 11 的日志/审计查询都会遇到。
@@ -1582,8 +1589,10 @@ git commit -m "feat(console): model route and rate-limit policy CRUD with dimens
     - ⚠️ **时间范围必须绑 `LocalDateTime`(UTC)，不能绑 `Instant`/`Timestamp`**（见 Global Constraints 与
       `docs/CONVENTIONS.md` §7 的实测）：`from`/`to` 是带 `Z` 的绝对时刻，实现里先解析成 `Instant`，
       但在**绑定参数时**必须转成 `LocalDateTime.ofInstant(instant, ZoneOffset.UTC)`。绑 `Timestamp`/`Instant`
-      会让驱动把边界推后 8 小时 —— 最近 8 小时的行**查不到**（实测同一个 ±10 分钟窗口：`LocalDateTime` 绑
-      1/1 行、`Timestamp` 绑 0 行）。`request_log` 与 `audit_log` 的 `created_at` 都是 UTC 墙上时间。
+      在**连接时区不是 UTC** 时（测试容器的无参数 URL 就是这种方言）会让驱动把边界整体推后一个时区偏移，
+      命中的是**另一个窗口**的行（复核实测同一个 ±10 分钟窗口在该方言下 `LocalDateTime` 绑 1/4 行、
+      `Timestamp` 绑 3/4 行；在 `serverTimezone=UTC` 的生产方言下两种绑定都是 4/4）。
+      `request_log` 与 `audit_log` 的 `created_at` 都是 UTC 墙上时间。
     - ⚠️ **可选维度过滤**（`tenantId`、`apiKeyId`、`channelId` 缺省时）**必须**用 `isNull()`/`isNotNull()`
       或条件式构造，**不许**把 `null` 交给 `eq(...)`：那会生成 `col = ?` 且参数是 `null`、恒为 UNKNOWN、
       **静默返回 0 行**（见 `docs/CONVENTIONS.md` §7）。
@@ -2295,8 +2304,10 @@ Task 6/8/9/10/11 ─> Task 16 (管理台静态页)
 9. **`ConsoleAuthFilter` 的 `@Order(Ordered.LOWEST_PRECEDENCE - 100)` 与 `InternalAuthFilter`（无 `@Order`）的相对顺序既没有用例、也没有写进 javadoc**：今天两个守卫的前缀不相交（`/api/**` 与 `/internal/**`），所以顺序不可观测，既有 `/internal/**` 契约未被破坏（有 3 个类的用例钉着）。风险是纯未来的：将来有人给 `InternalAuthFilter` 加 `@Order` 时不会有任何东西报警。
 10. **Task 6 有三条断言在"功能被删掉"时依然会绿**：`pathsOutsideTheApiPrefixAreNotGuardedEvenWhenTheGateIsClosed`（把整个过滤器删掉也绿）、`anAdminWriteIsPassedThroughToTheMvcLayer`（一个"永远放行"的 fail-open 过滤器也绿）、以及 `aBlankConsoleSecretFailsClosedWithConfigurationError` 的正文断言（它分不清 D16 的配置分支与过滤器里的 `IllegalStateException` 兜底分支，两者共用同一句文案 —— 变异 A2 存活就是这条）。前两条是**设计如此**的负向/边界用例，其真正的判别力由集成用例补足（`internalAndHealthEndpointsAreNotAffected`、`InternalAuthFilterContextPathTest`），不是缺陷；第三条的两个分支都是 fail-closed、在响应上**观测不可区分**，因此**不追**（用一个观测不到的差异去换判别力只会得到脆弱用例）。
 11. **`AuditAction.LOGIN_SUCCESS` / `LOGIN_FAILURE` 目前没有生产方** —— Task 6 的正文写着「审计调用**留到 Task 7**；如果 Task 7 已经完成，就把 `auditService.record(...)` 的调用一起写上」（Task 6 的 Interfaces/Step 3 附近）。Task 6 排在 Task 7 之前，所以这条条件式要求**现在到期了**，但它没有被折进 Task 7 的 Files —— 已裁定**不塞进 Task 7 的第一版**。理由：它要改的是 Task 6 刚评审过的**防枚举路径**，而 `ConsoleAuthService.login` 当前**没有 `@Transactional`**；往失败路径加一次 DB 写会引入事务边界并改变该路径的观测面，属于必须自带 RED→GREEN 证据的改动，不适合搭在「审计服务本体」这一任务上。**归属：Task 7 之后的一个专门提交**（并在 Task 17 收口时确认它已落地）。**硬要求**：① 每一次登录尝试（成功与失败）**恰好**写一行；② `LOGIN_FAILURE` 在「用户名不存在」与「口令错」两条路径上产生的审计行**必须结构相同**（action/targetType/actor 形状一致、`tenantId` 均为 `null`）—— 否则审计的写入**次数或内容**本身就成了用户枚举旁路；③ **绝不**把口令或 bcrypt 哈希写进 `detail`；④ Task 6 既有的防枚举用例必须继续绿，并新增用例钉住「两条失败路径各恰好一行且结构相同」（用「只在找到用户之后才审计」的变异体打红它）。
-12. **`ConfigSnapshotService.maxUpdatedAt()` 的时间换算早了 8 小时**（2026-09-29，Task 7 修复轮的有界排查实测）：它对 `channel`/`model_route`/`rate_limit_policy` 用 `queryForObject(..., Timestamp.class).toInstant().toEpochMilli()`，实测表达式 `1790654157526` vs 数据库时钟真值 `1790682957526` = **−8.0 小时**；水位为 0 时 `currentVersion()` 因此比 `Instant.now()` 落后 2880 万毫秒。**今天被掩盖**：`ConfigChangePublisher` 用 `System.currentTimeMillis()` 抬水位，所以正常写路径的水位是对的。**残余**：纯 SQL / seeder 路径（水位为 0、`max(updated_at)` 是唯一来源）会得到一个静默的、约 8 小时不收敛的窗口。**归属**：Task 8 引入更多时间列**之前**的一个专门硬化提交（改法照 `RequestLogService`：读成 `LocalDateTime` 再按 UTC 折算），并在 Task 17 验收时确认。**本任务（Task 7）没有改它。**
-13. **`ApiKeyEntity.expireAt` 的原始列是 JVM 本地墙上时间**，而同一张表里数据库生成的 `created_at`/`updated_at` 是 UTC 墙上时间 —— 任何把 `expire_at` 与 `now()`/`utc_timestamp()` 放进**同一条 SQL** 的比较都会偏 8 小时。实体往返本身是精确的（驱动转换对称），但它**参与判定**（`ApiKeyView.usable()`），方向是 fail-closed（**提前 8 小时过期**，不是安全漏洞而是功能缺陷）。归属同第 12 条（同一次硬化提交）。
+12. **`ConfigSnapshotService.maxUpdatedAt()` 的时间换算早了 8 小时**（2026-09-29，Task 7 修复轮的有界排查实测）：它对 `channel`/`model_route`/`rate_limit_policy` 用 `queryForObject(..., Timestamp.class).toInstant().toEpochMilli()`，实测表达式 `1790654157526` vs 数据库时钟真值 `1790682957526` = **−8.0 小时**（**量的是测试容器的无参数 URL 方言 —— 见下方的更正块，发布 URL 上这个差值是 0**）；水位为 0 时 `currentVersion()` 因此比 `Instant.now()` 落后 2880 万毫秒。**今天被掩盖**：`ConfigChangePublisher` 用 `System.currentTimeMillis()` 抬水位，所以正常写路径的水位是对的。**残余**：纯 SQL / seeder 路径（水位为 0、`max(updated_at)` 是唯一来源）会得到一个静默的、约 8 小时不收敛的窗口。**归属**：Task 8 引入更多时间列**之前**的一个专门硬化提交（改法照 `RequestLogService`：读成 `LocalDateTime` 再按 UTC 折算），并在 Task 17 验收时确认。**本任务（Task 7）没有改它。**
+    > **2026-09-29 第二次独立评审的更正（触发条件）**：上面那组数字是在**测试容器的连接方言**上量到的 —— Testcontainers 把 `spring.datasource.url` 给成**无参数**的裸 URL，驱动因此按 **JVM 默认时区**解释 `datetime`（本机 Asia/Shanghai）。**发布的两个 URL 都钉了 `serverTimezone=UTC`**（`application.yml:8`、`docker-compose.yml:65`），在那条连接上评审实测**旧写法与新写法逐位相等（`old − new = 0`）** ⇒ **这不是生产上正在发生的缺陷**。所以本条的准确表述是「**代码依赖连接时区/JVM 时区**」，触发条件是「连接时区解析成 LOCAL（或不带该参数）**且** JVM 默认时区不是 UTC」；在 `-Duser.timezone=UTC` 下旧实现同样给出 `delta=0`。**已在 `a14e209` 硬化**（读 `LocalDateTime` + 显式 `toInstant(ZoneOffset.UTC)`）：价值是**不再依赖那个连接参数**，而不是修掉一个线上错误。方言现在是显式选择并被断言（`AbstractIntegrationTest` 钉生产方言 + `ConnectionTimeZoneFlavourTest` + LOCAL 方言的 `TimeBasisIsConnectionFlavourIndependentTest`，见 `docs/CONVENTIONS.md` §8）。
+13. **`ApiKeyEntity.expireAt` 的原始列与兄弟列不同基准**：在**连接时区不是 UTC** 的方言下，驱动把 `Instant` 字段折成**本地墙钟**写进 `api_key.expire_at`，而同一张表里数据库生成的 `created_at`/`updated_at` 是 UTC 墙上时间 —— 任何把 `expire_at` 与 `now()`/`utc_timestamp()` 放进**同一条 SQL** 的比较都会偏一个时区偏移，裸 SQL 写入方（seeder / 运维）看到的就是这一格。**（原文此处写「它参与判定（`ApiKeyView.usable()`），方向是 fail-closed（提前 8 小时过期）」—— 这一句已被 2026-09-29 第二次独立评审推翻，见下方更正块。）** 归属同第 12 条（同一次硬化提交）。
+    > **2026-09-29 第二次独立评审的更正（「提前 8 小时过期」被推翻）**：`ApiKeyView.usable()` **没有**被判错 —— 修复前的实体往返是**自洽**的（写入与读回走同一次连接时区换算、互相抵消），评审实测往返偏差 `231600 ns`、`usable()=true`，实现者自己的变异日志也是「按 JVM 默认时区折回才是期望值，**差值 −1 ms**」而**不是 8 小时**。因此本条正确的表述是：**原始列的基准与兄弟列不一致**（在连接时区不是 UTC 的环境里，列里存的是本地墙钟），受影响的是裸 SQL 写入方与 `now()`/`utc_timestamp()` 的跨列比较；**不是**「key 提前 8 小时过期」。已在 `a14e209` 硬化（字段改 `LocalDateTime` + 两端显式 UTC 换算）。**另有一条数据含义变更必须记住（独立评审 I-4）**：把已存的 `expire_at` 从「连接时区墙钟」改读成 UTC，方向上 **fail-open**（非 UTC 连接写下的行会晚一个时区偏移才过期，最长 8 小时）；发布 URL 是 UTC，所以发布配置下不存在这种行，但覆盖过 `SPRING_DATASOURCE_URL` 的环境需要一次性迁移或重新签发（见 `docs/CONVENTIONS.md` §7 第 4 条与 README 的 M4 已知边界）。归属同第 12 条（同一次硬化提交）。
 14. **`ConfigVersionEntity.updatedAt` 实体读回早 8 小时，但全仓库没有读者**（水位只用 `version` 列）。登记，不修；若将来有人读它，按第 12 条的办法改。
 15. **Task 7 明确不修、不许当成已解决的残余**：① **形状不可辨的密钥用作 map key 仍会落库** —— 启发式做不到「key 文本永不进库」，`[REDACTED_KEY]` 只覆盖能被值形状识别的 key；② F1 **没有**对整个调用方 map 调 `valueToTree`（自引用 detail 会在深度上限生效**之前** StackOverflow）；Map/Iterable 由实现自己带深度上限遍历，只有未知类型交给 Jackson；③ 评审的 Minor 4/5（`action` 的长度校验、`null`/空 map → SQL NULL）**没有用例**；④ `[REDACTED]` 是**替换值**，因此 `tokenCount` 这类合法键会被误伤（已在类 javadoc 写明并有用例钉住，属刻意接受的代价）。
 16. **变异测试的环境陷阱（Task 7 修复轮踩到，值得全项目记住）**：跑完变异后 `target/classes` 里留着的是**变异体字节码**，还原源文件**不会**把它换回来 —— 必须显式重新编译；更糟的是，当「修复 diff vs HEAD」本身非空时 `git diff` **根本无法证明**已还原。可靠做法是「与备份文件比 SHA256 + 扫描 `MUTANT` 标记 + `javap` 看真实字节码」。Task 7 修复轮里第一次自以为干净的 `javap` 实际又是一份变异体副本。

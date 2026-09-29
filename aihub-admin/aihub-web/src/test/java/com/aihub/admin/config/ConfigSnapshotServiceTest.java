@@ -65,6 +65,15 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
      */
     private static final long VERSION_BASIS_TOLERANCE_MILLIS = 1L;
 
+    /**
+     * 「列里的墙上时间 vs 数据库自己的 UTC 时钟」的容差（毫秒）—— 独立评审 I-3 要求的**独立**基准断言用。
+     *
+     * <p>两次 SELECT 之间的真实间隔是毫秒级（同一台容器、同一条连接池）；这里给 2 秒是给慢机器的余量。
+     * 它仍然比**任何**真实时区偏移小三个数量级以上（现代时区里最小的偏移是 15 分钟 = 900000 ms），
+     * 所以「列按会话时区写」这种基准错一定会红，而不是被容差吃掉。
+     */
+    private static final long COLUMN_CLOCK_TOLERANCE_MILLIS = 2_000L;
+
     /** 合成明文（不是任何真实密钥）：只用来证明「快照里拿到的密文能解回它、且密文里没有它」。 */
     private static final String SYNTHETIC_PLAINTEXT = "sk-channel-plaintext-synthetic";
 
@@ -153,12 +162,29 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
      * <p><b>本用例是判别器</b>：{@code datetime(3)} 列里存的是 **UTC 墙上时间**，所以回读必须走
      * 「不做任何时区换算」的载体 —— 先用 {@link LocalDateTime} 读出那一格（驱动对它会原样搬运），
      * 再显式折 {@code toInstant(ZoneOffset.UTC)}。曾经的实现读 {@code java.sql.Timestamp} 再
-     * {@code toInstant()}，驱动会按 **JVM 默认时区**（本机 Asia/Shanghai）解释这串墙上时间，
-     * 于是版本整整早 8 小时（28800000 ms）—— 对「几秒内收敛」的验收判据来说就是永远不收敛。
+     * {@code toInstant()}，驱动会按**连接时区**解释这串墙上时间（连接时区解析成 LOCAL 时就是
+     * JVM 默认时区，本机 Asia/Shanghai），于是版本整整早 8 小时（28800000 ms）——
+     * 对「几秒内收敛」的验收判据来说就是永远不收敛。
+     *
+     * <p><b>判别力的边界（独立评审 I-1）</b>：旧读法只在**连接时区不是 UTC** 时才有偏差。
+     * 生产 URL 钉了 {@code serverTimezone=UTC}，在那里旧读法与新读法**逐位相等**（实测 old − new = 0），
+     * 所以本用例现在跑的生产方言下**不能**判别两个实现 —— 判别那份工作由
+     * {@code TimeBasisIsConnectionFlavourIndependentTest}（故意钉非 UTC 连接时区的独立上下文）承担。
+     * 本用例在这里承担的是另一半：钉住**生产读法**是「列 + 显式 UTC 折」，并用下面那条
+     * **数据库自身时钟**断言钉住**列的基准**（见下）。
      *
      * <p>容差 {@value #VERSION_BASIS_TOLERANCE_MILLIS} ms：这一行**不加**容差就是精确相等，
      * 保留 1 毫秒只是给 {@code datetime(3)} 的毫秒截断留位（这里实际上是整数毫秒，取 0 也会绿）。
      * 8 小时的偏差比它大 7 个数量级，因此「红」不会靠容差。
+     *
+     * <p><b>独立评审 I-3 的补强 —— 列基准必须用数据库自己的时钟来钉</b>：上面的断言把**同一列**按
+     * **同一个 UTC 折常量**折了两次，因此它只能证明「生产的读法 = UTC 折」，证明不了
+     * 「列里存的确实是 UTC」：V1 的配置表用 {@code DEFAULT CURRENT_TIMESTAMP(3)} /
+     * {@code ON UPDATE CURRENT_TIMESTAMP(3)} 生成这一列，那写的是**数据库会话时区**的墙上时间，
+     * 而应用侧没有任何东西钉会话时区。若某台 MySQL 的会话时区不是 UTC，这一列会存本地墙上时间，
+     * 两边一起被折错、上面的断言照样绿，而 {@code currentVersion()} 会整体偏一个时区。
+     * 因此下面额外比**两个不同的时钟**：列里的值 vs 数据库自己的 {@code UTC_TIMESTAMP(3)}；
+     * 并在会话时区与 UTC 不同时要求这一格**不**落在 {@code NOW(3)}（会话时钟）附近。
      */
     @Test
     void versionUsesTheUtcWallClockBasisOfUpdatedAtNotTheJvmDefaultZone() {
@@ -183,11 +209,38 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
         assertThat(Math.abs(actual - expected))
                 .as("version 必须把 updated_at 当作 **UTC** 墙上时间来解释：库里存的是 %s，期望 %d ms，"
                                 + "实际 %d ms（差 %d ms）。JVM 默认时区 = %s，按它解释这一格会得到 %d ms，"
-                                + "也就是早 %d ms —— 这正是被修掉的那个缺陷（容差 %d ms）",
+                                + "也就是早 %d ms —— 这是被修掉的**读法**带来的偏移（容差 %d ms）",
                         stored, expected, actual, actual - expected, ZoneId.systemDefault(),
                         skewedIfTheJvmZoneIsApplied, expected - skewedIfTheJvmZoneIsApplied,
                         VERSION_BASIS_TOLERANCE_MILLIS)
                 .isLessThanOrEqualTo(VERSION_BASIS_TOLERANCE_MILLIS);
+
+        // ——— 独立评审 I-3：列的**真实基准**，用数据库自己的时钟独立断言 ———
+        // 上面那条断言折的是「同一列 + 同一个 UTC 常量」，因此对「列本身不是 UTC」是盲的
+        // （会话时区写库时，`expected` 与 `actual` 一起偏，仍然相等 ⇒ 绿）。这里换两个**不同的时钟**：
+        // 列里的墙上时间必须落在数据库自己的 UTC_TIMESTAMP(3) 附近。会话时区不是 UTC 时，
+        // CURRENT_TIMESTAMP(3) 写的是会话墙上时间，这条会红 —— 而上面那条仍然是绿的。
+        LocalDateTime dbUtcNow = jdbcTemplate.queryForObject("select utc_timestamp(3)", LocalDateTime.class);
+        LocalDateTime dbSessionNow = jdbcTemplate.queryForObject("select now(3)", LocalDateTime.class);
+        long sessionOffsetMillis = Duration.between(dbUtcNow, dbSessionNow).toMillis();
+
+        assertThat(Math.abs(Duration.between(dbUtcNow, stored).toMillis()))
+                .as("channel.updated_at 必须落在**数据库自己的 UTC 时钟**附近（±%d ms）："
+                                + "UTC_TIMESTAMP(3) = %s，列里是 %s（两者相差 %d ms），"
+                                + "会话时钟 NOW(3) = %s（会话相对 UTC 的偏移 %d ms）。"
+                                + "这一条能抓到上面那条抓不到的东西：列的**基准** —— "
+                                + "若会话时区不是 UTC，CURRENT_TIMESTAMP(3) 会写本地墙上时间，这里就红了",
+                        COLUMN_CLOCK_TOLERANCE_MILLIS, dbUtcNow, stored,
+                        Duration.between(dbUtcNow, stored).toMillis(), dbSessionNow, sessionOffsetMillis)
+                .isLessThanOrEqualTo(COLUMN_CLOCK_TOLERANCE_MILLIS);
+
+        if (Math.abs(sessionOffsetMillis) > COLUMN_CLOCK_TOLERANCE_MILLIS) {
+            assertThat(Math.abs(Duration.between(dbSessionNow, stored).toMillis()))
+                    .as("会话时区相对 UTC 偏了 %d ms（NOW(3) = %s vs UTC_TIMESTAMP(3) = %s），"
+                                    + "因此这一格**不得**落在会话时钟附近 —— 落在上面就说明它是按会话时区写的",
+                            sessionOffsetMillis, dbSessionNow, dbUtcNow)
+                    .isGreaterThan(COLUMN_CLOCK_TOLERANCE_MILLIS);
+        }
     }
 
     /**
