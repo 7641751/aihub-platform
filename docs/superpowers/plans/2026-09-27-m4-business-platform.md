@@ -64,7 +64,7 @@
 | 7 | **配额在 Redis 不可用时降级为「放行 + 告警」**（fail-open），与限流的「降级仍拒绝」**刻意相反**。 | 设计文档 §9 明文：「Redis 不可用 → 限流降级为本地令牌桶（单机近似），**配额降级为放行 + 告警**，不阻断服务」。理由：限流是保护上游的（宁可错杀），配额是记账的（宁可少记也不能因为记账组件坏了而拒绝付费客户）。这条对照是本项目**面试时最值得讲的一处取舍**，必须写进 CONVENTIONS 与 README。降级时打 `aihub.quota.degraded` 计数器 + 限流过的 WARN；**Redis 侧的预扣丢失由每日对账兜底**（对账按 `request_log` 重算 `billing_daily`）。 | `QuotaFilter` 的降级分支 + 用例 `redisDownAllowsTheRequestAndCountsADegrade`；CONVENTIONS §6.7 新增配额小节。 |
 | 8 | **审计在服务层显式写**（`AuditService.record(...)`），**不用 AOP/拦截器**。审计行写在与业务写**同一个事务**里。 | AOP 看着优雅，但「谁做的、对哪个对象、改了哪些字段」这三件事只有服务层知道；用切面去猜注解等于把审计的准确性交给约定。同事务保证「改了但没审计」不可能发生（审计写失败 → 业务回滚）。**审计失败必须让业务失败**（审计是合规要求，不是尽力而为）。 | 新增 `AuditService` + `audit_log` 表（D1）；每个写接口的用例都要断言「产生了一条审计行，且**不含**敏感字段」。 |
 | 9 | **管理台是零构建的静态单页**：`aihub-web/src/main/resources/static/console/{index.html,console.js,console.css}`，vanilla JS + `fetch`，令牌放 **`sessionStorage`**（关闭标签页即失效）。**不引**前端框架、不引构建步骤、**不用 cookie**。 | 「极简管理台」的交付物是「能登录、能看渠道/Key/日志、能新建渠道与 Key」。引一个 Vite+React 工程会让本里程碑的构建面翻倍，而收益是零（面试讲的是后端链路）。不用 cookie 是为了**不引入 CSRF 面**（同源 + `Authorization` 头 + `sessionStorage` 的组合下，跨站请求带不上令牌）。代价是 XSS 会拿到令牌 —— 而本页面不加载任何第三方脚本、不渲染用户输入的 HTML，这个代价被登记为**已知边界**而不是假装不存在。 | 静态资源在 `aihub-web` 的 classpath 里；一个 `ConsoleStaticResourceTest` 断言三个文件可被 `GET /console/` 取到且 `index.html` 不含内联脚本。 |
-| 10 | **`/api/**` 的授权只分两级**：`ADMIN` 可读写，`VIEWER` 只读（非 GET/HEAD 一律 403 + admin 信封）。`sys_user.role` 是唯一来源。 | `sys_user` 表已经有 `role`，但设计文档没有定义角色集合。两级是「够用且可验证」的最小集合；细粒度 RBAC 属后续迭代（已登记在 §14 非目标）。**403 必须走 admin 信封**（`{"code":"FORBIDDEN",...}`），不要 Spring 默认错误页。 | `ConsoleAuthFilter` 之后的 `ConsoleRoleFilter`（或同一个过滤器里的两级判定）+ 用例（`VIEWER` GET 200 / POST 403）。 |
+| 10 | **`/api/**` 的授权只分两级**：`ADMIN` 可读写，`VIEWER` 只读（只读方法为 `GET`/`HEAD`/`OPTIONS`，其余方法一律 403 + admin 信封）。`sys_user.role` 是唯一来源。 | `sys_user` 表已经有 `role`，但设计文档没有定义角色集合。**「只读」的口径含 `OPTIONS`**：无副作用，且浏览器 CORS 预检会发它；本条原先只写 GET/HEAD，与 Task 6 正文里的代码片段 `READ_METHODS = Set.of("GET","HEAD","OPTIONS")` 冲突（Task 6 执行期发现），现按代码统一，并补一条 `VIEWER` + `OPTIONS` 的用例把行为钉住。两级是「够用且可验证」的最小集合；细粒度 RBAC 属后续迭代（已登记在 §14 非目标）。**403 必须走 admin 信封**（`{"code":"FORBIDDEN",...}`），不要 Spring 默认错误页。 | `ConsoleAuthFilter` 之后的 `ConsoleRoleFilter`（或同一个过滤器里的两级判定）+ 用例（`VIEWER` GET 200 / `OPTIONS` 非 403 / `POST` 403）。 |
 | 11 | **API Key 吊销/停用必须显式 `DEL` 缓存**：控制台改 `api_key.status` 后，除发布配置失效消息外，还要 `DEL aihub:apikey:<key_hash>`（键前缀用 `ApiKeyCacheCodec.CACHE_KEY_PREFIX` 常量）。**网关侧的本地 Caffeine 仍要等 ≤30 秒**（除非该 key 的请求恰好触发本地过期）。 | M3 决策 16 把「真正的收敛手段是 M4 的吊销接口 + 显式 `DEL`」写在这里，本里程碑兑现它。`DEL` 只能清掉**共享**那一层：网关本地 Caffeine 的 30 秒窗口**没有**便宜的失效通道（给每个 key 建 Pub/Sub 主题的成本远大于收益），因此**残余必须写清楚**：吊销后最坏 30 秒内本实例仍可能放行。吊销的运维动作建议是「先停用、观察、再删」。 | `ApiKeyAdminService` + 用例：「停用后共享缓存条目被删除」；CONVENTIONS §6.6 的 ≤30s/≤5m 表述改为「控制台吊销后共享层立即失效，本地层 ≤30s」。 |
 | 12 | **对账任务只报告、不自动改账**：每日 02:00（`aihub.quota.reconcile-cron`，与 M3 的分区维护 03:10 **错开**）按 `request_log` 重算当日 `billing_daily`（**幂等 UPSERT**，`uk_billing_daily(tenant_id, stat_date)`），并与 Redis 的预扣计数比对；偏差超过阈值（`aihub.quota.reconcile-tolerance-ratio`，默认 1%）→ WARN + `aihub.quota.reconcile.mismatch` 计数器 + 一条审计行，**但不修改 `quota.token_used`**。 | 设计文档 §6.2 要求「与 Redis 计数比对、修正并告警偏差」。**修正**这一步在这里被降级为「报告」，理由是：对账任务自动改账会在「计量事件因为 DLQ 延迟到达」时把**正确**的账改**错**（计量是至少一次 + 幂等，`request_log` 在 02:00 时可能还没补全）。先报告、人工确认、再执行修正是更安全的顺序，且符合本里程碑「可演示」的验收口径。**残余**：偏差的自动收敛推迟（登记在 README 已知边界）。 | 新增 `QuotaReconciliationJob`（`@Scheduled(cron=...)`）+ 用例（用真 MySQL 造 3 天的 `request_log` → 断言 `billing_daily` 被正确重算 + 偏差被计数）。 |
 | 13 | **配额的时间粒度 `quota.period` = `YYYYMM`（UTC）**，Redis 键 `aihub:quota:{tenantId}:{period}`，`PEXPIRE` 设为「到下个周期开始 + 1 天」的毫秒数。 | `quota` 表唯一的唯一键是 `uk_quota_tenant_period(tenant_id, period)`，`period` 是 `VARCHAR(8)` —— `YYYYMM` 正好 6 字符且按字典序可比较（可用于 `period = ?` 精确查、也能做前缀范围查）。TTL 取「周期末 + 1 天」而不是固定值，是为了让跨月的边界请求不会读到一个已经过期又被重建的空桶（+1 天把「月末最后一个请求」与「对账任务的补扣」都罩住）。 | `QuotaKeys`（`aihub-common`）有键布局与 TTL 的固定向量测试；D2 的 Lua 用 `ARGV` 传入 ttlMillis（沿用 M3 决策 9：不用 Redis `TIME`）。 |
@@ -1066,6 +1066,13 @@ git commit -m "feat(console): add the HS256 console token with a server-pinned a
 - Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ConsoleAuthFilterTest.java`
 - Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ConsoleLoginIntegrationTest.java`
 
+**执行期追加的文件（Task 6 实际落地时新增，见附录 G；上面那份清单是开工前写的，以下是最小必要扩展）：**
+- Modify: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/error/GlobalExceptionHandler.java`（**只改 javadoc**：`ErrorCode` 因本任务的 `CONFIGURATION_ERROR` 从 8 个常量变成 9 个，原注释「只有 8 个常量」失真）
+- Modify: `aihub-admin/aihub-service/src/main/java/com/aihub/service/console/ConsoleClaims.java`（**只改 javadoc**：只读口径含 `OPTIONS`，见 D10）
+- Modify: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/metering/MeteringConsumerIntegrationTest.java`（去掉「单消费者 FIFO」时序假设，换成有界轮询；见附录 G3）
+- Modify: `aihub-admin/aihub-service/src/test/java/com/aihub/service/console/ConsoleTokenTest.java`（补密钥归一化判别用例 + 恰好 32 字符可用性）
+- Test: 新增一条**真 Spring 上下文**的空密钥集成用例（命名由实现者定，落在 `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/` 下；手工装配的 standalone MockMvc 不算，见附录 G4）
+
 **Interfaces:**
 - Consumes: `ConsoleToken`/`ConsoleClaims`（Task 5）；`BCryptPasswordEncoder`（`spring-security-crypto`）；`AuditService`（Task 7 —— **若 Task 7 尚未完成，本任务先不写审计调用**，见 Step 3 的说明）
 - Produces:
@@ -1189,6 +1196,10 @@ aihub:
 Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ConsoleLoginIntegrationTest,ConsoleAuthFilterTest,InternalAuthFilterContextPathTest,InternalConfigSnapshotIntegrationTest"`
 Expected: 全绿 + `BUILD SUCCESS`（**最后两个类必须一起跑**：它们是「既有 `/internal/**` 契约没被破坏」的证据）。
 
+⚠️ **还要再跑一遍「顺序反转」，否则这次绿色不算数**（附录 G3 的纪律）：
+`mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=InternalAuthFilterContextPathTest,MeteringConsumerIntegrationTest" "-Dsurefire.runOrder=reversealphabetical"`
+Expected: 全绿。**「我的用例绿了」只有在类顺序被翻转后依然绿才算证据** —— 顺序条件绿与 `-Dtest=A+B`、`failIfNoSpecifiedTests` 属同一类假绿。另外 `mvn -B clean test -pl aihub-admin/aihub-web -am` 的全量绿色也只在顺序未被打乱时成立，不许把它当成「上下文互不干扰」的证明。
+
 ```bash
 git add aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/SysUserEntity.java \
         aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/SysUserMapper.java \
@@ -1197,7 +1208,10 @@ git add aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/SysUserEntity.j
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/config/ConsoleProperties.java \
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ \
         aihub-admin/aihub-web/src/main/resources/application.yml \
-        aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/
+        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/error/GlobalExceptionHandler.java \
+        aihub-admin/aihub-service/src/test/java/com/aihub/service/console/ \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/metering/MeteringConsumerIntegrationTest.java
 git commit -m "feat(console): add console login and the /api/** token filter with two roles"
 ```
 
@@ -2254,6 +2268,10 @@ Task 6/8/9/10/11 ─> Task 16 (管理台静态页)
 4. **`QuotaEstimator` 的 `maxInMemoryBytes`**：它读请求体，而网关还有计量侧的捕获上限（`aihub.metering.max-capture-bytes`）。**上限必须小于计量侧上限**，否则控制器先失败、计量根本看不到这次请求。执行 Task 13 时确认这两个数字的关系并写进配置注释。
 5. **`MeteringSchedulingConfig`**：评审指出它可能只是 `@EnableScheduling`、`@Scheduled` 应当直接标在 job 上 —— Task 15 的 Files 里列了它；执行时若确实只是 `@EnableScheduling`，**不要**为了「让 Files 清单成立」而制造一次无意义改动（改动清单以实际需要为准，报告里说明即可）。
 6. **§10 的测试覆盖率目标（核心链路 ≥70%）** 在本计划里**没有被测量**：M4 收口时若时间允许，用 JaCoCo 量一次并写进 README；不允许在没有测量数据的情况下声称达成。
+7. **Task 6 的登录接口没有任何限流/锁定**（`/api/auth/login` 可无限次尝试）：这是 M4 已知边界里**最大的安全残余** —— 它把"口令错与用户不存在响应不可区分"重新变成"可统计采样"（多次采样后，假哈希与真实哈希的 cost 档位差可能从噪声里分离出来）。M4 未要求限流，**不阻塞**，但 Task 17 收口时必须写进 README 的已知边界，不许当成已解决。
+8. **非 ASCII 密钥的运维链路（环境变量 → `aihub.console.secret` → UTF-8 字节）没有任何用例覆盖**：结构上正确（`ConsoleTokenService.secretBytes()` 是全仓库唯一一处把密钥转字节的地方，UTF-8，签发/校验共用），但"未验证"不等于"对"——Windows 上非 ASCII 环境变量是已知坑。属登记项，不是缺陷。
+9. **`ConsoleAuthFilter` 的 `@Order(Ordered.LOWEST_PRECEDENCE - 100)` 与 `InternalAuthFilter`（无 `@Order`）的相对顺序既没有用例、也没有写进 javadoc**：今天两个守卫的前缀不相交（`/api/**` 与 `/internal/**`），所以顺序不可观测，既有 `/internal/**` 契约未被破坏（有 3 个类的用例钉着）。风险是纯未来的：将来有人给 `InternalAuthFilter` 加 `@Order` 时不会有任何东西报警。
+10. **Task 6 有三条断言在"功能被删掉"时依然会绿**：`pathsOutsideTheApiPrefixAreNotGuardedEvenWhenTheGateIsClosed`（把整个过滤器删掉也绿）、`anAdminWriteIsPassedThroughToTheMvcLayer`（一个"永远放行"的 fail-open 过滤器也绿）、以及 `aBlankConsoleSecretFailsClosedWithConfigurationError` 的正文断言（它分不清 D16 的配置分支与过滤器里的 `IllegalStateException` 兜底分支，两者共用同一句文案 —— 变异 A2 存活就是这条）。前两条是**设计如此**的负向/边界用例，其真正的判别力由集成用例补足（`internalAndHealthEndpointsAreNotAffected`、`InternalAuthFilterContextPathTest`），不是缺陷；第三条的两个分支都是 fail-closed、在响应上**观测不可区分**，因此**不追**（用一个观测不到的差异去换判别力只会得到脆弱用例）。
 
 ### E.4 六条承重技术论断的评审结论（记录，供执行时参照）
 
@@ -2351,3 +2369,18 @@ Task 6/8/9/10/11 ─> Task 16 (管理台静态页)
 第三轮另外**独立复核了 Task 1 依赖的全部现实**（`SchemaMigrationTest` 确实 4 条用例且用 `JdbcTemplate` 而非 Flyway API；`allTenTablesExist` 恰好 10 张表；`request_log` 的两个列与 `RANGE COLUMNS(created_at)` 分区使两条 `ADD KEY` 合法且不撞名；实体写法与仓库一致；`AbstractIntegrationTest` 无全局清理因此"先归零"的警告是必要的），并确认 **Task 1 的 Files/Interfaces/V2 SQL/`git add` 完整**。
 
 **至此：Task 1 可以直接开工**（上述 RED 次序已写进正文），其后的任务按各自小节里的修正执行即可。
+
+---
+
+## 附录 G：Task 6 执行期的处置记录（代码已改，此处只记**计划/纪律**层面的事实）
+
+Task 6（登录 + `/api/**` 鉴权过滤器 + 两级角色）实现于 `8a7795a`，独立评审结论 **Ready to push**（0 Critical / 1 Important / 10 Minor）。执行期发现的四件事，逐条处置：
+
+| # | 发现 | 处置 |
+|---|---|---|
+| G1 | **真缺陷**：`ConsoleTokenService` 用 `strip()` 之后的长度做合规判定，却用**未 strip 的原值**做 HMAC 密钥 —— 被校验的值与实际使用的密钥不是同一个字符串。末尾带一个换行/空格的密钥（`echo`、`docker --env-file`、K8s Secret 的经典事故）会被判为合规，而密钥把那个空白算了进去 | **已修**：构造函数里**只归一化一次**（`normalizeSecret`），让"被校验的值"与"密钥"在构造上就是同一份；`ConsoleProperties` 复用同一个归一化器，避免启动 WARN 报的长度与合规判定互相矛盾。判别用例：用 `SECRET + "\n"` 签发的令牌必须能被 `SECRET` 校验（对未修代码是红的） |
+| G2 | **本计划内部不自洽**：D10 正文写"非 GET/HEAD 一律 403"，与 Task 6 的代码片段 `Set.of("GET","HEAD","OPTIONS")` 冲突，且 `OPTIONS` 没有任何用例 | **已按代码统一**（见正文 D10）：只读口径含 `OPTIONS`（无副作用 + CORS 预检），补一条 `VIEWER` + `OPTIONS` 的用例 |
+| G3 | **承重的假绿（纪律层面最严重的一条）**：`MeteringConsumerIntegrationTest.theSameEventTwiceInsertsExactlyOneRow` 的绿**依赖 surefire 的类顺序**。它把"队列是单消费者 FIFO ⇒ 栅栏行出现时重复消息必然已整条处理完"当作时序证明；但 Testcontainers 的 broker/queue 是 **JVM 单例**、Spring 上下文缓存不关，任何第二个带 `@RabbitListener` 的上下文都会在同一队列上放第二个消费者，而 prefetch 下栅栏消息可能被另一个消费者**先**处理完 → 读 appender 太早 → 因与幂等无关的原因变红。独立评审用**既有类** + `-Dsurefire.runOrder=reversealphabetical` 复现 **3/3 红** | **已修**：**保留**"重复消息必须真的到达消费者并在消费端被幂等丢弃"这条断言，把顺序推断换成**有界轮询**该 INFO 出现（appender 挂在全局消费者 logger 上，任何实例打的这条 INFO 都能被看到，错的只是时机推断）。**这不是"允许重跑/放宽断言"**：轮询只解决异步观测的时机，重复消息若真的没被重投递，用例仍然红。同时撤掉 Task 6 集成测试里为绕开它而临时加的 `spring.rabbitmq.listener.simple.auto-startup=false`（那会让该上下文不再是生产接线的完整复制）。⚠️ **纪律**：任何"我的用例绿了"的结论都必须能通过 `-Dsurefire.runOrder=reversealphabetical` 或改变类名顺序的检验 —— 顺序条件绿与 `-Dtest=A+B`、`failIfNoSpecifiedTests` 属同一类假绿 |
+| G4 | **证据缺口**：空/短密钥的 `500 CONFIGURATION_ERROR` 只在手工装配的 `MockMvcBuilders.standaloneSetup(...)` 里被断言过，真 Spring 上下文路径从未跑过这条映射 | **已补**：新增一条真上下文（空密钥）的集成用例，断言登录回 500 + `CONFIGURATION_ERROR`、`/api/**` 仍 401、文案含 `AIHUB_CONSOLE_SECRET` |
+
+另有一条**控制器自身的错误**记录在此：Task 6 的任务简报把"Docker 正在运行"写成任务开始时的既成事实，而当时引擎并未启动（上一次 Docker 会话已于 2026-09-28 23:45 结束）。实现者没有照着假设走，而是**先测这个前提**并带着原始证据回报矛盾 —— 这正是本项目要的行为。**纪律**：简报里的环境前提是"待复测的断言"，不是事实；任何简报都不许把可测量的前提写成陈述句。
