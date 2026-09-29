@@ -4,9 +4,25 @@ import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 
-import java.time.Instant;
+import java.time.LocalDateTime;
 
-/** 对应 Flyway V1 的 {@code api_key} 表。明文 secret 从不入库，只存 SHA-256。 */
+/**
+ * 对应 Flyway V1 的 {@code api_key} 表。明文 secret 从不入库，只存 SHA-256。
+ *
+ * <p><b>{@code expire_at} 用 {@link LocalDateTime} 而不是 {@code Instant} / {@code java.util.Date}：
+ * {@code expire_at} 是 {@code DATETIME(3)}（不带时区），而 V1 的约定是「时间统一 {@code datetime(3)}，
+ * 按 **UTC** 存储」—— 它紧挨着的 {@code created_at} / {@code updated_at} 由库的
+ * {@code CURRENT_TIMESTAMP(3)} 生成，存的就是 UTC 墙上时间。用 {@code Instant} 会让驱动**按 JVM
+ * 默认时区**（本机 Asia/Shanghai）把瞬时折成墙上时间写进去、再按同一个默认时区折回来读，于是实体
+ * 往返**自洽但与兄弟列差 8 小时**：裸 SQL 写入方（seeder / 运维）、以及将来任何
+ * {@code where expire_at > now()} / {@code utc_timestamp()} 的比较都落在另一个基准上。
+ * 显式换算只有在写入点（{@code ApiKeyService.mint}）与读取点
+ * （{@code ApiKeyService.loadFromDb}）各做一次，基准才写在代码里而不是 JVM 的默认设置里。
+ *
+ * <p>跨服务的契约不受影响：{@code ApiKeyView.expireAt} 仍是 {@code Instant}（HTTP/JSON 里由
+ * {@code AdminClient} 用 {@code Instant.parse} 解析，Redis 里由 {@code ApiKeyCacheCodec} 存
+ * epoch 秒），换算只发生在本实体与数据库之间。
+ */
 @TableName("api_key")
 public class ApiKeyEntity {
 
@@ -17,7 +33,8 @@ public class ApiKeyEntity {
     private String keyHash;
     private String name;
     private String status;
-    private Instant expireAt;
+    /** {@code DATETIME(3) NULL}，**UTC 墙上时间**（见类注释）；{@code null} 表示永不过期。 */
+    private LocalDateTime expireAt;
 
     public Long getId() {
         return id;
@@ -67,11 +84,11 @@ public class ApiKeyEntity {
         this.status = status;
     }
 
-    public Instant getExpireAt() {
+    public LocalDateTime getExpireAt() {
         return expireAt;
     }
 
-    public void setExpireAt(Instant expireAt) {
+    public void setExpireAt(LocalDateTime expireAt) {
         this.expireAt = expireAt;
     }
 }

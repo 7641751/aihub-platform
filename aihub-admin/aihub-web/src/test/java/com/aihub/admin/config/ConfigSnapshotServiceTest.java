@@ -19,6 +19,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.List;
 
@@ -53,6 +57,13 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
 
     private static final String ACTIVE = "ACTIVE";
     private static final String INACTIVE = "INACTIVE";
+
+    /**
+     * {@code version} 基准的容差（毫秒）。这一格是 {@code datetime(3)}，写入的是整数毫秒，
+     * 因此「精确相等」本就成立；留 1 ms 只为把「截断」与「基准错」分开 —— 8 小时的缺陷
+     * （28800000 ms）比它大七个数量级，绝不会被它兜住。
+     */
+    private static final long VERSION_BASIS_TOLERANCE_MILLIS = 1L;
 
     /** 合成明文（不是任何真实密钥）：只用来证明「快照里拿到的密文能解回它、且密文里没有它」。 */
     private static final String SYNTHETIC_PLAINTEXT = "sk-channel-plaintext-synthetic";
@@ -132,6 +143,51 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
         assertThat(service.snapshot().version())
                 .as("改一行（不是新增）同样必须让版本严格变大，否则网关会拿着陈旧快照继续服务")
                 .isGreaterThan(afterPolicyInsert);
+    }
+
+    /**
+     * 决策 D5 的时间**基准**：{@code max(updated_at)} 只来自**裸 SQL / seeder** 这条路径
+     * （控制台写入会走 {@code ConfigChangePublisher} 抬水位，把这一半盖住），因此这里把水位显式
+     * 归零（见 {@link #resetVersionWatermark()}）、只靠一行 raw SQL 解释版本。
+     *
+     * <p><b>本用例是判别器</b>：{@code datetime(3)} 列里存的是 **UTC 墙上时间**，所以回读必须走
+     * 「不做任何时区换算」的载体 —— 先用 {@link LocalDateTime} 读出那一格（驱动对它会原样搬运），
+     * 再显式折 {@code toInstant(ZoneOffset.UTC)}。曾经的实现读 {@code java.sql.Timestamp} 再
+     * {@code toInstant()}，驱动会按 **JVM 默认时区**（本机 Asia/Shanghai）解释这串墙上时间，
+     * 于是版本整整早 8 小时（28800000 ms）—— 对「几秒内收敛」的验收判据来说就是永远不收敛。
+     *
+     * <p>容差 {@value #VERSION_BASIS_TOLERANCE_MILLIS} ms：这一行**不加**容差就是精确相等，
+     * 保留 1 毫秒只是给 {@code datetime(3)} 的毫秒截断留位（这里实际上是整数毫秒，取 0 也会绿）。
+     * 8 小时的偏差比它大 7 个数量级，因此「红」不会靠容差。
+     */
+    @Test
+    void versionUsesTheUtcWallClockBasisOfUpdatedAtNotTheJvmDefaultZone() {
+        // 水位的归零在 @BeforeEach（resetVersionWatermark）：此刻 config_version.version = 0，
+        // 因此 currentVersion() 只可能等于这一行的 updated_at。
+        assertThat(jdbcTemplate.queryForObject(
+                "select version from config_version where id = 1", Long.class))
+                .as("前置条件：水位必须是 0，否则下面测的是水位而不是 max(updated_at)")
+                .isZero();
+
+        insertChannel("snap-utc-basis", ACTIVE);
+
+        // 关键：用 LocalDateTime 读回那一格 —— 这个载体不做时区换算，拿到的就是库里的墙上时间。
+        LocalDateTime stored = jdbcTemplate.queryForObject(
+                "select updated_at from channel where name = ?", LocalDateTime.class, "snap-utc-basis");
+        assertThat(stored).as("这一行的 updated_at 必须真的落库（不是 null）").isNotNull();
+        long expected = stored.toInstant(ZoneOffset.UTC).toEpochMilli();
+
+        long actual = service.currentVersion();
+        long skewedIfTheJvmZoneIsApplied = stored.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+
+        assertThat(Math.abs(actual - expected))
+                .as("version 必须把 updated_at 当作 **UTC** 墙上时间来解释：库里存的是 %s，期望 %d ms，"
+                                + "实际 %d ms（差 %d ms）。JVM 默认时区 = %s，按它解释这一格会得到 %d ms，"
+                                + "也就是早 %d ms —— 这正是被修掉的那个缺陷（容差 %d ms）",
+                        stored, expected, actual, actual - expected, ZoneId.systemDefault(),
+                        skewedIfTheJvmZoneIsApplied, expected - skewedIfTheJvmZoneIsApplied,
+                        VERSION_BASIS_TOLERANCE_MILLIS)
+                .isLessThanOrEqualTo(VERSION_BASIS_TOLERANCE_MILLIS);
     }
 
     /**

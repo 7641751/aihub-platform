@@ -17,6 +17,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -78,6 +80,17 @@ public class ApiKeyService {
     public record IssuedKey(String token, String keyId) {
     }
 
+    /**
+     * 铸造一把 key。{@code expireAt} 是**瞬时**（跨服务契约用 {@code Instant}）；
+     * 落库时显式折成 {@code api_key.expire_at} 的基准 —— **UTC 墙上时间**
+     * （{@code DATETIME(3)}，与兄弟列 {@code created_at} / {@code updated_at} 同基准）。
+     *
+     * <p><b>这个换算是承重的</b>：实体字段是 {@code LocalDateTime}（不做时区换算的载体），
+     * 库里的那串数字就是 UTC 墙上时间。若这里直接塞 {@code Instant}（或让字段退回 {@code Instant}），
+     * 驱动会按 **JVM 默认时区**（本机 Asia/Shanghai）折墙上时间，实体往返虽然自洽，但列里的值与
+     * 兄弟列差 8 小时 —— 裸 SQL 写入方、以及将来 {@code where expire_at > now()} 的比较都会错。
+     * 基准只写在这里与 {@link #loadFromDb} 的读回处各一次，不依赖 JVM 设置。
+     */
     @Transactional
     public IssuedKey mint(String tenantName, String keyName, Instant expireAt) {
         TenantEntity tenant = findOrCreateTenant(tenantName);
@@ -92,9 +105,11 @@ public class ApiKeyService {
         entity.setKeyHash(keyHash);
         entity.setName(keyName);
         entity.setStatus(ApiKeyView.STATUS_ACTIVE);
-        entity.setExpireAt(expireAt);
+        entity.setExpireAt(expireAt == null ? null : LocalDateTime.ofInstant(expireAt, ZoneOffset.UTC));
         apiKeyMapper.insert(entity);
 
+        // 缓存载荷仍用**瞬时**（{@link ApiKeyCacheCodec} 存 epoch 秒，跨服务契约）：换算只发生在
+        // 实体 ↔ 数据库之间，Redis / JSON 的线格式一个字节都没变。
         cache(keyHash, new ApiKeyView(keyId, tenant.getId(), tenantName, ApiKeyView.STATUS_ACTIVE, expireAt,
                 entity.getId()));
         log.info("已铸造 API Key keyId={} tenant={} name={}", keyId, tenantName, keyName);
@@ -111,6 +126,16 @@ public class ApiKeyService {
         return fromDb;
     }
 
+    /**
+     * 回源 MySQL。{@code api_key.expire_at} 是 {@code DATETIME(3)}、按 **UTC 墙上时间**存储
+     * （与列 {@code created_at} / {@code updated_at} 同基准），实体字段因此是
+     * {@link LocalDateTime}；这里显式声明基准折回 {@link ApiKeyView} 需要的**瞬时**
+     * （{@code toInstant(ZoneOffset.UTC)}）。
+     *
+     * <p>不这么做（字段留 {@code Instant}、或在这里用 {@code Timestamp}）会让驱动按 **JVM 默认
+     * 时区**解释那一格，读出的瞬时整整差 8 小时（本机 Asia/Shanghai）——而
+     * {@link ApiKeyView#usable()} 正是拿这个瞬时与 {@code Instant.now()} 比的，落在鉴权路径上。
+     */
     private Optional<ApiKeyView> loadFromDb(String keyHash) {
         ApiKeyEntity entity = apiKeyMapper.selectOne(new LambdaQueryWrapper<ApiKeyEntity>()
                 .eq(ApiKeyEntity::getKeyHash, keyHash));
@@ -119,8 +144,10 @@ public class ApiKeyService {
         }
         TenantEntity tenant = tenantMapper.selectById(entity.getTenantId());
         String tenantName = tenant == null ? "" : tenant.getName();
+        // 视图（跨服务契约）仍是瞬时：null 保持 null（= 永不过期），不做任何默认值兜底。
+        Instant expireAt = entity.getExpireAt() == null ? null : entity.getExpireAt().toInstant(ZoneOffset.UTC);
         return Optional.of(new ApiKeyView(entity.getKeyId(), entity.getTenantId(), tenantName,
-                entity.getStatus(), entity.getExpireAt(), entity.getId()));
+                entity.getStatus(), expireAt, entity.getId()));
     }
 
     private TenantEntity findOrCreateTenant(String tenantName) {

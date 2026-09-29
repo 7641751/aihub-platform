@@ -19,7 +19,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.sql.Timestamp;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -139,10 +140,32 @@ public class ConfigSnapshotService {
         return max;
     }
 
+    /**
+     * 一张配置表的 {@code updated_at} 最大值（epoch 毫秒）；空表为 {@code null}。
+     *
+     * <p><b>为什么用 {@link LocalDateTime} 读、而不是 {@code java.sql.Timestamp} / {@code Instant}</b>：
+     * V1 的约定是「时间统一 {@code datetime(3)}，按 **UTC** 存储」（DDL 第 2 行），而
+     * {@code datetime} 这一列类型**不带时区** —— 库里那串数字就是 UTC 墙上时间本身。
+     * {@link LocalDateTime} 正是「不做任何时区换算」的载体，驱动对它原样搬运；而
+     * {@code java.sql.Timestamp}（以及任何走 {@code Instant} 字段的映射）会把这串墙上时间按
+     * **JVM 默认时区**解释成瞬时 —— 本机是 Asia/Shanghai，于是版本整整早 8 小时
+     * （实测：库里 {@code 2026-09-29T14:04:36.652} 被读成 {@code 1790661876652}，真值
+     * {@code 1790690676652}，差 {@code -28800000} ms）。
+     *
+     * <p>这个 8 小时不是「略有偏差」：水位被这次读抬上去的版本会**长期低于**真实时间戳，而网关的
+     * 版本比对是严格 {@code >} —— 控制面改了配置、数据面却认为收到的快照「不比手上的新」，
+     * 于是 Task 3 的验收判据（配置改动在数秒内生效）静默不成立。今天这条路径大部分被
+     * {@code ConfigChangePublisher}（用 {@code System.currentTimeMillis()} 抬水位）盖住，
+     * 剩下的正是**裸 SQL / seeder** 这条只有 {@code max(updated_at)} 可用的路径。
+     *
+     * <p>{@code toInstant(ZoneOffset.UTC)} 把「无时区的墙上时间」显式声明成 UTC 瞬时 ——
+     * 基准写在代码里，不依赖任何 JVM 默认设置。
+     */
     private Long maxUpdatedAt(String table) {
         // 表名来自本类的常量列表，不来自任何外部输入（没有注入面）。
-        Timestamp max = jdbcTemplate.queryForObject("select max(updated_at) from " + table, Timestamp.class);
-        return max == null ? null : max.toInstant().toEpochMilli();
+        LocalDateTime max = jdbcTemplate.queryForObject(
+                "select max(updated_at) from " + table, LocalDateTime.class);
+        return max == null ? null : max.toInstant(ZoneOffset.UTC).toEpochMilli();
     }
 
     private List<ChannelDescriptor> channels() {

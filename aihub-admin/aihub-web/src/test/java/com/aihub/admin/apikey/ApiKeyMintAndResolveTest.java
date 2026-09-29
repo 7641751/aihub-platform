@@ -19,6 +19,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -29,6 +32,13 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
 
     private static final String TEST_SECRET = "test-internal-secret-test-internal-secret";
     private static final String RESOLVE_PATH = "/internal/api-keys/resolve";
+
+    /**
+     * {@code expire_at} 往返的容差（毫秒）：只给 {@code Instant.now()} 的纳秒被 {@code DATETIME(3)}
+     * 截断留位。原来的 1 **秒**容差是本次收紧掉的那一半 —— 它宽到足以把「基准错」这类偏差的一部分
+     * 吞掉，而对「这个值到底以什么基准落库」这个问题，1 秒和 8 小时只差一个数量级。
+     */
+    private static final long EXPIRY_ROUND_TRIP_TOLERANCE_MILLIS = 1L;
 
     @Autowired
     private ApiKeyService apiKeyService;
@@ -178,10 +188,54 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
         assertThat(view.expireAt())
                 .as("回源读回 null 等于把有期限的 key 变成永不过期的 key")
                 .isNotNull();
+        // 容差 1 ms：{@code datetime(3)} 只存到毫秒，而 Instant.now() 带纳秒 —— 截断最多 1 ms，
+        // 从前的 1 秒容差是**故意留白的**：它同时兜住了「JVM 默认时区被带上」这类错误，而这次
+        // 收紧到 1 ms 之后，任何时区级别的偏差（本机 8 小时）都不可能再被容差吃掉。
         assertThat(Duration.between(expireAt, view.expireAt()).abs())
-                .as("datetime(3) 只有毫秒精度，允许 1 秒的截断误差")
-                .isLessThanOrEqualTo(Duration.ofSeconds(1));
+                .as("datetime(3) 只有毫秒精度：唯一允许的误差是纳秒被截断的那不到 1 ms")
+                .isLessThanOrEqualTo(Duration.ofMillis(EXPIRY_ROUND_TRIP_TOLERANCE_MILLIS));
         assertThat(view.usable()).isTrue();
+    }
+
+    /**
+     * Fix 2 的判别器：{@code api_key.expire_at} 是 {@code DATETIME(3)}，而它的兄弟列
+     * {@code created_at} / {@code updated_at} 由数据库生成、存的是 **UTC 墙上时间**。
+     * 因此这一格必须与兄弟们**同一个基准** —— 用 {@link LocalDateTime} 读回来（该载体不做时区
+     * 换算），按 UTC 折成的 epoch 毫秒必须等于铸 key 时给的那个 {@code Instant}。
+     *
+     * <p><b>为什么不走实体</b>：字段是 {@code Instant} 时，驱动写入按 JVM 默认时区（本机
+     * Asia/Shanghai）折墙上时间、读回再按同一默认时区折回瞬时 —— 实体往返**恰好自洽**，
+     * 于是「实体读回来的值对」这件事**证明不了列里的基准是对的**（原有往返用例就是这样被兜住的）。
+     * 判别力只能来自裸 JDBC：本用例读的是列本身，不是实体。裸 SQL 写入方（seeder、运维、
+     * 以及将来的 {@code where expire_at > now()} 比较）看到的正是这一格。
+     *
+     * <p>容差 {@value #EXPIRY_ROUND_TRIP_TOLERANCE_MILLIS} ms：只给 {@code Instant.now()} 的
+     * 纳秒被 {@code DATETIME(3)} 截断留位。8 小时 = 28800000 ms，比它大七个数量级。
+     */
+    @Test
+    void expireAtIsStoredOnTheUtcWallClockBasisSharedByItsSiblingColumns() {
+        Instant expireAt = Instant.now().plus(Duration.ofDays(365));
+
+        ApiKeyService.IssuedKey issued = apiKeyService.mint("t-expiry-basis", "key-expiry-basis", expireAt);
+
+        // 裸 JDBC、按 LocalDateTime 读那一格：不做任何时区解释。
+        LocalDateTime stored = jdbcTemplate.queryForObject(
+                "select expire_at from api_key where key_id = ?", LocalDateTime.class, issued.keyId());
+        assertThat(stored).as("expire_at 必须真的落库（不是 null、也不是被截断成零值）").isNotNull();
+
+        long storedAsUtcMillis = stored.toInstant(ZoneOffset.UTC).toEpochMilli();
+        long expectedMillis = expireAt.toEpochMilli();
+        long skewedIfTheJvmZoneIsApplied = stored.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+
+        assertThat(Math.abs(storedAsUtcMillis - expectedMillis))
+                .as("api_key.expire_at 必须与 created_at/updated_at 同一基准（UTC 墙上时间）："
+                                + "库里存的是 %s，按 UTC 折回是 %d ms，铸 key 给的瞬时是 %d ms（差 %d ms）；"
+                                + "按 JVM 默认时区（%s）折回才是 %d ms —— 差值 %d ms 就是被修掉的缺陷"
+                                + "（容差 %d ms）",
+                        stored, storedAsUtcMillis, expectedMillis, storedAsUtcMillis - expectedMillis,
+                        ZoneId.systemDefault(), skewedIfTheJvmZoneIsApplied,
+                        expectedMillis - skewedIfTheJvmZoneIsApplied, EXPIRY_ROUND_TRIP_TOLERANCE_MILLIS)
+                .isLessThanOrEqualTo(EXPIRY_ROUND_TRIP_TOLERANCE_MILLIS);
     }
 
     /** Finding I1 的另一半：过期时间在过去时，**DB 回源**同样必须判为不可用（不靠 Redis 里那份载荷）。 */
