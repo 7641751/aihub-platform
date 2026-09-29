@@ -572,7 +572,8 @@ public class ConfigChangePublisher {
 - [ ] **Step 4: 跑它确认通过**
 
 Run: `mvn -B -pl aihub-admin/aihub-common -am test "-Dtest=ConfigInvalidateCodecTest"` → `Tests run: 4, Failures: 0`
-Run: `mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ConfigChangePublisherTest"`（`DOCKER_HOST=tcp://127.0.0.1:2375`）→ `Tests run: 1, Failures: 0`
+Run: `mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ConfigChangePublisherTest"`（`DOCKER_HOST=tcp://127.0.0.1:2375`）→ `Tests run: 3, Failures: 0`
+> ⚠️ 本条原写 `Tests run: 1`，**从来就不对**：该类在创建它的那一提交（`c93970f`）里就已经有 **2** 条 `@Test`，Task 2 的修复轮（`097dc72`）加到 **3** 条。已按现状改成 3 —— **别改回 1**。教训：把「期望跑出几条用例」写成字面数字会随测试增长而腐坏，评审时这类数字必须与实际重跑核对，不能当成通过判据。
 Expected: 两条都 `BUILD SUCCESS`。
 
 - [ ] **Step 5: 提交**
@@ -1229,7 +1230,9 @@ git commit -m "feat(console): add console login and the /api/** token filter wit
 **Interfaces:**
 - Consumes: `AuditLogMapper`（Task 1）
 - Produces:
-  - `AuditService.record(long tenantId, Actor actor, String action, String targetType, String targetId, Map<String,Object> detail) : void`（`Actor` = record `(String type, String id)`，`USER`/`SYSTEM`）
+  - `AuditService.record(Long tenantId, Actor actor, String action, String targetType, String targetId, Map<String,Object> detail) : void`（`Actor` = record `(String type, String id)`，`USER`/`SYSTEM`）
+    - ⚠️ **E.3-3 的裁定（2026-09-29，执行 Task 7 时定死）**：`tenantId` 是装箱 **`Long`** 而不是 `long`。`audit_log.tenant_id` 是 `BIGINT NULL`，`AuditLogEntity.tenantId` 本来也是 `Long` —— 所以这个选择**不需要改实体或迁移**。而 `LOGIN_FAILURE`（用户名不存在）这类事件**真的没有租户上下文**：传 `null` 写 SQL NULL，**不许用 `0` 当哨兵**（`0` 与真实 id 空间无法区分，id 从 1 开始；M2 的 `request_log.tenant_id = 0` 哨兵是那一列 `NOT NULL` 逼出来的，不是更优解）。**必须有一条用例**：传 `null` 落库后读回来**仍然是 NULL**（不是 0）。
+    - ⚠️ `record` **不加** `@Transactional(REQUIRES_NEW)`：它必须加入调用方的事务，否则「改了但没审计」与「审计了但业务回滚」都会发生（D8）。
   - `AuditAction` 常量：`TENANT_CREATE/UPDATE`、`API_KEY_CREATE/DISABLE/ENABLE/DELETE`、`CHANNEL_CREATE/UPDATE/DELETE/ROTATE_KEY`、`ROUTE_CREATE/UPDATE/DELETE`、`RATE_LIMIT_CREATE/UPDATE/DEACTIVATE`、`QUOTA_UPDATE`、`LOGIN_SUCCESS/LOGIN_FAILURE`、`RECONCILE_REPORT`
 
 - [ ] **Step 1: 写失败测试**
@@ -1275,7 +1278,7 @@ public class AuditService {
      * 「改了但没审计」是不可接受的，所以审计失败要让业务一起回滚。
      * detail 只放**非敏感**字段（如渠道名、权重、状态），**绝不放**明文密钥、密文、口令、令牌。
      */
-    public void record(long tenantId, Actor actor, String action, String targetType, String targetId,
+    public void record(Long tenantId, Actor actor, String action, String targetType, String targetId,
                        Map<String, Object> detail) {
         AuditLogEntity row = new AuditLogEntity();
         row.setTenantId(tenantId);
@@ -2261,9 +2264,9 @@ Task 6/8/9/10/11 ─> Task 16 (管理台静态页)
 
 ### E.3 仍未修（**明确登记**，不要当成已经解决）
 
-1. **Task 6 的 `theConsoleAssetsAreNotBehindTheTokenFilter`**（I8 的后半）：它断言 `GET /console/index.html` 200，而那些文件到 Task 16 才存在。**执行到 Task 6 时**：把这条断言**删掉**（登录页的可访问性由 Task 16 的 `ConsoleStaticResourceTest` 覆盖），或者把 Task 16 的静态资源骨架前移到 Task 6 —— 二选一，并在报告里说明选了哪个。
+1. ✅ **已于 Task 6 执行期（2026-09-29）解决** —— 原条目：Task 6 的 `theConsoleAssetsAreNotBehindTheTokenFilter`（I8 的后半）断言 `GET /console/index.html` 200，而那些文件到 Task 16 才存在，**按字面执行不了**。二选一里选了「**删掉该断言**」：Task 6 的正文现在明确写「本任务**不要写** `GET /console/index.html` → 200；它属 Task 16」，登录页可访问性由 Task 16 的 `ConsoleStaticResourceTest` 覆盖。**编号保留**是为不打乱 E.3-2…E.3-10 在别处（F.4/F.5、附录 G）的引用。**本条不再是未修项。**
 2. **I10①（503 vs key-not-found 的计数器）**：M4 不做，README 保留为 M4 之后仍未做项。
-3. **`audit_log.tenant_id` 可空、而 `AuditService.record(long tenantId, …)` 是原始类型**：`LOGIN_FAILURE` 这类没有租户的事件会写 `0` 而不是 `NULL`。执行时二选一：把参数改成 `Long` 并在登录失败时传 `null`，或保留 `0` 并在 README 登记「0 = 无租户上下文」。**必须选一个并登记**。
+3. ✅ **已于 Task 7 执行期裁定（2026-09-29）** —— 原条目：`audit_log.tenant_id` 可空，而 `AuditService.record(long tenantId, …)` 是原始类型，`LOGIN_FAILURE` 这类事件会写 `0` 而不是 `NULL`。**选了「参数改成 `Long`、无租户事件传 `null`」**：`audit_log.tenant_id` 是 `BIGINT NULL` 且 `AuditLogEntity.tenantId` 本来就是装箱 `Long`，所以这个选择**不动实体、不动迁移**；而 `0` 与真实 id 空间无法区分（id 从 1 开始），M2 那个 `request_log.tenant_id = 0` 哨兵是列 `NOT NULL` 逼出来的、不是更优解。已写进 Task 7 的 Interfaces，并要求一条用例断言「`null` 落库后读回来仍是 NULL，不是 0」。**本条不再是未修项。**
 4. **`QuotaEstimator` 的 `maxInMemoryBytes`**：它读请求体，而网关还有计量侧的捕获上限（`aihub.metering.max-capture-bytes`）。**上限必须小于计量侧上限**，否则控制器先失败、计量根本看不到这次请求。执行 Task 13 时确认这两个数字的关系并写进配置注释。
 5. **`MeteringSchedulingConfig`**：评审指出它可能只是 `@EnableScheduling`、`@Scheduled` 应当直接标在 job 上 —— Task 15 的 Files 里列了它；执行时若确实只是 `@EnableScheduling`，**不要**为了「让 Files 清单成立」而制造一次无意义改动（改动清单以实际需要为准，报告里说明即可）。
 6. **§10 的测试覆盖率目标（核心链路 ≥70%）** 在本计划里**没有被测量**：M4 收口时若时间允许，用 JaCoCo 量一次并写进 README；不允许在没有测量数据的情况下声称达成。

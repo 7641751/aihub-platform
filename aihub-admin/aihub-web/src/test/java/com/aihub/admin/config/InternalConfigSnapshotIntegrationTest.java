@@ -135,7 +135,14 @@ class InternalConfigSnapshotIntegrationTest extends AbstractIntegrationTest {
         assertThat(envelope.path("code").asText()).isEqualTo("OK");
         assertThat(names(data)).containsExactlyInAnyOrder(
                 "version", "generatedAtEpochMilli", "channels", "routes", "ratePolicies", "defaultModel");
-        assertThat(data.path("version").asLong()).as("决策 5：真实数据写进去以后版本必须为正").isPositive();
+        // 指代明确化（2026-09-29）：这里的"决策 5"是 **M3**（2026-09-23-m3-traffic-governance.md）的决策 5 ——
+        // 「快照 version = max(三张配置表的 updated_at) 折算成 epoch 毫秒；没有任何配置行时为 0」。
+        // 因为它，本断言才成立：插入了真实配置行 ⇒ updated_at 被推进 ⇒ version 必须为正，而 0 只表示"一条都没有"。
+        // M4 的 D5 在这个时间戳之上又加了 config_version 水位（version = max(max(updated_at), config_version.version)），
+        // 结论不变（仍然为正）。原注释只写"决策 5"，跨里程碑的编号无法区分是 M2/M3/M4 的哪一条。
+        assertThat(data.path("version").asLong())
+                .as("M3 决策 5（+ M4 D5 的水位）：真实数据写进去以后版本必须为正，0 只代表没有任何配置行")
+                .isPositive();
         assertThat(data.path("generatedAtEpochMilli").asLong()).isPositive();
 
         // ② 渠道段：键名与 AdminClient.Http.parseSnapshot 里读的九个键逐一对应，密文逐字相等。
