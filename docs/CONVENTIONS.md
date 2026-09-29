@@ -275,6 +275,26 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
   `request_log` 的 `ALTER` 权限**。
 - 分区边界只声明**上界**，最低的那个分区是下无界的：所以「时间戳早于最早分区」**不会**落库失败
   （2020 年的时间戳照样进 `p202609`）。真正会被判死信的是**超出 `DATETIME` 值域**的时间戳（`ERROR 1292`）。
+- **`datetime(3)` 必须映射成 Java `LocalDateTime` 并在应用侧显式按 UTC 写入；不要用 `Instant`，也不要依赖
+  `DEFAULT CURRENT_TIMESTAMP(3)`。** 两条实测理由（2026-09-29，Task 7 的独立评审在真容器里量出来的）：
+  1. `DEFAULT CURRENT_TIMESTAMP(3)` 写的是**数据库会话时区**的墙上时间。Testcontainers 的 MySQL 基准恰好是
+     UTC（`NOW(3) == UTC_TIMESTAMP(3)`），所以今天两张表看起来一致 —— 但一旦某台 MySQL 不是 UTC，同一个列
+     就会出现**两种基准**（应用显式写 UTC、默认值写本地）。基准不能取决于数据库服务器的时区配置。
+  2. MyBatis 用 `getTimestamp()` 读 `datetime`，而它按 **JVM 默认时区**解释那个墙上时间。本机 JVM 是
+     Asia/Shanghai，于是 `getTimestamp().toInstant()` 与实体里的 `Instant` 字段都**早了整整 8.0 小时**。
+     实测后果最要命的一条：同一个 ±10 分钟窗口，用 `LocalDateTime`(UTC) 绑定能查到 **1/1** 行，用
+     `Timestamp`/`Instant` 绑定查到 **0 行** —— 驱动把边界推后 8 小时，**最近 8 小时写的行全部不可见**。
+     而 `LocalDateTime` 字段 + 显式 UTC 赋值（`LocalDateTime.ofInstant(clock.instant(), ZoneOffset.UTC)`，
+     见 `RequestLogService`）读写对称、没有隐式转换。
+  3. 所以新增时间列**照抄 `RequestLogService` 的写法**。写测试时**不要拿数据库的钟和数据库的钟对** —— 那正好
+     把这个 8 小时错误盖住（Task 7 第一版就是这么写的，1 小时容差 + 双 DB 钟比较，全绿但错）。要断言
+     「读回来的 `LocalDateTime` 按 UTC 折算成 `Instant` 后，与 `Instant.now()` 相差在秒级」。
+- **`eq(column, null)` 恒不成立，而 MyBatis-Plus 不会替你忽略它**：
+  `LambdaQueryWrapper.eq(AuditLogEntity::getTenantId, null)` 生成 `WHERE (tenant_id = ?)`、参数是 `null`
+  ⇒ 恒为 UNKNOWN ⇒ **静默返回 0 行**（既不报错也不忽略条件）。实测：`eq(null)` 得 0 行，`isNull()` 得 1 行，
+  裸 SQL `count(*) where tenant_id is null` = 1。凡是按**可选维度**（`tenant_id`、`api_key_id`）过滤的查询
+  —— Task 8/9/10 的列表与 Task 11 的日志/审计查询都会遇到 —— **必须**用 `isNull()`/`isNotNull()`，绝不把
+  `null` 交给 `eq`。这属于「静默给出错答案」那一类，比抛异常危险得多。
 
 ## 8. 测试纪律
 
