@@ -508,6 +508,37 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
                 .isEqualTo(tenantId);
     }
 
+    // ---------------------------------------------------------------- 9b) PUT 路由：应用取值 + 未知 id 404
+
+    /**
+     * {@code PUT /api/routes/{id}} 必须真的把 {@code weight}/{@code priority}/{@code status} 落库，
+     * 且未知 id 返回 404。判别力由变异体 {@code M12}（update 里不应用 weight、始终取默认值）提供：
+     * 变异后 {@code weight} 仍是 100，`isEqualTo(7)` 精确变红。
+     *
+     * <p><b>登记（覆盖缺口用例）</b>：本条在实现落地之后才补上（Task 9 修复轮同款先例）—— 计划 Step 1
+     * 只草拟了 4 条用例，路由 PUT 不在其中；因此它**没有经历自己的 RED**，可证伪性由变异体 {@code M12}
+     * 提供，而不是由「先写会红的测试」提供。
+     */
+    @Test
+    void updatingARouteAppliesWeightPriorityAndStatusAnd404sForUnknownId() throws Exception {
+        long channelId = createChannel();
+        long routeId = postRoute(uniqueModelName(), channelId);
+
+        ResponseEntity<String> res = put(ROUTES + "/" + routeId,
+                Map.of("weight", 7, "priority", 5, "status", INACTIVE), CLIENT_TENANT);
+        assertThat(res.getStatusCode()).as("更新路由必须 200（响应体=%s）", res.getBody())
+                .isEqualTo(HttpStatus.OK);
+
+        ModelRouteEntity updated = modelRouteMapper.selectById(routeId);
+        assertThat(updated.getWeight()).as("PUT 必须真的把 weight 落库").isEqualTo(7);
+        assertThat(updated.getPriority()).as("PUT 必须真的把 priority 落库").isEqualTo(5);
+        assertThat(updated.getStatus()).as("PUT 必须真的把 status 落库").isEqualTo(INACTIVE);
+
+        ResponseEntity<String> missing = put(ROUTES + "/9000000000", Map.of("weight", 1), CLIENT_TENANT);
+        assertThat(missing.getStatusCode()).as("未知 id 的 PUT 必须 404（响应体=%s）", missing.getBody())
+                .isEqualTo(HttpStatus.NOT_FOUND);
+    }
+
     // ---------------------------------------------------------------- 10) 夹具自守
 
     /**
