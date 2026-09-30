@@ -51,6 +51,7 @@
 - **每个任务的提交必须让整个反应堆编译通过，且该任务自述的测试全绿**；共享契约（Pub/Sub 频道名与载荷、配额 Lua 与键布局、令牌格式、`/api/**` 的错误码）必须在**第一个需要它的任务之前**就位，**不允许跨任务占位**（不允许「先传 null、后面任务再补」，也不允许「此处待后续任务收口」这类注释）。判定方法：每个任务结束前跑一次全反应堆 `mvn -B -q test-compile -DskipTests`，必须绿。
 - 命令一律在项目根目录执行；不用 Maven wrapper，用本机 `mvn`。
 - **不做的事**（按此判断越界）：`/v1/embeddings` 与文档流水线（M5）、压测/故障注入报告与指标端点暴露（M6）、Redis `requirepass` 与网络隔离生产加固（M6）、多实例部署编排、账单计费单价（`billing_daily.cost` 本里程碑只写 0 并登记）、RS256/JWKS/refresh token、第三方登录、管理台的多租户 RBAC 细粒度权限（只做 `ADMIN`/`VIEWER` 两级）。
+- **控制面（`/api/**`）的租户模型（2026-09-30 定死；Task 10 起一律照办，完整规则、理由与"不许用的方案"见 `docs/CONVENTIONS.md` §10）**：控制台是**平台运营台**，不是租户自助台（依据就是上一条"不做的事"与 Task 11 的 `?tenantId=` 接口）。四条规则：**R1** 全局资源（`tenant` / `channel` / `model_route`，表里**没有** `tenant_id`）的读写是平台级，任何 `ADMIN`；**R2** 租户维度资源（`api_key` / `quota` / `rate_limit_policy`）的**写**同样是平台级（运营必须能对违规租户做**应急吊销**），但审计的 `tenant_id` **必须**记**目标资源的**租户 id（不是操作者的租户、不是 NULL）；**R3** 租户维度资源的**查**分两类 —— **运营查询**（`/api/logs`、`/api/audit`、`/api/billing/daily`）**必须显式 `tenantId`**、缺省 400（防无界扫描），**资源列表**（`/api/api-keys`，将来的 `/api/quotas`、`/api/rate-limits`）**缺省 = 令牌里的 `tenantId`**（least privilege；将来运营要跨租户列举再加**可选**覆盖，今天不做）；**R4** 令牌里的 `tenantId` **不是授权边界**，只在 R3.2 的缺省值上起作用。**不许**用 MyBatis-Plus 的 `TenantLineInnerInterceptor` 之类的全局租户拦截器（控制面不是唯一数据访问方：`ApiKeyService.resolve` 由 gateway 经内部 HTTP 调、`MeteringConsumer` 在 MQ 线程里、`@Scheduled` 的维护/对账任务**必须跨租户**，三者都没有租户上下文）。**升级门槛（硬）**：① 出现**第一个非平台方账号**、② 控制台对**非可信网络**暴露、③ 引入**租户自助** —— 三者任一成立，前提即失效，**必须先落地租户隔离（第三级角色 + 写路径按租户收窄）再继续**。
 
 ### 本机环境前提（**每一条都在别的里程碑上真实踩过**，照做）
 
