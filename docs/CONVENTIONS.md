@@ -390,15 +390,16 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
   3. **方言被断言，不会被静默移动**：`ConnectionTimeZoneFlavourTest` 读回
      `spring.datasource.url`（字符串级，任何 JVM 时区下都有效）、做驱动行为探针、并断言数据库**会话**
      时钟就是 UTC。将来谁删掉 `serverTimezone=UTC`，它会红，而不是让整个套件换一个方言继续跑。
-  4. **已知覆盖边界（2026-09-30 登记）**：钉成生产方言之后，**主体套件（19 个继承
+  4. **已知覆盖边界（2026-09-30 登记）**：钉成生产方言之后，**主体套件（**21** 个继承
      `AbstractIntegrationTest` 的类）只跑 UTC**；唯一跑非 UTC 的是上面那个判别上下文，而它只覆盖**两条
      已知路径**（`ConfigSnapshotService.currentVersion()` 与 `ApiKeyService.mint` / `resolve`）。
      因此**将来第三个同类站点没有任何「顺带被跑到」的覆盖** —— 以前至少会在非 UTC 的开发者机器上偶然
      暴露（虽然没有任何断言），现在连那个偶然性也没有了。**新增时间列的人必须显式决定**：把它加进
      `TimeBasisIsConnectionFlavourIndependentTest`，否则「连接时区不是 UTC 时的行为」无人看着。
+     **（数字订正 2026-09-30：这里原写"19 个"，复测为 **21** —— Task 8 与 Task 9 各新增一个集成类。产物 = 全仓 `Select-String 'extends AbstractIntegrationTest'` 命中 **21** 个文件，全部在 `aihub-web`；`TimeBasisIsConnectionFlavourIndependentTest` **不**继承 `AbstractIntegrationTest`（它是独立的 `@SpringBootTest` 上下文），因此不计入这 21。）**
   5. **已知代价（2026-09-30 登记）**：那个独立上下文给**每个全量套件 JVM 增加第二个完整 Spring 上下文**
      ——第二套 Tomcat、第二套 `@RabbitListener` 消费者、第二份 `@Scheduled` 任务，共享同一组容器。
-     今天全量绿（`aihub-web` 173/0），两个上下文写的是同一张表，也没有观测到互相干扰；但代价是真实的
+     今天全量绿（`aihub-web` 173/0；**2026-09-30 复测订正为 `aihub-common` 61 / `aihub-web` 198（0F/0E/0S）**，产物 `.hb2-logs/W05-admin-full.log` 与 `.m4t9fix-logs/R05-admin-full.log`；同一轮实测 `Tomcat started on port` = **7** ⇒ Task 9 及其修复轮**没有**新增 Spring 上下文），两个上下文写的是同一张表，也没有观测到互相干扰；但代价是真实的
      （全量运行多付一次上下文启动，且两套消费者/定时任务同时在跑），登记在此以免事后才发现。它换来的是
      「判别力在任何 JVM 时区下都成立」，这个交换仍值得，只是不要忘了它的价格。
   6. **已知代价（2026-09-30 登记，Task 8 的修复轮实测）**：`ChannelAdminIntegrationTest` 的
@@ -429,3 +430,28 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - conventional commits：`feat:` / `fix:` / `test:` / `chore:` / `docs:` / `refactor:`。
 - 每个里程碑完成后打 tag：`m0`、`m1`……
 - 密钥、口令一律不进仓库，走环境变量或 `.env`。
+
+## 10. 控制面租户模型（`/api/**`）
+
+**决策（2026-09-30 定死；此前这条规则从未成文，于是每个实现者各自猜 —— Task 9 的实现者为此在测试里被迫让"令牌租户"等于"请求体租户"）**：
+M4 的控制台是**平台运营台**，**不是**租户自助台。依据（都是本计划原文，不是推断）：
+
+- 「**细粒度 RBAC、租户自助注册**、第三方登录、邮件通知」列为**非目标**（`:105`）；「管理台的多租户 RBAC 细粒度权限（**只做 `ADMIN`/`VIEWER` 两级**）」列在 Global Constraints 的"不做的事"里；
+- Task 11 **明文**要求 `GET /api/logs?tenantId=&from=&to=…`（`:1631`）与 `GET /api/audit?tenantId=&from=&to=…`（`:1644`），其用例断言**不带 `tenantId` 要 400**（`:1659-1661`）——即**调用方选租户是计划要求**；那条"强制 tenant + 时间范围"的理由是**防无界扫描**（`request_log` / `audit_log` 的索引都是 `(tenant_id, created_at)`），**不是**授权；
+- Task 17 的验收用**一次性插入的合成 `sys_user`**（`:2214`）拿令牌 ⇒ 单操作者。
+
+**四条规则（Task 10 起一律照办）**
+
+| # | 规则 | 理由 |
+|---|---|---|
+| **R1** | **全局资源**（`tenant` / `channel` / `model_route` / `config_version` —— 表里**没有** `tenant_id`）的读写是**平台级**，任何 `ADMIN` 都有权。审计的 `tenant_id` 记该资源本身的租户（`tenant` 写 = 目标租户）或 SQL `NULL`（`channel` 写 = `NULL`，Task 8 已如此并登记） | 这些资源本来就没有租户维度；强行造一个会是伪维度 |
+| **R2** | **租户维度资源**（`sys_user` / `api_key` / `quota` / `rate_limit_policy` / `request_log` / `billing_daily` / `kb_document`）的**写**同样是**平台级**，任何 `ADMIN` 都有权（运营台必须能处置任一租户的资源，**尤其是对违规租户做应急吊销**）；但审计的 `tenant_id` **必须**记**目标资源的**租户 id —— **不是**操作者的租户、**不是** `NULL`（Task 9 已如此，Task 10–15 照办） | 若把写路径对普通 `ADMIN` 收窄而不同时引入第三级角色，平台方会**失去应急吊销能力** —— 那是运营台的核心功能。所以"只做一半的 fail-closed"比不做更糟 |
+| **R3** | **租户维度资源的查**，按"是否需要防无界扫描"分两类：**① 运营查询**（`/api/logs`、`/api/audit`、`/api/billing/daily`）**必须显式 `tenantId`**、缺省 400；**② 资源列表**（`/api/api-keys`，将来的 `/api/quotas`、`/api/rate-limits`）**缺省 = 令牌里的 `tenantId`**（least privilege），将来运营需要跨租户列举时再加**可选**的显式覆盖（**今天不做**，登记为待办） | 两类查询的失败代价不同：无界扫描会退化成全表扫描（索引以 `tenant_id` 打头）；列表则是默认最小权限更安全 |
+| **R4** | 令牌里的 `tenantId`（`ConsoleClaims.tenantId`）**不是授权边界**，只在 R3.2 的**缺省值**上起作用；不许拿它做"谁可以做什么"的判定 | 避免把"归属"误当"权限"——真要权限就用角色（`ADMIN`/`VIEWER`），要跨租户就用显式参数 |
+
+**升级门槛（硬）**：出现以下**任一**情形时，本节的"平台运营台"前提**失效**，**必须先落地租户隔离**（引入第三级角色 + 把租户维度资源的**写**按租户收窄，越权以 `404` 表现）**再继续开发**：
+① 出现**第一个非平台方账号**（任何 `sys_user` 不属于平台自己的租户）；② 控制台对**非可信网络**暴露；③ 引入**租户自助**。三者任一成立时，"披露"不再是可接受的手段。
+
+**已评估并否决的方案**：MyBatis-Plus 的 `TenantLineInnerInterceptor` / `TenantLineHandler`（全局租户拦截器）。**否决理由（可复核）**：控制面**不是**唯一的数据访问方 —— `ApiKeyService.resolve` 由 gateway 经内部 HTTP 调用（**无租户上下文**）、`MeteringConsumer` 在 MQ 消费者线程里、`@Scheduled` 的分区维护与对账任务**必须跨租户**；再加上要维护忽略表清单（`tenant` / `channel` / `model_route` / `config_version` / `audit_log`）与 `ThreadLocal` 泄漏面，收益远小于风险。**要做租户隔离时，在控制器/服务层显式带 `tenantId`，不要靠拦截器。**
+
+**实现现状（诚实登记，2026-09-30）**：Task 9 的 `GET /api/api-keys` 按**令牌的 `tenantId`** 过滤（= R3.2 的缺省语义），`POST /api/api-keys` 的 `tenantId` 来自**请求体**（= R2，合法）。⇒ 因此"**读按租户、写不限租户**"是**有意的不对称**，不是遗漏。Task 9 的集成测试类注释里"令牌租户与请求体租户必须一致才看得到"就是这条规则的副作用。
