@@ -20,7 +20,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
@@ -212,10 +211,11 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
      * 因此这一格必须与兄弟们**同一个基准** —— 用 {@link LocalDateTime} 读回来（该载体不做时区
      * 换算），按 UTC 折成的 epoch 毫秒必须等于铸 key 时给的那个 {@code Instant}。
      *
-     * <p><b>为什么不走实体</b>：字段是 {@code Instant} 时，驱动写入按 JVM 默认时区（本机
-     * Asia/Shanghai）折墙上时间、读回再按同一默认时区折回瞬时 —— 实体往返**恰好自洽**，
-     * 于是「实体读回来的值对」这件事**证明不了列里的基准是对的**（原有往返用例就是这样被兜住的）。
-     * 判别力只能来自裸 JDBC：本用例读的是列本身，不是实体。裸 SQL 写入方（seeder、运维、
+     * <p><b>为什么不走实体</b>：字段是 {@code Instant} 时，驱动按 **JDBC 连接时区**把瞬时折成墙上时间
+     * 写进去、读回再按同一个连接时区折回瞬时（连接时区解析成 LOCAL —— URL 不带
+     * {@code serverTimezone} / {@code connectionTimeZone} —— 时用的才是 JVM 默认时区），实体往返
+     * **恰好自洽**，于是「实体读回来的值对」这件事**证明不了列里的基准是对的**（原有往返用例就是这样
+     * 被兜住的）。判别力只能来自裸 JDBC：本用例读的是列本身，不是实体。裸 SQL 写入方（seeder、运维、
      * 以及将来的 {@code where expire_at > now()} 比较）看到的正是这一格。
      *
      * <p><b>判别力的方言条件（2026-09-29 独立评审 I-1）</b>：本用例读的是**列**，能判别写入基准，
@@ -242,16 +242,16 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
 
         long storedAsUtcMillis = stored.toInstant(ZoneOffset.UTC).toEpochMilli();
         long expectedMillis = expireAt.toEpochMilli();
-        long skewedIfTheJvmZoneIsApplied = stored.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
 
         assertThat(Math.abs(storedAsUtcMillis - expectedMillis))
                 .as("api_key.expire_at 必须与 created_at/updated_at 同一基准（UTC 墙上时间）："
-                                + "库里存的是 %s，按 UTC 折回是 %d ms，铸 key 给的瞬时是 %d ms（差 %d ms）；"
-                                + "按 JVM 默认时区（%s）折回才是 %d ms —— 差值 %d ms 就是被修掉的缺陷"
-                                + "（容差 %d ms）",
+                                + "库里存的是 %s，按 UTC 折回是 %d ms，铸 key 给的瞬时是 %d ms"
+                                + "（差 %d ms，容差 %d ms）。旧读法（java.sql.Timestamp / Instant 字段）"
+                                + "把这一格按**连接时区**解释成瞬时；本套件跑的是生产方言 serverTimezone=UTC"
+                                + "（该连接的偏移为 0），因此两种读法在这里逐位相等 —— 判别读法的活在故意钉"
+                                + "非 UTC 连接时区的 TimeBasisIsConnectionFlavourIndependentTest",
                         stored, storedAsUtcMillis, expectedMillis, storedAsUtcMillis - expectedMillis,
-                        ZoneId.systemDefault(), skewedIfTheJvmZoneIsApplied,
-                        expectedMillis - skewedIfTheJvmZoneIsApplied, EXPIRY_ROUND_TRIP_TOLERANCE_MILLIS)
+                        EXPIRY_ROUND_TRIP_TOLERANCE_MILLIS)
                 .isLessThanOrEqualTo(EXPIRY_ROUND_TRIP_TOLERANCE_MILLIS);
     }
 

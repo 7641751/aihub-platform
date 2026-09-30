@@ -21,7 +21,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Base64;
 import java.util.List;
@@ -69,8 +68,9 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
      * 「列里的墙上时间 vs 数据库自己的 UTC 时钟」的容差（毫秒）—— 独立评审 I-3 要求的**独立**基准断言用。
      *
      * <p>两次 SELECT 之间的真实间隔是毫秒级（同一台容器、同一条连接池）；这里给 2 秒是给慢机器的余量。
-     * 它仍然比**任何**真实时区偏移小三个数量级以上（现代时区里最小的偏移是 15 分钟 = 900000 ms），
-     * 所以「列按会话时区写」这种基准错一定会红，而不是被容差吃掉。
+     * 它仍然比**任何**非零真实时区偏移小三个数量级以上（2026-09-30 在本机 JDK 25.0.2 上枚举全部
+     * tzdata zone、跨三个瞬时实测：最小的**非零**偏移是 **60 分钟 = 3600000 ms**，2 秒是它的
+     * **1/1800**），所以「列按会话时区写」这种基准错一定会红，而不是被容差吃掉。
      */
     private static final long COLUMN_CLOCK_TOLERANCE_MILLIS = 2_000L;
 
@@ -204,15 +204,14 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
         long expected = stored.toInstant(ZoneOffset.UTC).toEpochMilli();
 
         long actual = service.currentVersion();
-        long skewedIfTheJvmZoneIsApplied = stored.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
 
         assertThat(Math.abs(actual - expected))
                 .as("version 必须把 updated_at 当作 **UTC** 墙上时间来解释：库里存的是 %s，期望 %d ms，"
-                                + "实际 %d ms（差 %d ms）。JVM 默认时区 = %s，按它解释这一格会得到 %d ms，"
-                                + "也就是早 %d ms —— 这是被修掉的**读法**带来的偏移（容差 %d ms）",
-                        stored, expected, actual, actual - expected, ZoneId.systemDefault(),
-                        skewedIfTheJvmZoneIsApplied, expected - skewedIfTheJvmZoneIsApplied,
-                        VERSION_BASIS_TOLERANCE_MILLIS)
+                                + "实际 %d ms（差 %d ms，容差 %d ms）。旧读法（java.sql.Timestamp）把这一格"
+                                + "按**连接时区**解释成瞬时；本套件跑的是生产方言 serverTimezone=UTC"
+                                + "（该连接的偏移为 0），因此两种读法在这里逐位相等 —— 判别旧读法的活在故意钉"
+                                + "非 UTC 连接时区的 TimeBasisIsConnectionFlavourIndependentTest",
+                        stored, expected, actual, actual - expected, VERSION_BASIS_TOLERANCE_MILLIS)
                 .isLessThanOrEqualTo(VERSION_BASIS_TOLERANCE_MILLIS);
 
         // ——— 独立评审 I-3：列的**真实基准**，用数据库自己的时钟独立断言 ———

@@ -133,11 +133,18 @@ public class ApiKeyService {
      * {@link LocalDateTime}；这里显式声明基准折回 {@link ApiKeyView} 需要的**瞬时**
      * （{@code toInstant(ZoneOffset.UTC)}）。
      *
-     * <p>不这么做（字段留 {@code Instant}、或在这里用 {@code Timestamp}）时，驱动会按 **JDBC 连接时区**
-     * 解释那一格；连接时区解析成 LOCAL（URL 不带 {@code serverTimezone} / {@code connectionTimeZone}）时
-     * 用的就是 **JVM 默认时区**，于是**原始列**里会存本地墙上时间，与兄弟列差一个时区偏移
-     * （本机 Asia/Shanghai = 8 小时）—— 裸 SQL 写入方（seeder / 运维）、以及任何
-     * {@code where expire_at > now()} / {@code utc_timestamp()} 的比较都落在另一个基准上。
+     * <p>不这么做时有**两种错法，后果不同**，两个都要避免：
+     * <ul>
+     *   <li>**字段留 {@code Instant}**：驱动按 **JDBC 连接时区**把瞬时折成墙上时间**写进去**
+     *       （连接时区解析成 LOCAL —— URL 不带 {@code serverTimezone} / {@code connectionTimeZone} ——
+     *       时用的才是 **JVM 默认时区**），于是**原始列**里存的是那个时区的墙钟，与兄弟列差一个连接
+     *       时区偏移（本机 Asia/Shanghai 观测到 8 小时）—— 裸 SQL 写入方（seeder / 运维）、以及任何
+     *       {@code where expire_at > now()} / {@code utc_timestamp()} 的比较都落在另一个基准上；</li>
+     *   <li>**只在这里用 {@code Timestamp} 读**：列的内容一个字节都没变，错的是**读出来的瞬时** ——
+     *       驱动把这一格按连接时区解释成瞬时，于是交给 {@link ApiKeyView#usable()} 比较的对象偏了一个
+     *       连接时区偏移（这才是「读侧」的错法，原始列本身仍然与兄弟列同基准）。</li>
+     * </ul>
+     * 两种错法同源：基准取决于连接参数。
      *
      * <p><b>更正（2026-09-29 独立评审 I-2）</b>：这里曾经写着「读出的瞬时整整差 8 小时，而
      * {@link ApiKeyView#usable()} 正是拿这个瞬时与 {@code Instant.now()} 比的，落在鉴权路径上」——

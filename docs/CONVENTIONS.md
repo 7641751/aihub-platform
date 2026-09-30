@@ -288,7 +288,19 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
      于是 `getTimestamp().toInstant()` 与实体里的 `Instant` 字段都**早了整整 8.0 小时**；最要命的后果是
      **时间范围查询**：驱动把边界整体推后一个时区偏移，命中的是**另一个窗口**的行 —— 复核实测同一个
      ±10 分钟窗口在无参数连接上 `LocalDateTime`(UTC) 绑定命中 **1/4** 行、`Timestamp` 绑定命中 **3/4** 行，
-     而在 `serverTimezone=UTC` 连接上两种绑定都是 **4/4**。
+     而在 `serverTimezone=UTC` 连接上两种绑定选中的是**同一个窗口**（2026-09-30 复测：**3/4** 与 **3/4**，
+     两条计数相等；`connectionTimeZone=UTC` 与 `connectionTimeZone=SERVER` 同样各是 3/4 与 3/4）。
+     **计数依赖 fixture，所以把它一起写在这里**（产生上面数字的 4 行，2026-09-30 在本机 JVM=Asia/Shanghai
+     的容器上复测）：一个临时表 `probe_t(id int primary key, v datetime(3), s varchar(64))`，四行写的是
+     **同一个瞬时** `2026-01-01T12:00:00.123Z`，分别用 `setObject(LocalDateTime@UTC)` /
+     `setTimestamp(Timestamp.from)` / `setObject(Instant)` / `setObject(LocalDateTime@JVM)` 绑定；查询是
+     `select count(*) from probe_t where v >= ? and v <= ?`，边界 `FIXED±10min` 分别用 `LocalDateTime@UTC`
+     与 `Timestamp` 绑定。第 4 行用的是 **JVM 的墙上时间**、任何方言下都不被换算（本机 = 20:00.123），
+     所以无参数连接的 1/4 是「只有第 1 行落在那个 UTC 窗口里」、`Timestamp` 绑定的 3/4 是「另外三行」；
+     在 `serverTimezone=UTC` 上四行塌成 12:00.123 / 12:00.123 / 12:00.123 / 20:00.123，两种绑定都选中前三行。
+     注意在 `-Duser.timezone=UTC` 的 JVM 上这个 fixture 会退化成四行全在 12:00.123、两种绑定都是 **4/4**
+     —— 那个被推翻的数字就是这么来的，它不是生产方言的性质。**数字随 fixture 变，性质不变：
+     生产（UTC）方言下两种绑定等价，无参数（LOCAL）方言下不等价。**
      **这不是「生产上正在发生的错误」**：发布的两个 URL 都钉了 `serverTimezone=UTC`
      （`application.yml:8`、`docker-compose.yml:65`），第二次独立评审在那条连接上实测**旧写法与新写法
      逐位相等**（`channel.updated_at` 与 `api_key.expire_at` 两个列的 `old − new` 都是 **0**）。
@@ -305,14 +317,28 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
      对不对」。`ConfigSnapshotServiceTest` 现在两条都有，并且在会话时区不是 UTC 时额外要求这一格
      **不**落在 `NOW(3)`（会话时钟）附近。会话时区本身没有被应用钉住（`@@session.time_zone = SYSTEM`），
      这是已经登记的残余（独立评审 I-3）。
-  4. **把 `expire_at` 的解释从「连接时区」改成「UTC」是一次**数据含义变更**，方向上 fail-open
-     （2026-09-29 独立评审 I-4）**：已经按 LOCAL 方言（旧代码 + 非 UTC 连接）写进库的
-     行，其 `api_key.expire_at` 存的是 **JVM 本地墙钟**；改用 UTC 解释之后，这些行的瞬时**整体后移**一个
-     时区偏移（本机 8 小时）—— 也就是**已经过期的 key 在最长 8 小时里仍然可用**（fail-open）。
-     `config_version` / 配置表的 `updated_at` 同样被改读，但表现为一次**向前**的版本跳变（无害）。
-     本仓库发布的两个 URL 都钉了 `serverTimezone=UTC`，因此**在发布配置下不存在这种行**（旧代码写进去的
-     已经是 UTC）；但任何覆盖了 `SPRING_DATASOURCE_URL` 而没有带该参数、或升级前用非 UTC 连接跑过的
-     环境，都需要一次性处理：按该偏移 `UPDATE` 这批 `expire_at`，或直接**重新签发**受影响的 key
+  4. **把 `expire_at` 的解释从「连接时区」改成「UTC」是一次**数据含义变更**，方向取决于那条连接的
+     偏移符号**（2026-09-29 独立评审 I-4；2026-09-30 复测）**：已经由旧代码在**非 UTC 连接**上写进库的
+     行，其 `api_key.expire_at` 存的是**那个连接时区的墙钟**；改用 UTC 解释之后，这些行的瞬时位移量
+     `new − old` **等于该连接的偏移**（写这批行与升级后读它们的，实际是同一套环境）。同一台容器复测
+     （同一格写 `2026-01-01T12:00:00.123Z`，旧 `Timestamp.toInstant()` 读 vs 新 `LocalDateTime`@UTC 读）：
+     `connectionTimeZone=Asia/Shanghai`（+08:00）⇒ `new − old = +28800000 ms`，
+     `connectionTimeZone=America/New_York`（该瞬时是 −05:00）⇒ `new − old = −18000000 ms`。因此：
+     - **偏移为正（东半球）**：瞬时**后移** —— 已经过期的 key 在**该偏移那么长**的时间里仍然可用
+       （fail-open，安全洞）；
+     - **偏移为负（西半球）**：瞬时**前移** —— key 比预期**更早**过期（fail-closed，是功能回归而不是安全洞）。
+     简式：**位移量 = 那条连接的偏移，方向由它的符号决定，最多一个连接偏移**（注意偏移本身随日期变，
+     夏令时下纽约是 −04:00 而不是 −05:00）。**8 小时只是本机 Asia/Shanghai 的观测值，不是常量。**
+     `config_version` / 配置表的 `updated_at` 同样被改读，版本跳变的方向由同一个符号决定：
+     偏移为正 ⇒ 版本**向前**跳（相对无害）；偏移为负 ⇒ 版本**向后**跳 —— 那是**已登记的 M3 版本回退缺口**
+     （网关用严格 `>` 比版本，见 README「已知边界」），**不是「无害」**。
+     本仓库发布的两个 URL 都钉了 `serverTimezone=UTC`（偏移 0），因此**在发布配置下不存在这种行**
+     （旧代码写进去的已经是 UTC）；但任何覆盖了 `SPRING_DATASOURCE_URL` 而没有带该参数、或升级前用非 UTC
+     连接跑过的环境，都需要一次性处理，而且**办法是方向相关的**：先确定写那批行的连接时区（URL 上的
+     `serverTimezone` / `connectionTimeZone`；不带参数时就是当时那个 JVM 的默认时区）在**那些行的时间点**上的
+     偏移 `o`（分钟、带符号），再把列里的墙上时间搬回真实瞬时 ——
+     `UPDATE api_key SET expire_at = expire_at - INTERVAL <o> MINUTE`（`o` **带符号**：西半球为负，
+     实际就是往后加），或直接**重新签发**受影响的 key
      （更稳：行本身无法可靠区分基准，见 README「已知边界」的 M4 条目）。
 - **`eq(column, null)` 恒不成立，而 MyBatis-Plus 不会替你忽略它**：
   `LambdaQueryWrapper.eq(AuditLogEntity::getTenantId, null)` 生成 `WHERE (tenant_id = ?)`、参数是 `null`
@@ -344,7 +370,7 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
   `TestContainers.nonUtcFlavouredJdbcUrl()`（`connectionTimeZone=Asia/Shanghai` —— 一个**固定的非 UTC 区**）
   起一个**独立上下文**，专门证明时间基准与连接时区无关。在此之前测试 URL 是 Testcontainers
   返回的裸 URL ⇒ 落在 **LOCAL** 方言（= 跑测试的 JVM 默认时区）、与生产**相反**，而没有任何地方写下来，
-  于是「RED 证据」看起来像一个生产缺陷（见 §7 第 2 条）。三个决定与它们的理由：
+  于是「RED 证据」看起来像一个生产缺陷（见 §7 第 2 条）。三个决定、它们的理由，外加两条登记：
   1. **主体套件跑生产方言**：它断言的是生产上会发生的行为；而且 UTC 钉死之后结果**不随跑测试的 JVM
      时区变化**（LOCAL 方言下本机 Asia/Shanghai 与一个 UTC 的 CI 镜像会得到不同的数字，套件不可复现）。
   2. **判别「代码依赖不依赖连接时区」的用例自己起一个非 UTC 方言的上下文**：
@@ -355,12 +381,30 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
   3. **方言被断言，不会被静默移动**：`ConnectionTimeZoneFlavourTest` 读回
      `spring.datasource.url`（字符串级，任何 JVM 时区下都有效）、做驱动行为探针、并断言数据库**会话**
      时钟就是 UTC。将来谁删掉 `serverTimezone=UTC`，它会红，而不是让整个套件换一个方言继续跑。
+  4. **已知覆盖边界（2026-09-30 登记）**：钉成生产方言之后，**主体套件（19 个继承
+     `AbstractIntegrationTest` 的类）只跑 UTC**；唯一跑非 UTC 的是上面那个判别上下文，而它只覆盖**两条
+     已知路径**（`ConfigSnapshotService.currentVersion()` 与 `ApiKeyService.mint` / `resolve`）。
+     因此**将来第三个同类站点没有任何「顺带被跑到」的覆盖** —— 以前至少会在非 UTC 的开发者机器上偶然
+     暴露（虽然没有任何断言），现在连那个偶然性也没有了。**新增时间列的人必须显式决定**：把它加进
+     `TimeBasisIsConnectionFlavourIndependentTest`，否则「连接时区不是 UTC 时的行为」无人看着。
+  5. **已知代价（2026-09-30 登记）**：那个独立上下文给**每个全量套件 JVM 增加第二个完整 Spring 上下文**
+     ——第二套 Tomcat、第二套 `@RabbitListener` 消费者、第二份 `@Scheduled` 任务，共享同一组容器。
+     今天全量绿（`aihub-web` 173/0），两个上下文写的是同一张表，也没有观测到互相干扰；但代价是真实的
+     （全量运行多付一次上下文启动，且两套消费者/定时任务同时在跑），登记在此以免事后才发现。它换来的是
+     「判别力在任何 JVM 时区下都成立」，这个交换仍值得，只是不要忘了它的价格。
 - **断言一个异步副作用之前，必须先等它发生**（有界等待）：被观测的调用如果是「发后不管」的
   （例如 `aihub-gateway` 的 Redis 回填 `subscribeOn(...).subscribe()`），那么「它跑完了没有」与
   `block()` 返回的时刻**没有先后关系**。M2 收口时在这里踩过一次：`ApiKeyFilterContractTest` 的
   Redis 回填线程断言直接读一个 `AtomicReference`，热态重复调用下约 2/3 的轮次读到的还是 `null`。
   正确写法是有界等待 + 「等不到就带着原因变红」，这样既不赌调度、又不削弱断言。
 - 同一个 bug 的修复必须先补一个会失败的测试。
+- **文档与注释里的每个数字都必须点名它的来源**（2026-09-30 第三次独立评审的结论）：连续三轮
+  修正都在修上一轮写错的话时引入了新的错话，根因是同一个 —— **数字从上一份报告里抄，而产生它的
+  fixture 谁都没有记下来**（`4/4`、`1/1`、`15 分钟` 都是这么来的）。纪律：**一个数字必须点名产生它的
+  命令或工件**（探针、日志、用例），并且按那个名字**能重新量出来**；任何**继承**来的数字在再次写出去
+  之前必须**重新测量**，测不了的就只能标成「继承、未复核」，**不许**当成事实复述。数字依赖 fixture 时，
+  fixture（插了哪几行、用什么绑定）要跟数字写在一起。**这条与时间无关，适用于所有「实测值」「数量级」
+  「N 倍」的表述。**
 
 ## 9. 提交约定
 
