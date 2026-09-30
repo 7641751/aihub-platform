@@ -1440,13 +1440,17 @@ git commit -m "feat(console): tenant and channel CRUD with encrypted keys and in
 - Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ApiKeyAdminIntegrationTest.java`
 - Modify: `aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey/ApiKeyView.java`（**删掉已无生产调用方的 `UNUSABLE`**，见 I10②）
 - Modify: `aihub-admin/aihub-common/src/test/java/com/aihub/common/apikey/ApiKeyToolingTest.java`（同步改掉引用它的断言）
+- Modify: `aihub-admin/aihub-service/src/main/java/com/aihub/service/apikey/ApiKeyService.java`
+  - ⚠️ **这条是 2026-09-30 补的，补的是一个「照原样执行必然出错」的缺陷**：正文第 1500 行要求「密钥值的生成只能有一个实现 … 把那段逻辑提升成 `ApiKeyAdminService` 也能调的同一个入口」，但原 Files 清单与 `git add` 清单里**都没有**这个路径 —— 照原样执行只有两种下场：写第二份生成逻辑（违反正文，且会被评审判为重复实现），或者提交出一棵调用不存在入口的树。改法见下方「控制器裁定」第 2 条。
+- Modify: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/ApiKeyEntity.java`
+  - ⚠️ **同样是 2026-09-30 补的**：Step 3 的列表 DTO 带 `lastUsedAt`，而 `ApiKeyEntity` **没有**这个字段（现有字段只有 id/keyId/tenantId/keyHash/name/status/expireAt），原清单漏了它。字段必须是 `LocalDateTime` + 读侧显式按 UTC 折算（`docs/CONVENTIONS.md` §7 第 1 条）。
 
 **Interfaces:**
 - Consumes: `ApiKeyHasher`（**共用的唯一哈希实现**）、`ApiKeyCacheCodec.CACHE_KEY_PREFIX`（**复用常量，不要写字面量**）、`StringRedisTemplate`、`AuditService`
 - Produces:
   - `POST /api/api-keys`（响应 `data.plaintextKey` **仅此一次**）、`GET /api/api-keys`、`POST /api/api-keys/{id}/disable`、`POST /api/api-keys/{id}/enable`、`DELETE /api/api-keys/{id}`
   - `ApiKeyAdminService.create(ApiKeyCreateRequest, Actor) : ApiKeyCreated`、`list(long tenantId) : List<ApiKeyView>`、`disable(long apiKeyId, Actor)`、`enable(long apiKeyId, Actor)`、`delete(long apiKeyId, Actor)` —— 三个写方法都要：改状态 + 审计 + **`redis.delete(ApiKeyCacheCodec.CACHE_KEY_PREFIX + keyHash)`**（**不再有 `revoke(long, String)` 这个签名**，见 N6 的处置：以 Step 3 里定死的那一组为准）
-    - **每个写方法都要发布失效**（D11：API Key 的停用/启用/删除也必须广播）：调 `configChangePublisher.publishAfterCommit("apikey.disable")` 这一族 reason，**不许直接调 `bumpAndPublish`**（机制与理由见 Task 8 的定死说明）。因此**本任务的 Files 必须列出 `aihub-service/.../config/ConfigChangePublisher.java`**（Task 2 建的类，这里加调用不改它）。Task 2 的独立评审点名：Task 9 的 Interfaces 此前**完全没提**发布，这就是那条要求漏掉的地方。
+    - **每个写方法都要发布失效**（D11：API Key 的停用/启用/删除也必须广播）：调 `configChangePublisher.publishAfterCommit("apikey.disable")` 这一族 reason，**不许直接调 `bumpAndPublish`**（机制与理由见 Task 8 的定死说明）。因此**2026-09-30 更正**：这句原先写「本任务的 Files 必须列出 `aihub-service/.../config/ConfigChangePublisher.java`」——那是 Task 8 之前的口径；`publishAfterCommit(String)` **已由 Task 8（`409c889`）落地**且两个分支各有用例钉住，本任务只是**调用**它，因此**不要**修改、也不要 stage 那个文件。Task 2 的独立评审点名：Task 9 的 Interfaces 此前**完全没提**发布，这就是那条要求漏掉的地方。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -1482,13 +1486,18 @@ void disablingAnUnknownKeyIs404AndTheAuditRowRecordsTheActor() { }
 ```java
 public record ApiKeyCreateRequest(long tenantId, String name, Integer validDays) {}
 public record ApiKeyCreated(long id, String keyId, String plaintextKey) {}     // 明文**只有这一个出口**
-public record ApiKeyView(long id, String keyId, long tenantId, String name, String status,
-                         Instant expireAt, Instant lastUsedAt) {}              // 无明文、无哈希
+// ⚠️ 2026-09-30 控制器更正：本行原名叫 `ApiKeyView`，与 aihub-common 的**跨服务类型**
+// `com.aihub.common.apikey.ApiKeyView`（6 段，被 ApiKeyCacheCodec 与 gateway 共用）**同名**，
+// 而本 record 与 `ApiKeyService` **同包** —— 在同一个包里再声明一个 `ApiKeyView` 之后，
+// `ApiKeyCacheCodec.encode(...)` 的实参类型就极易混错。**改名 `ApiKeySummary`**；
+// service / web 包下**不许**再出现任何叫 `ApiKeyView` 的类型。
+public record ApiKeySummary(long id, String keyId, long tenantId, String name, String status,
+                            Instant expireAt, Instant lastUsedAt) {}            // 无明文、无哈希
 
 @Service
 public class ApiKeyAdminService {
     ApiKeyCreated create(ApiKeyCreateRequest request, Actor actor);
-    List<ApiKeyView> list(long tenantId);
+    List<ApiKeySummary> list(long tenantId);
     void disable(long apiKeyId, Actor actor);
     void enable(long apiKeyId, Actor actor);
     void delete(long apiKeyId, Actor actor);
@@ -1506,15 +1515,35 @@ Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am tes
 
 ```bash
 git add aihub-admin/aihub-service/src/main/java/com/aihub/service/apikey/ApiKeyAdminService.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/apikey/ApiKeyService.java \
+        aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/ApiKeyEntity.java \
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ApiKeyController.java \
         aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ApiKeyAdminIntegrationTest.java \
         aihub-admin/aihub-common/src/main/java/com/aihub/common/apikey/ApiKeyView.java \
         aihub-admin/aihub-common/src/test/java/com/aihub/common/apikey/ApiKeyToolingTest.java
+# 2026-09-30：ApiKeyService.java（生成入口单点化）与 ApiKeyEntity.java（lastUsedAt 字段）是控制器补进清单的；
+# ConfigChangePublisher.java **不在**清单里 —— publishAfterCommit 已由 Task 8 落地，本任务只调用它。
 git commit -m "feat(console): API key management with explicit shared-cache eviction on disable"
 ```
 
 **验收判据：** 明文只出现一次；列表不含明文与哈希；停用后共享缓存条目**立即**消失；审计记到 actor。
 **RED 证据：** `disablingAKeyDeletesItsSharedCacheEntryImmediately` 在只改状态不 `DEL` 的实现下红——这正是 M3 决策 16 交接的那一条。
+
+> **控制器裁定（2026-09-30，开 Task 9 之前通读正文后补；下面 6 条是「照字面执行会出错」的计划缺陷与定死的机制，实施者按此执行）**
+>
+> 1. **列表 DTO 改名 `ApiKeySummary`**（Step 3 的注释里写了原因）：原 `ApiKeyView` 与 `aihub-common` 的**跨服务类型**同名，而新 record 与 `ApiKeyService` **同包** ⇒ 会让 `ApiKeyCacheCodec.encode(...)` 的实参类型混错。service / web 包下**不许**再出现叫 `ApiKeyView` 的类型；共享类型（`aihub-common`）一个字都不改（除了第 6 条的删常量）。
+> 2. **生成入口只能有一个**：在 `ApiKeyService` 上**新增**
+>    `public IssuedKey issue(long tenantId, String tenantName, String keyName, Instant expireAt)`，
+>    把今天 `mint` 里的「`newKeyId` + `newSecret` + `hash` → 组实体 → `insert` → 回填缓存 → 返回 `IssuedKey`」整段**原样搬进去**；
+>    现有的 `mint(tenantName, keyName, expireAt)` 保留签名，先 `findOrCreateTenant(tenantName)` 再**委托**给 `issue(...)`。
+>    `ApiKeyAdminService.create` 按 `request.tenantId()` 查 `TenantMapper`（查不到 → 404 `NOT_FOUND`），再调 `apiKeyService.issue(...)`。
+>    **不许**在 `ApiKeyAdminService` 里另写一份生成逻辑。密钥格式（`ak_` + 16 位 `[a-z0-9]` + `.` + 43 位 URL-safe base64）已被 `ApiKeyToolingTest` 的固定向量钉死，**一个字节都不许变**。`issue` 要带 `@Transactional`（`ApiKeyAdminService` 经代理调用它，事务才生效）。
+> 3. **`lastUsedAt` 的来源与诚实登记**：`api_key.last_used_at` 列存在（`V1__init_schema.sql:36`），但**今天没有任何代码写它**，且 `ApiKeyEntity` 没有该字段 ⇒ Files 新增 `ApiKeyEntity.java`，字段用 `LocalDateTime`，读侧显式 `toInstant(ZoneOffset.UTC)`（`docs/CONVENTIONS.md` §7 第 1 条；**不要**用 `Instant` 字段）。**该值在 M4 里恒为 NULL** —— 不要为了让它有值而在读路径写库；在报告里登记「列存在但无写入方」。
+> 4. **三个写方法的语义**：`disable` → `status=DISABLED`；`enable` → `status=ACTIVE`；`delete` → **真删行**（`apiKeyMapper.deleteById`）。三者都要：审计（`target_type="API_KEY"`、`tenant_id` = **该 key 的租户 id**、`target_id` = 数值主键）+ `DEL` 共享缓存条目 + `publishAfterCommit("apikey.disable" / "apikey.enable" / "apikey.delete")`，且都在**同一个 `@Transactional`** 里。状态字面量用服务内的私有常量（共享类型只有 `STATUS_ACTIVE`，**不要**为了 `DISABLED` 去改跨服务契约）。
+> 5. **`DEL` 在事务方法体内做，且失败必须吞**：`redis.delete(...)` 放在事务体内（**不是** afterCommit）。方向理由要写进注释：若事务随后回滚，最坏结果只是「多一次缓存未命中、下次从 MySQL 回填」，**不可能**给出错误答案；反过来放在 afterCommit 会让回滚路径留下一条「已 ACTIVE 但缓存已被删」之外的更坏形态（`DEL` 在提交后失败则缓存继续放行一把已停用的 key）。Redis 不可用时 `delete` 会抛 ⇒ 必须 `try/catch` + WARN + 继续提交，**绝不**让控制面的写因为缓存清理失败而失败（网关侧靠 TTL 兜底）。`key_hash` 从实体读，前缀一律用 `ApiKeyCacheCodec.CACHE_KEY_PREFIX`。
+> 6. **删 `UNUSABLE` 之前先自证**：repo-wide `grep -rn UNUSABLE` 今天只剩它的声明 + `ApiKeyToolingTest`（控制器已核，**无生产调用方**）。删除时必须同时改三处：`ApiKeyView` 的类 javadoc（`:14` 提到它）、`ApiKeyToolingTest` 的 `unusableSentinelIsASingleSharedInstance`（`:238-241`）与它上面那段 javadoc（`:228`）。**删不干净就保留并在报告里说明原因**，不许悬着。`aihub-common` 的 main 作用域**必须保持零第三方依赖**。
+> 7. **测试落地形状**：Step 1 的 `post` / `get` / `jsonPath` / `var created` / `payload` 都是**行为伪代码**，必须落成真实的 `TestRestTemplate` + 显式 `HttpEntity` + `Bearer` 令牌（照抄 `ConsoleLoginIntegrationTest` 与 `ChannelAdminIntegrationTest`）。预置 Redis 的那一条必须用**真的** `ApiKeyCacheCodec.encode(view)`（不能是未定义的 `payload`）。夹具名每条用例唯一、前后各清一次（Testcontainers 容器是 JVM 级共享的）。**优先**只声明 `aihub.console.secret`（值与 `ConsoleLoginIntegrationTest.SECRET` **逐字相同**）且**不加** `@Import`/`@TestConfiguration` —— 这样 Spring 有机会**复用**那个已存在的上下文，而不是再 fork 一个（Task 8 刚刚为多出的上下文代价登记过 `CONVENTIONS` §8 item 6）；若确实 fork 了新的，在报告里如实说明并给出把代价写进 §8 的一句话。
+> 8. **RED 的顺序**：测试里若引用 `ApiKeyAdminService` / `ApiKeySummary` 等尚不存在的类型，静态类型下「先写测试 → 编译 → 跑出 404」不成立。**优先**把测试写成只依赖 HTTP + `ApiKeyMapper`/`TenantMapper` + `StringRedisTemplate` + `aihub-common` 的既有类型（这样它在服务层存在之前就能编译、能红）；若确实无法避免，按 Task 8 的先例先落「仅签名骨架」再跑 RED，并在报告里**明确登记这个偏差**。
 
 ---
 
