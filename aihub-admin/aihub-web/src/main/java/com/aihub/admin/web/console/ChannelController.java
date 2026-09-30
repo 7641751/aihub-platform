@@ -5,6 +5,7 @@ import com.aihub.common.api.ErrorCode;
 import com.aihub.common.exception.BizException;
 import com.aihub.service.audit.AuditService;
 import com.aihub.service.channel.ChannelAdminService;
+import com.aihub.service.config.ChannelProbeService;
 import com.aihub.service.console.ConsoleClaims;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.ResponseEntity;
@@ -39,9 +40,11 @@ import java.util.List;
 public class ChannelController {
 
     private final ChannelAdminService channelAdminService;
+    private final ChannelProbeService channelProbeService;
 
-    public ChannelController(ChannelAdminService channelAdminService) {
+    public ChannelController(ChannelAdminService channelAdminService, ChannelProbeService channelProbeService) {
         this.channelAdminService = channelAdminService;
+        this.channelProbeService = channelProbeService;
     }
 
     /** 渠道请求体。更新语义下缺省字段表示「不修改」。 */
@@ -81,6 +84,18 @@ public class ChannelController {
     public ResponseEntity<ApiResponse<ChannelAdminService.View>> rotateKey(
             @PathVariable long id, HttpServletRequest http) {
         return ResponseEntity.ok(ApiResponse.ok(channelAdminService.rotateKey(id, actor(http))));
+    }
+
+    /**
+     * 渠道探测（Task 11）：用渠道自己的 {@code baseUrl} + 密钥向上游打**一次**请求并回报可达性。
+     *
+     * <p>它是**诊断动作**而不是数据面调用 ⇒ **不做写审计**、**不检查渠道是否停用**（停用仍可探测）；
+     * 渠道不存在时服务层抛 {@code NOT_FOUND}（404）。响应是 {@link ChannelProbeService.ProbeResult}，
+     * **绝不回显密钥**（{@code ChannelProbeService} 的类注释）。
+     */
+    @PostMapping("/{id}/probe")
+    public ResponseEntity<ApiResponse<ChannelProbeService.ProbeResult>> probe(@PathVariable long id) {
+        return ResponseEntity.ok(ApiResponse.ok(channelProbeService.probe(id)));
     }
 
     private static ChannelAdminService.Write write(ChannelRequest request) {

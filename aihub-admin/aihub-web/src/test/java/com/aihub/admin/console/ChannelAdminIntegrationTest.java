@@ -41,14 +41,27 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.sun.net.httpserver.HttpServer;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -115,6 +128,13 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
     /** PUT 换新密钥时写入的**新**明文：必须与 {@link #PLAINTEXT} 不同，否则「换成了新明文」不可判别。 */
     private static final String REPLACEMENT_PLAINTEXT = "sk-console-replaced-plaintext-synthetic";
 
+    /**
+     * Task 11 探测用例的合成**渠道明文密钥**：它只会出现在探测请求发往上游的 {@code Authorization}
+     * 头里（真实打一次上游），**绝不许**出现在探测响应体或任何日志里 —— 这正是「绝不回显密钥」那条
+     * 断言的哨兵串。
+     */
+    private static final String PROBE_PLAINTEXT = "sk-channel-plaintext-synthetic";
+
     private static final String ACTIVE = "ACTIVE";
 
     private static final String CHANNEL_TARGET_TYPE = "CHANNEL";
@@ -169,6 +189,17 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
 
     private RedisMessageListenerContainer listenerContainer;
 
+    /**
+     * 进程内假上游（Task 11 的探测用例）：{@code /models} 回一个 200 JSON。真 HTTP（不是 Mockito），
+     * 于是「探测真的打了一次上游」这件事可以被 {@link #upstreamHits} 与 {@link #upstreamAuthorization}
+     * 观测到。线程用守护线程，避免拖住测试 JVM。
+     */
+    private HttpServer fakeUpstream;
+
+    private final AtomicInteger upstreamHits = new AtomicInteger();
+
+    private final AtomicReference<String> upstreamAuthorization = new AtomicReference<>();
+
     /** 唯一夹具名前后各清一次：容器是 JVM 级共享的，不依赖「表是干净的」。 */
     @BeforeEach
     @AfterEach
@@ -184,6 +215,37 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
         if (listenerContainer != null) {
             listenerContainer.destroy();
             listenerContainer = null;
+        }
+    }
+
+    @BeforeEach
+    void startFakeUpstream() throws IOException {
+        upstreamHits.set(0);
+        upstreamAuthorization.set(null);
+        fakeUpstream = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+        fakeUpstream.createContext("/models", exchange -> {
+            upstreamHits.incrementAndGet();
+            upstreamAuthorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            byte[] payload = "{\"object\":\"list\"}".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, payload.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(payload);
+            }
+        });
+        fakeUpstream.setExecutor(Executors.newCachedThreadPool(runnable -> {
+            Thread thread = new Thread(runnable, "channel-probe-fake-upstream");
+            thread.setDaemon(true);
+            return thread;
+        }));
+        fakeUpstream.start();
+    }
+
+    @AfterEach
+    void stopFakeUpstream() {
+        if (fakeUpstream != null) {
+            fakeUpstream.stop(0);
+            fakeUpstream = null;
         }
     }
 
@@ -517,16 +579,137 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
         }
     }
 
+    // ---------------------------------------------------------------- 8) 渠道探测（Task 11）
+
+    /**
+     * 探测**真的打了一次上游**并回报可达性与耗时，响应里**绝不出现密钥**（明文、落库密文都不许）。
+     *
+     * <p>这一条刻意落在本类（而不是 {@code ProbeAndQueryIntegrationTest}）：探测要解密渠道密钥 ⇒ 需要
+     * {@code aihub.channel.master-key}，而该属性只存在于本类的 {@code @TestPropertySource} 里；
+     * {@code @Import} 会把导入者类算进上下文缓存键，所以新写一个带同样属性的类会 fork **第 8 个**
+     * Spring 上下文（计划 Interfaces 第 6 条 / CONVENTIONS §8 item 5/6）。
+     *
+     * <p>判别力由变异体 {@code M6}（把明文塞进 {@code ProbeResult.message}）提供：变异后
+     * {@code doesNotContain(PROBE_PLAINTEXT)} 精确变红。
+     */
+    @Test
+    void probingAChannelReportsReachabilityWithoutLeakingTheKey() throws Exception {
+        long id = createChannel(uniqueChannelName(), upstreamBaseUrl(), PROBE_PLAINTEXT);
+        String cipher = channelMapper.selectById(id).getApiKeyCipher();
+
+        ResponseEntity<String> res = post("/api/channels/" + id + "/probe", Map.of());
+
+        assertThat(res.getStatusCode()).as("POST /api/channels/{id}/probe 必须 200（响应体=%s）", res.getBody())
+                .isEqualTo(HttpStatus.OK);
+        JsonNode data = body(res).path("data");
+        assertThat(data.path("reachable").asBoolean())
+                .as("上游回 200 ⇒ reachable=true（响应体=%s）", res.getBody()).isTrue();
+        assertThat(data.path("httpStatus").asInt()).as("必须回报上游状态码").isEqualTo(200);
+        assertThat(data.path("latencyMs").asLong()).as("必须回报一个非负耗时").isGreaterThanOrEqualTo(0L);
+        assertThat(res.getBody()).as("探测响应绝不回显明文密钥或落库密文")
+                .doesNotContain(PROBE_PLAINTEXT).doesNotContain(cipher);
+
+        // 单次请求：假上游只许被命中一次（探测不是重试风暴）。
+        assertThat(upstreamHits.get()).as("探测必须只发一次上游请求").isEqualTo(1);
+        assertThat(upstreamAuthorization.get()).as("探测必须带上游密钥去认证（真实打上游，而不是空转）")
+                .isNotNull().startsWith("Bearer ");
+    }
+
+    /** 渠道不存在 → **404**（停用仍可探测；它是诊断动作，不是数据面调用）。 */
+    @Test
+    void probingAnUnknownChannelIs404NotFound() throws Exception {
+        ResponseEntity<String> res = post("/api/channels/9000000000/probe", Map.of());
+        assertThat(res.getStatusCode()).as("不存在的渠道必须 404（响应体=%s）", res.getBody())
+                .isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(body(res).path("code").asText()).isEqualTo("NOT_FOUND");
+    }
+
+    /**
+     * 失败路径：上游**不回包** ⇒ 有界超时后 {@code reachable=false}，整个探测必须**有界**（超时上限
+     * 3 秒）。没有上界时这条会拿渠道的 {@code timeout_ms}（60s）去等，本用例的时延断言会红。
+     */
+    @Test
+    void probingAChannelWithAnUnresponsiveUpstreamIsBoundedAndUnreachable() throws Exception {
+        // 黑障：accept 但永不回包的真 ServerSocket（手法照搬 ApiKeyAdminIntegrationTest 的黑障 Redis）。
+        ServerSocket blackhole = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
+        List<Socket> held = new ArrayList<>();
+        Thread acceptor = new Thread(() -> {
+            while (!blackhole.isClosed()) {
+                try {
+                    held.add(blackhole.accept());
+                } catch (IOException closed) {
+                    return;
+                }
+            }
+        }, "channel-probe-blackhole");
+        acceptor.setDaemon(true);
+        acceptor.start();
+        try {
+            long id = createChannel(uniqueChannelName(),
+                    "http://127.0.0.1:" + blackhole.getLocalPort(), PROBE_PLAINTEXT);
+
+            long start = System.nanoTime();
+            ResponseEntity<String> res = post("/api/channels/" + id + "/probe", Map.of());
+            long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
+
+            assertThat(res.getStatusCode()).as("探测必须 200（失败以 reachable=false 表达，不是 5xx；响应体=%s）",
+                    res.getBody()).isEqualTo(HttpStatus.OK);
+            assertThat(body(res).path("data").path("reachable").asBoolean())
+                    .as("上游不回包 ⇒ 有界超时后 reachable=false").isFalse();
+            assertThat(elapsedMs).as("探测必须有界（超时上限 3 秒），不许无限等；实测 %d ms", elapsedMs)
+                    .isLessThan(8_000L);
+        } finally {
+            blackhole.close();
+            for (Socket socket : held) {
+                try {
+                    socket.close();
+                } catch (IOException ignored) {
+                    // 清场尽力而为：黑障 socket 关掉即可，不需要断言。
+                }
+            }
+        }
+    }
+
+    /**
+     * 解密失败（密文解不开）⇒ 按「不可达 + 非敏感原因」处理，**不抛异常**、**不回显密文**。
+     * 判别力由变异体（让 {@code decrypt} 的空 Optional 直接抛）提供：变异后本用例的状态码断言
+     * 从 200 变 500，精确变红。
+     */
+    @Test
+    void probingAChannelWithAnUndecryptableKeyIsUnreachableWithoutLeakingTheCipher() throws Exception {
+        long id = createChannel(uniqueChannelName(), upstreamBaseUrl(), PROBE_PLAINTEXT);
+        ChannelEntity row = channelMapper.selectById(id);
+        String brokenCipher = "v1:this-is-not-a-valid-cipher";
+        row.setApiKeyCipher(brokenCipher);
+        channelMapper.updateById(row);
+
+        ResponseEntity<String> res = post("/api/channels/" + id + "/probe", Map.of());
+
+        assertThat(res.getStatusCode()).as("解密失败必须走「不可达」而不是抛异常（响应体=%s）", res.getBody())
+                .isEqualTo(HttpStatus.OK);
+        assertThat(body(res).path("data").path("reachable").asBoolean())
+                .as("解不开的密钥按「不可达 + 非敏感原因」处理").isFalse();
+        assertThat(res.getBody()).as("响应绝不回显密文").doesNotContain(brokenCipher);
+    }
+
     // ---------------------------------------------------------------- 夹具与助手
 
     private long createChannel(String name) throws Exception {
+        return createChannel(name, "http://127.0.0.1:1", PLAINTEXT);
+    }
+
+    private long createChannel(String name, String baseUrl, String apiKey) throws Exception {
         ResponseEntity<String> res = post("/api/channels", Map.of(
                 "name", name,
                 "provider", "openai-compatible",
-                "baseUrl", "http://127.0.0.1:1",
-                "apiKey", PLAINTEXT));
+                "baseUrl", baseUrl,
+                "apiKey", apiKey));
         assertThat(res.getStatusCode()).as("创建渠道必须 200（响应体=%s）", res.getBody()).isEqualTo(HttpStatus.OK);
         return body(res).path("data").path("id").asLong();
+    }
+
+    private String upstreamBaseUrl() {
+        return "http://127.0.0.1:" + fakeUpstream.getAddress().getPort();
     }
 
     private static String uniqueChannelName() {
