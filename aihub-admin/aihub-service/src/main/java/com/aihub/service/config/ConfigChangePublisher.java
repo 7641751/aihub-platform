@@ -34,8 +34,15 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * <p><b>调用方义务：只能在事务提交之后调用，不能在事务里调</b>。本方法写的是**持久水位**，而广播是
  * **不可撤回**的：若在事务内调用而事务随后回滚，消息里的版本会比水位更高，其他实例按版本比对就会把
  * **真实但更低**的快照挡在门外，直到后续某次写超过它才自愈 —— 有界、可自愈，但是**静默**的。
- * 把「提交后调用」落成 after-commit 钩子（连同它的用例）属于**引入调用方的任务**（Task 8/9/10）；
- * 本任务只登记这条义务，**不声称它已被验证**（这里没有回滚用例，也没有 after-commit 机制）。
+ * 「提交后调用」这件事**已经在本类里落成机制**：{@link #publishAfterCommit(String)}（Task 8 引入）
+ * 在事务里注册 after-commit 钩子，事务回滚时钩子不执行；不变量由
+ * {@code ChannelAdminIntegrationTest#rolledBackWritePublishesNothingAndDoesNotRaiseTheWatermark} 钉住
+ * （业务写、审计、钩子一起作废），正向对照是
+ * {@code ChannelAdminIntegrationTest#everyWritePublishesAnInvalidationMessage}。
+ * <b>已被取代的历史说明（保留以示演变，不要当成本类今天的性质）</b>：在本类还只有
+ * {@code bumpAndPublish} 的那些任务里，这一段写的是「把『提交后调用』落成 after-commit 钩子（连同它的
+ * 用例）属于**引入调用方的任务**（Task 8/9/10）；本任务只登记这条义务，**不声称它已被验证**（这里没有
+ * 回滚用例，也没有 after-commit 机制）」—— 那两句话对**今天的代码不再成立**。
  *
  * <p><b>发布失败绝不让业务写失败</b>：调用本方法时控制台的写**已经提交**了。把「广播失败」变成
  * 「业务失败」只会让用户以为没存上，然后重试一次已经成功的写。因此 {@link #publish(long, String)}
@@ -77,7 +84,9 @@ public class ConfigChangePublisher {
      *
      * <p><b>调用方义务：必须在事务提交之后调用</b>（见类注释）：本方法写持久水位 + 发不可撤回的广播，
      * 在事务内调用、事务随后回滚，会让发布出去的版本高于水位，其他实例便会把真实但更低的快照挡在门外
-     * （有界、可自愈，但静默）。after-commit 钩子与它的用例属于引入调用方的那些任务（Task 8/9/10）。
+     * （有界、可自愈，但静默）。after-commit 钩子由 {@link #publishAfterCommit(String)} 提供
+     * （Task 8 引入，回滚用例见 {@code ChannelAdminIntegrationTest}），控制面写路径一律走它，
+     * 不要在本方法的调用点自己判断事务。
      *
      * <p><b>发布失败绝不让业务写失败</b>：控制台的写已经提交了，把「广播失败」变成「业务失败」
      * 只会让用户以为没存上 —— 而本地 TTL（30s）+ 版本比对是设计文档 §6.3 写明的兜底。
@@ -108,9 +117,12 @@ public class ConfigChangePublisher {
      *   <li>{@link TransactionSynchronizationManager#isSynchronizationActive()} 为真（即调用发生在某个
      *       {@code @Transactional} 方法里）：
      *       {@code registerSynchronization(new TransactionSynchronization() { afterCommit() { bumpAndPublish(reason); } })} ——
-     *       事务**提交之后**才抬水位并广播；事务回滚时钩子不执行，于是「广播了但水位没抬」不可能发生；</li>
+     *       事务**提交之后**才抬水位并广播；事务回滚时钩子不执行，于是「广播了但水位没抬」不可能发生。
+     *       用例：{@code ChannelAdminIntegrationTest#everyWritePublishesAnInvalidationMessage}（正向）与
+     *       {@code ChannelAdminIntegrationTest#rolledBackWritePublishesNothingAndDoesNotRaiseTheWatermark}（反向）；</li>
      *   <li>为假（服务层被非事务方式调用，例如单元测试或运维脚本直接调）：
-     *       **立即** {@link #bumpAndPublish(String)} —— 与旧行为一致，不会静默不发布。</li>
+     *       **立即** {@link #bumpAndPublish(String)} —— 与旧行为一致，不会静默不发布。
+     *       用例：{@code ConfigChangePublisherTest#publishAfterCommitPublishesImmediatelyWhenNoTransactionIsActive}。</li>
      * </ul>
      *
      * <p><b>为什么必须走 afterCommit 而不是在事务里直接调 {@link #bumpAndPublish(String)}</b>：

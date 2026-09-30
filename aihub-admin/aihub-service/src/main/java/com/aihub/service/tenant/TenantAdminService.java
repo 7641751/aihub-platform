@@ -24,6 +24,12 @@ import java.util.Map;
  *
  * <p><b>审计的 {@code tenant_id} 就是被操作的租户 id</b>：{@code tenant} 表是租户的载体本身，
  * 「影响了哪个租户」有明确答案；创建时先 insert 拿到自增 id，再写审计行（同一事务）。
+ *
+ * <p><b>{@code status} 的「空白不对称」与 {@code ChannelAdminService} 完全一致，且是有意保留的
+ * （Task 8 的独立评审登记，N3）</b>：创建时 {@code null} 与空白都落到默认值 {@code ACTIVE}，
+ * 而更新时空白是**非法值** —— 走 {@link #requireText} 抛 400 {@code INVALID_PARAM}。语义是
+ * 「更新时 {@code null} = 不改动；给了空白 = 给了一个非法值」。合法取值集合今天没有任何地方规定，
+ * 因此这里不臆造取值校验（登记为残余）。
  */
 @Service
 public class TenantAdminService {

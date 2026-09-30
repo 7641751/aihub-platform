@@ -5,6 +5,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.aihub.admin.support.AbstractIntegrationTest;
 import com.aihub.common.config.ConfigInvalidateCodec;
+import com.aihub.common.config.ConfigInvalidateMessage;
 import com.aihub.common.config.ConfigInvalidateTopology;
 import com.aihub.dao.mapper.ConfigVersionMapper;
 import com.aihub.service.config.ConfigChangePublisher;
@@ -47,8 +48,8 @@ import static org.mockito.Mockito.when;
  * {@code RedisMessageListenerContainer} 字段，所以这里用注入的 {@link RedisConnectionFactory} 现搭一个
  * （brief 里的 {@code container.addMessageListener(...)} 是伪代码）。
  *
- * <p>三个用例都不需要额外的 Docker 容器（复用基类的单例）：成功路径用真 Redis，
- * 两条失败路径（Redis 抛异常、reason 为空被 codec 拒绝）用替身 Redis —— 「发布失败绝不让业务写失败」
+ * <p>四个用例都不需要额外的 Docker 容器（复用基类的单例）：成功路径与「无活动事务立即发布」路径用真
+ * Redis，两条失败路径（Redis 抛异常、reason 为空被 codec 拒绝）用替身 Redis —— 「发布失败绝不让业务写失败」
  * 是**异常路径**，不能靠真 Redis 去制造。
  */
 class ConfigChangePublisherTest extends AbstractIntegrationTest {
@@ -93,6 +94,38 @@ class ConfigChangePublisherTest extends AbstractIntegrationTest {
         assertThat(received.poll(5, TimeUnit.SECONDS)).isNotNull()
                 .satisfies(body -> assertThat(ConfigInvalidateCodec.decode(body).version()).isEqualTo(version));
         assertThat(configVersionMapper.current()).isGreaterThanOrEqualTo(version);
+    }
+
+    /**
+     * {@code publishAfterCommit} 的**另一个分支**：没有活动事务时必须**立即**抬水位并广播，绝不静默
+     * 不发布（{@code ConfigChangePublisher} 的 javadoc 把两个分支都写成「被钉死」，而这条直到现在没有
+     * 任何用例 —— 集成测试里的写路径全部经过 {@code @Transactional} 服务，只覆盖 after-commit 那一半。
+     * Task 8 的独立评审把它登记为 N2）。
+     *
+     * <p>形状与成功路径一致：真 Redis + 一条真订阅 + 有界等待。等不到就带着原因变红（而不是断言
+     * 「某个方法被调用过」）。删掉「没有活动事务就立即发布」那一行时本用例必须变红。
+     */
+    @Test
+    void publishAfterCommitPublishesImmediatelyWhenNoTransactionIsActive() throws Exception {
+        BlockingQueue<String> received = new LinkedBlockingQueue<>();
+        container().addMessageListener((m, ch) -> received.add(new String(m.getBody())),
+                new ChannelTopic(ConfigInvalidateTopology.CHANNEL));
+        awaitSubscription(received);
+
+        // 本用例方法刻意**不带** @Transactional：所以这里确实没有活动的事务同步（立即发布分支）。
+        publisher.publishAfterCommit("channel.create");
+
+        String payload = received.poll(5, TimeUnit.SECONDS);
+        assertThat(payload)
+                .as("没有活动事务时 publishAfterCommit 必须立即发布（否则非事务调用路径静默不失效）")
+                .isNotNull();
+        ConfigInvalidateMessage message = ConfigInvalidateCodec.decode(payload);
+        assertThat(message).as("载荷必须能被发布端与订阅端共用的 codec 解开").isNotNull();
+        assertThat(message.reason()).isEqualTo("channel.create");
+        assertThat(message.version()).as("失效消息必须带一个真实的水位版本号").isPositive();
+        assertThat(configVersionMapper.current())
+                .as("水位必须已经被抬到不低于消息里的版本（订阅方按消息里的版本抬自己的写入水位）")
+                .isGreaterThanOrEqualTo(message.version());
     }
 
     /**

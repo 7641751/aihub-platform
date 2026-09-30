@@ -36,6 +36,12 @@ import java.util.Map;
  * 合法则**规范化**（{@code JsonNode.toString()}）后落库。它**不参与路由** —— M3 的路由只用
  * {@code model_route} 表（{@code ChannelEntity} 的类注释）。
  *
+ * <p><b>{@code status} 的「空白不对称」是有意保留的（Task 8 的独立评审登记，N3）</b>：创建时
+ * {@code null} 与空白都落到默认值 {@code ACTIVE}（{@code write.status() == null || isBlank()}），
+ * 而更新时空白是**非法值** —— 走 {@link #requireText} 抛 400 {@code INVALID_PARAM}。语义是
+ * 「更新时 {@code null} = 不改动；给了空白 = 给了一个非法值」。{@code TenantAdminService} 行为一致。
+ * 哪些字符串算合法状态今天**没有任何地方规定**，因此这里不臆造取值校验（登记为残余）。
+ *
  * <p><b>审计的 {@code tenant_id} 传 {@code null}</b>：{@code channel} 在本 schema 里不是租户级资源
  * （V1 的建表没有 {@code tenant_id} 列），因此「影响了哪个租户」这个维度**不存在** ——
  * 传 {@code null}（SQL NULL）而不是拿操作者的租户去冒充它。操作者记在 {@code actor} 列里。

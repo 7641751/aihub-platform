@@ -401,6 +401,15 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
      今天全量绿（`aihub-web` 173/0），两个上下文写的是同一张表，也没有观测到互相干扰；但代价是真实的
      （全量运行多付一次上下文启动，且两套消费者/定时任务同时在跑），登记在此以免事后才发现。它换来的是
      「判别力在任何 JVM 时区下都成立」，这个交换仍值得，只是不要忘了它的价格。
+  6. **已知代价（2026-09-30 登记，Task 8 的修复轮实测）**：`ChannelAdminIntegrationTest` 的
+     `@TestPropertySource`（合成控制台签名密钥 + 双版本渠道主密钥）在套件里是**唯一**的属性集，因此它
+     又 fork 出**一个完整的 Spring 上下文**。修复轮实测（命令 `mvn -B clean test -pl :aihub-web -am`，
+     全量日志 `.m4t8fix-logs/F02-admin-full.log`）：同一个 JVM 里 `Tomcat started on port` 出现 **7** 次、
+     `HikariPool-N - Start completed` 也出现 **7** 次 —— 即 7 个完整上下文，本任务贡献其中之一
+     （自己的 Tomcat、Hikari 池、`@RabbitListener` 容器与 `@Scheduled` 任务，共享同一组容器）。
+     代价与上面第 5 条同类；它换来的是「渠道/租户写路径的真 HTTP + 真加密 + 真 Redis 失效广播」这一层
+     覆盖。登记在此，免得下一次「套件为什么这么慢」又被当成谜（Task 8 的独立评审也量到同样的 7 / 7，
+     见被 gitignore 的 `.superpowers/sdd/m4-task-8-review-verification.log` §E）。
 - **断言一个异步副作用之前，必须先等它发生**（有界等待）：被观测的调用如果是「发后不管」的
   （例如 `aihub-gateway` 的 Redis 回填 `subscribeOn(...).subscribe()`），那么「它跑完了没有」与
   `block()` 返回的时刻**没有先后关系**。M2 收口时在这里踩过一次：`ApiKeyFilterContractTest` 的
