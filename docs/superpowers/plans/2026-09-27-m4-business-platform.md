@@ -1560,12 +1560,24 @@ git commit -m "feat(console): API key management with explicit shared-cache evic
 **Interfaces:**
 - Produces: `/api/routes`（POST/GET/PUT/DELETE）、`/api/rate-limits`（POST/GET/PUT/DELETE）
 - `RateLimitPolicyAdminService.upsert(...)`：写入新策略前**先把同一维度的 ACTIVE 行置为 `INACTIVE`**，这样 M3 决策 17 的「同维度取最后一条」在任何时候都只有一条候选
+- **（2026-09-30 控制器补，均为"照字面执行会出错"的缺陷或必须先定死的机制）**
+  - **四种 HTTP 方法的语义定死**：`POST /api/routes` 建一条（唯一键冲突 → **400** `INVALID_PARAM`）；`GET` 列出（**全局资源**：任何 `ADMIN` 看全部行，见 `docs/CONVENTIONS.md` §10 的 R1）；`PUT /api/routes/{id}` 改 `weight`/`priority`/`status`；`DELETE /api/routes/{id}` **真删行**（与 Task 9 的 api-keys 一致）。
+    `POST /api/rate-limits` = `upsert`（**先停用同维度旧 ACTIVE 行、再插新 ACTIVE 行**，两行操作、**一次**广播）；`GET` 列出（**租户维度资源**：缺省 = 令牌里的 `tenantId`，见 §10 的 R3.2；`api_key_id` 为 NULL 表示**租户级**，查它**必须** `isNull()`）；`PUT /api/rate-limits/{id}` 只改 `qps`/`burst`（该行必须仍是 ACTIVE，否则 404）；`DELETE /api/rate-limits/{id}` = **置 `INACTIVE`（软停用，不删行）** —— 依据是 `AuditAction` 里存在的 `RATE_LIMIT_DEACTIVATE`（**实测**，见下）且"取最后一条"规则需要历史行仍在。
+  - **广播 reason 枚举（`publishAfterCommit`，不许 `bumpAndPublish`）**：`route.create` / `route.update` / `route.delete` / `rate_limit.create` / `rate_limit.update` / `rate_limit.deactivate`。**一次写 = 一次广播**（upsert 的两行落库只能发一条）。
+  - **审计动作直接用 `AuditAction` 里已有的常量**（**实测**：`ROUTE_CREATE` / `ROUTE_UPDATE` / `ROUTE_DELETE` / `RATE_LIMIT_CREATE` / `RATE_LIMIT_UPDATE` / `RATE_LIMIT_DEACTIVATE` 全部已存在）⇒ **不许**新增动作常量、**不许**改 `aihub-common`。审计的 `tenant_id`：路由写记 `NULL`（全局资源，R1）、策略写记**该策略的** `tenant_id`（R2）。
+  - **取值校验（顺带堵住 Task 8 的 N5 同类缺口）**：`ModelRouteEntity.status` / `RateLimitPolicyEntity.status` 只接受 `ACTIVE` 与 `INACTIVE`（其它一律 400 `INVALID_PARAM`）；`weight` / `priority` / `qps` / `burst` 必须 **≥ 0**（负数 400）。`status` 字面量用**各自服务内的私有常量**，**不要**为了它改跨服务类型（与 Task 9 裁定 4 同款理由）。
+  - **路由引用的渠道必须存在**：`model_route.channel_id` **没有外键约束** ⇒ 建/改路由前必须查 `ChannelMapper`，不存在 → **404 `NOT_FOUND`**（否则会产生悬挂路由，快照带着它、网关静默丢掉）。
+  - **命名**：service/web 包下**不许**出现与 `aihub-common` 共享类型同名或近义的类型（`ModelRouteDescriptor`、`RatePolicy`、`ApiKeyView` 都是共享类型，**实测**在 `com.aihub.common.config` / `com.aihub.common.apikey` 里）。列表 DTO 落成**服务内的嵌套 `record`**（`RouteSummary` / `PolicySummary`），不额外建文件（同 Task 11 的 F2 处置）。
 
 - [ ] **Step 1: 写失败测试**
 
 ```java
 @Test
-void creatingARouteTwiceForTheSameModelAndChannelIsAConflict() { /* 唯一键 uk_model_route → 409/400 + 明确 message */ }
+void creatingARouteTwiceForTheSameModelAndChannelIsAConflict() {
+    // 唯一键 uk_model_route(model_name, channel_id) 被违反 ⇒ **400 `INVALID_PARAM`**（ErrorCode 里
+    // **没有** 409，2026-09-30 实测），且 message 必须可读；必须把底层唯一键冲突**翻译成** BizException，
+    // 否则会落到 GlobalExceptionHandler 的兜底分支变成 **500**。
+}
 
 @Test
 void updatingATenantPolicyDeactivatesThePreviousActiveRowForThatDimension() {
@@ -1575,18 +1587,30 @@ void updatingATenantPolicyDeactivatesThePreviousActiveRowForThatDimension() {
     assertThat(policyMapper.selectById(first).getStatus()).isEqualTo("INACTIVE");
     assertThat(policyMapper.selectById(second).getStatus()).isEqualTo("ACTIVE");
     assertThat(activeRowsFor(1L, null)).hasSize(1);
+    // ⚠️ `createTenantPolicy` / `activeRowsFor` 必须落地为真实夹具；`activeRowsFor(tenant, null)`
+    // 表示「租户级」维度（`api_key_id IS NULL`）—— 查它**必须**用 `isNull()`，
+    // `eq(column, null)` 恒不成立、会静默返回 0 行（docs/CONVENTIONS.md §7，2026-09-30 复核）。
 }
 
 @Test
-void aKeyLevelPolicyAndATenantLevelPolicyCoexist() { /* 两个维度互不干扰 */ }
+void aKeyLevelPolicyAndATenantLevelPolicyCoexist() {
+    // ⚠️ **不许留空占位**（这条初版是空 `{ }`，与下一段自己的告诫自相矛盾）。必须落地：
+    // 维度 = (`tenant_id`, `api_key_id`)，其中 `api_key_id IS NULL` 是租户级、非空是 key 级。
+    // ① 建一条租户级 + 一条 key 级 ⇒ **两条都 ACTIVE**（互不打扰）；
+    // ② 再 upsert 一次**租户级** ⇒ 只有租户级那条被置 INACTIVE，**key 级那条仍是 ACTIVE**。
+}
 
 @Test
 void bothWritesPublishAnInvalidationMessage() {
-    // **不许留空占位**（Task 2 的评审点名：空 `{ }` 的用例是假绿）。两条断言都要：
-    // ① 建一条路由 → 频道上收到 route.create；② 改一条租户级策略（先停用旧行、再插新行）→
-    //    收到 rate_limit.update，且**只收到一条**（一次写 = 一次广播）。
-    // 反向那一半由 Task 8 的 rolledBackWritePublishesNothingAndDoesNotRaiseTheWatermark 覆盖，
-    // 这里可以只做正向；但**必须**断言消息内容里的 reason 与 version，而不是只断言"收到了东西"。
+    // **不许留空占位**（Task 2 的评审点名：空 `{ }` 的用例是假绿）。必须落地（控制器 2026-09-30 定死）：
+    // ① 建一条路由 → 频道上收到**恰好一条** reason="route.create"，且 message.version() > 0；
+    // ② upsert 一条租户级策略（**先停用旧行、再插新行**，两行两次落库）→ 收到**恰好一条**
+    //    reason="rate_limit.create"（**一次写 = 一次广播**）：收到第一条之后，在同一**有界窗口**内
+    //    再 poll 一次必须是 null（不是 sleep，也不要断言"绝对没有第二条"却给不出窗口）；
+    // ③ 订阅后必须先用哨兵 `awaitSubscription(...)` 确认订阅建立，否则第一条真消息会被静默丢掉；
+    // ④ 必须断言消息里的 reason 与 version（而不是只断言"收到了东西"），并断言不出现**别的** reason。
+    // 反向那一半（回滚不发布）由 Task 8 的 rolledBackWritePublishesNothingAndDoesNotRaiseTheWatermark
+    // 覆盖，本任务可以只做正向。
 }
 ```
 
@@ -1597,7 +1621,9 @@ Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am tes
 - [ ] **Step 5: 提交**
 
 ```bash
-git add aihub-admin/aihub-service/src/main/java/com/aihub/service/route/ \
+# 2026-09-30 控制器更正：原清单第一行是**目录**（`.../service/route/`），目录形式会连带
+# stage 意外文件、也违反「只 stage 显式路径」；改为逐个文件（逐条先 Test-Path）。
+git add aihub-admin/aihub-service/src/main/java/com/aihub/service/route/ModelRouteAdminService.java \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/ratelimit/RateLimitPolicyAdminService.java \
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ModelRouteController.java \
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/RateLimitPolicyController.java \
@@ -1605,8 +1631,9 @@ git add aihub-admin/aihub-service/src/main/java/com/aihub/service/route/ \
 git commit -m "feat(console): model route and rate-limit policy CRUD with dimension-unique activation"
 ```
 
-**验收判据：** 同维度永远只有一条 ACTIVE 策略；两个维度共存；重复路由被拒并给出可读消息；写操作都广播失效。
+**验收判据：** 同维度永远只有一条 ACTIVE 策略；两个维度共存（`api_key_id IS NULL` 与 `api_key_id = ?`）；重复路由被拒（**400** + 可读 message，**不是 500**）并给出可读消息；写操作都广播失效（**恰好一条**）；`status`/数值的非法取值与不存在的 `channelId` 都被显式拒绝（400 / 404）；**新增的集成测试类不得让套件的 Spring 上下文从 7 变成 8**（见 `docs/CONVENTIONS.md` §8 item 5/6）。
 **RED 证据：** `updatingATenantPolicyDeactivatesThePreviousActiveRowForThatDimension` 在「只插入不停用」的实现下红（两行同时 ACTIVE → M3 的「取最后一条」规则会变成依赖插入顺序的运气）。
+⚠️ **（2026-09-30 控制器补）RED 必须落在被测断言上**：Task 9 的教训是它的 4 条 RED **全部**红在 `404`（端点未映射），那种红**不能**证明断言的判别力（判别力只能由变异体提供）。因此：本任务的测试必须只依赖 **HTTP + 既有 mapper/entity**（这样能在服务层存在之前就编译并跑红），并且**每一条行为都必须配一条自己的变异体**证明它能把对应断言打红。
 
 ---
 
