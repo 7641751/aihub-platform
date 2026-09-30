@@ -1650,14 +1650,16 @@ git commit -m "feat(console): model route and rate-limit policy CRUD with dimens
 - Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/BillingController.java`
 - Modify: `ChannelController`（Task 8 的）增加 `POST /api/channels/{id}/probe`
 - Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ProbeAndQueryIntegrationTest.java`
-- **Modify（2026-09-30 控制器补，两处都属"缺路径"缺陷类）**：
-  - `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/MybatisMapperConfig.java` —— **分页拦截器必须加在这个既有 `@Configuration` 里**（见下方 Interfaces 第 1 条：仓库里**没有任何** `PaginationInnerInterceptor`，照计划字面写 `selectPage` 会**静默返回全表**）；
+- **Modify（2026-09-30 控制器补）**：
   - `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ChannelAdminIntegrationTest.java` —— **探测用例放这里**（它已经持有 `aihub.channel.master-key` + 渠道夹具，探测要解密渠道密钥；放进新文件会 fork **第 8 个** Spring 上下文，见 Interfaces 第 6 条）。
+  - ~~`MybatisMapperConfig.java`~~ —— **不需要修改**（2026-09-30 二次更正）：分页改用**显式 `LIMIT/OFFSET`**，不引入 jsqlparser 依赖，因此**该文件保持 pristine、不进本任务的提交**（Interfaces 第 1 条已据此改写）。
 
 **Interfaces:**
 - Consumes: `RequestLogMapper`（既有）、`BillingDailyMapper`（本任务新建）、`ChannelKeyService` 的解密入口
 - **（2026-09-30 控制器补 —— 4 条"照字面执行会出错 / 与已定死的规范冲突"）**
-  1. **⚠️ 分页会静默失效（高危）**：全仓**实测没有任何** `MybatisPlusInterceptor` / `PaginationInnerInterceptor`（`Select-String` 0 命中，`application.yml` 也没有 pagination 配置）⇒ 在 MyBatis-Plus 里**没有分页拦截器时 `selectPage(Page, wrapper)` 不会加 `LIMIT`**，而是执行原查询把**全部匹配行**塞进 `Page.getRecords()`（`total` 也不会算）。这正好**违反**本任务的验收判据"分页有上界"，而且空占位用例抓不到。⇒ **必须**在既有 `MybatisMapperConfig`（`aihub-dao`，已是 `@Configuration` + `@MapperScan`）里加一个 `@Bean MybatisPlusInterceptor` + `PaginationInnerInterceptor`；并**必须**用一条用例证明它真的加上了 `LIMIT`（查 N 行、`size=2` ⇒ 恰好 2 条且 `total=N`），判别力由"删掉该 `@Bean` ⇒ 该用例变红"提供。
+  1. **⚠️ 分页会静默失效（高危）—— 2026-09-30 二次更正（我上一个版本的前提错了）**：全仓**实测没有任何** `MybatisPlusInterceptor` / `PaginationInnerInterceptor` 用法；**且该类在本仓库的类路径上根本不存在**：MyBatis-Plus 自 **3.5.9** 起把分页拦截器拆到**独立构件** `com.baomidou:mybatis-plus-jsqlparser`（本项目 `mybatis-plus.version = 3.5.17`，`mybatis-plus-spring-boot3-starter` **不传递**它）。⇒ 我先前写的"在 `MybatisMapperConfig` 里加 `@Bean PaginationInnerInterceptor`"**照字面做不到**（要改 `pom.xml` 加依赖）。
+     **定死（控制器裁定，2026-09-30）**：**不引入 jsqlparser 依赖**，改用**等效的显式有界分页** —— `selectCount(过滤条件)` + `selectList(过滤条件 + ORDER BY created_at DESC, id DESC + 显式 LIMIT/OFFSET)`，再手工装进 `Page<>(page, size, total)`（**返回类型仍是 `Page`，契约不变**）。`LIMIT/OFFSET` 的值**只能**来自已经校验过的整数（`size ∈ [1,200]`、`page ≥ 0`），**不许**把任何用户字符串拼进 SQL。
+     判别力要求不变：**必须**有一条用例证明 `LIMIT` 真的生效（造 N 行、`size=2` ⇒ **恰好 2 条且 `total=N`**），并由"**去掉 `LIMIT/OFFSET` 段 ⇒ 该用例变红**"提供（实测：`expected: 2 but was: 3`）。
   2. **`GET /api/billing/daily` 必须带 `tenantId`**：原文只写 `?from=&to=`，而 `billing_daily` 有 `tenant_id NOT NULL`，且 `docs/CONVENTIONS.md` §10 的 **R3.1** 明文把 `/api/billing/daily` 归为**运营查询**、要求**必须显式 `tenantId`**（缺省 400）。⇒ 改为 `GET /api/billing/daily?tenantId=&from=&to=`，缺 `tenantId` 或时间范围 → **400**。三个查询端点（logs / audit / billing）语义统一。
   3. **`page`/`size` 的上下界与默认值必须钉死**（否则"上界"只是文档承诺）：`size` 缺省 **20**、`>200` **钳到 200**、`<1` → 400 `INVALID_PARAM`；`page` 缺省 **0**、`<0` → 400；`from`/`to` 必须能解析成带 `Z` 的 `Instant`（解析失败 400）、且 `from <= to`（否则 400）。排序固定 `created_at DESC`（`request_log` / `audit_log` 都是分区表，无 `ORDER BY` 的分页没有意义）。
   4. **`ChannelProbeService` 的边界**：渠道不存在 → **404 `NOT_FOUND`**（渠道停用**仍可探测** —— 它是诊断动作，不是数据面调用）；**单次**请求、**超时上限 3 秒**（必须有界，不许无限等）；响应 `{reachable, httpStatus, latencyMs, message}`，**绝不回显密钥**（明文、密文、主密钥都不许），`message` 只放简短非敏感原因；**不写审计**（`AuditAction` 里**没有** PROBE 常量，**不要新增**共享常量）；`ChannelKeyService.decrypt` 返回 `Optional` 且**永不抛** ⇒ 解不开时按"不可达 + 非敏感原因"处理，不要让异常穿到控制器。
@@ -1709,8 +1711,8 @@ void logsQueryRequiresATenantAndATimeRange() {
 void logsPagingIsBoundedAndOrderedByCreatedAtDescending() {
     // ⚠️ **不许留空占位**（空 `{}` 的用例是假绿；Task 10 的 Step 1 犯过同一个错）。必须落地：
     //   ① 造 **3 行**本用例独有的 `request_log`（不同 created_at）⇒ `size=2` 时**恰好返回 2 条**、
-    //      且 `total == 3`（这条同时是**分页拦截器真的加了 LIMIT** 的判别证据：删掉 `MybatisInterceptor`
-    //      的 `@Bean` 之后它必须红 —— 没有拦截器时 MyBatis-Plus 会返回**全表**，正是"无界扫描"）；
+    //      且 `total == 3`（这条同时是**分页真的加了 LIMIT** 的判别证据：去掉 `LIMIT/OFFSET` 段之后它必须红
+    //      —— 没有 LIMIT 时会返回**全表**，正是"无界扫描"；实测红点 `expected: 2 but was: 3`）；
     //   ② 顺序按 `created_at DESC`（断言三条 id 的先后，而不是只断言"有 3 条"）；
     //   ③ `size=201` 被**钳到 200**（断言实际页大小，不是只断言 200 状态码）；`size=0` 与 `page=-1` → **400**。
 }
@@ -1723,11 +1725,11 @@ Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am tes
 - [ ] **Step 5: 提交**
 
 ```bash
-# 2026-09-30 控制器补两处 Modify（原清单缺它们 = Task 8/9 的"Files 缺路径"缺陷类）：
-#   MybatisMapperConfig 承载分页拦截器；ChannelAdminIntegrationTest 承载探测用例（保持 7 个上下文）。
+# 2026-09-30 控制器补一处 Modify（原清单缺它 = Task 8/9 的"Files 缺路径"缺陷类）：
+#   ChannelAdminIntegrationTest 承载探测用例（保持 7 个上下文）。
+#   ⚠️ 不要再加 MybatisMapperConfig —— 分页走显式 LIMIT/OFFSET，那个文件保持 pristine（二次更正）。
 git add aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/BillingDailyEntity.java \
         aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/BillingDailyMapper.java \
-        aihub-admin/aihub-dao/src/main/java/com/aihub/dao/MybatisMapperConfig.java \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/config/ChannelProbeService.java \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/log/RequestLogQueryService.java \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/log/AuditQueryService.java \
@@ -1742,7 +1744,7 @@ git commit -m "feat(console): channel probe, request-log paging and daily billin
 
 **验收判据：** 探测真实打一次上游（**单次、≤3 秒、有界**）并回报可达性与耗时、**响应与方法内都不出现密钥**、渠道不存在时 404；`/api/logs`、`/api/audit`、`/api/billing/daily` **三者都**强制 `tenantId` + 时间范围（缺一即 400）；**分页真的有 `LIMIT`**（`size=2` 对 3 行 ⇒ 恰好 2 条且 `total=3`）；`size` 钳到 200、非法 `page`/`size` 400；`created_at DESC`；视图里不含明文/`key_hash`；**套件 Spring 上下文仍是 7**（探测用例在 `ChannelAdminIntegrationTest`、查询用例与 `ConsoleLoginIntegrationTest` 共用上下文）。
 **RED 证据：** `logsQueryRequiresATenantAndATimeRange` 在「允许无界查询」的实现下红（这正是「分区表上全表扫描」的入口）。
-⚠️ **（2026-09-30 控制器补）RED 必须落在被测断言上**：Task 9 与 Task 10 的自然 RED **都**全红在 `404`（端点未映射）—— 那种红**不能**证明断言的判别力。⇒ 本任务的测试必须只依赖 **HTTP + 既有 mapper/entity**（这样能在服务层存在之前编译并跑红），并且**每一条行为都必须配一条自己的变异体**证明它能把对应断言打红（尤其：**删掉分页拦截器 `@Bean` ⇒ 分页用例必须红**）。
+⚠️ **（2026-09-30 控制器补）RED 必须落在被测断言上**：Task 9 与 Task 10 的自然 RED **都**全红在 `404`（端点未映射）—— 那种红**不能**证明断言的判别力。⇒ 本任务的测试必须只依赖 **HTTP + 既有 mapper/entity**（这样能在服务层存在之前编译并跑红），并且**每一条行为都必须配一条自己的变异体**证明它能把对应断言打红（尤其：**去掉 `LIMIT/OFFSET` ⇒ 分页用例必须红**，实测 `expected: 2 but was: 3`）。
 
 ---
 ## Task 12: 配额控制面 + Lua 预扣契约
