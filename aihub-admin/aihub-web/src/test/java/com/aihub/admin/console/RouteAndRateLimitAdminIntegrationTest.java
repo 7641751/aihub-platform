@@ -40,6 +40,7 @@ import org.springframework.test.context.TestPropertySource;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -56,8 +57,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p><b>本类只依赖 HTTP + 既有 mapper/entity</b>（不引用 {@code ModelRouteAdminService} /
  * {@code RateLimitPolicyAdminService} 这两个本任务才落地的类型）：因此它在服务层/控制器存在之前就能
- * **编译并跑红**（Task 9 的教训 —— 它的 RED 全红在 404，本任务的红点至少有一部分落在被测断言上，
- * 而真正的判别力由变异体提供：每条行为各配一条变异体，见 evidence 目录）。
+ * **编译并跑红**。
+ *
+ * <p><b>RED 的实测形态（诚实登记，2026-09-30，不修饰）</b>：本类的**自然** RED 是
+ * {@code Tests run: 13, Failures: 11, Errors: 0, Skipped: 0}，而那 **11 条红全部**落在
+ * {@code 404 NOT_FOUND / No static resource api/routes | api/rate-limits}（端点尚未映射）——
+ * **没有一条**落在被测断言上（与 Task 9 同源）。因此四条判据的**判别力完全由变异体提供**（每条行为各配
+ * 一条变异体），**不是**由这套 RED 提供。产物：{@code .m4t10-logs/R01-red.log}（RED 原始日志）、
+ * {@code .m4t10-logs/MUTATIONS.txt} 与 {@code .m4t10-logs/M*-red.log}（初版 11 条变异）；
+ * 覆盖缺口修复轮的补充变异见 {@code .m4t10fix-logs/}。
  *
  * <p><b>租户语义（{@code docs/CONVENTIONS.md} §10）</b>：
  * <ul>
@@ -120,6 +128,14 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final Duration MESSAGE_TIMEOUT = Duration.ofSeconds(5);
+
+    /**
+     * 收齐「有界窗口」用的**静默窗口**：拿到第一条真消息后，继续 poll 直到连续这么多时间没有新消息，
+     * 就把窗口判定为「已经没有更多消息了」。它只用于把窗口**收完整**，不用于「等它发生」——
+     * 「等它发生」由 {@link #MESSAGE_TIMEOUT} 负责。
+     */
+    private static final Duration QUIET_WINDOW = Duration.ofSeconds(2);
+
     private static final Duration SUBSCRIPTION_TIMEOUT = Duration.ofSeconds(5);
     private static final String SUBSCRIPTION_PROBE = "subscription-probe";
 
@@ -241,6 +257,39 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
                 .hasSize(1);
     }
 
+    // ---------------------------------------------------------------- 2b) 跨租户隔离：A 的 upsert 绝不停用 B 的
+
+    /**
+     * {@code docs/CONVENTIONS.md} §10 的 **R2 租户隔离**：{@code deactivateActiveRows} 必须**只**停用
+     * **同一租户、同一维度**的旧 ACTIVE 行 —— 租户维度对 {@code rate_limit_policy} 是**硬隔离**。
+     * 租户 A 与 B **各**有一条**租户级** ACTIVE 策略；对 **A** 做一次 upsert ⇒ **B 的那条必须仍是
+     * ACTIVE**（且 B 的租户级维度仍恰好一条 ACTIVE）。
+     *
+     * <p>判别力由变异体 {@code F3}（从 {@code deactivateActiveRows} 删掉
+     * {@code .eq(RateLimitPolicyEntity::getTenantId, tenantId)}）提供：变异后 A 的 upsert 会停用
+     * **所有租户**的租户级 ACTIVE 行，B 的那条被误停 ⇒ 本用例的「B 仍是 ACTIVE」精确变红。
+     */
+    @Test
+    void upsertingOneTenantsPolicyDoesNotDeactivateAnotherTenantsActiveRow() throws Exception {
+        long tenantA = createTenant();
+        long tenantB = createTenant();
+        long aOld = postTenantPolicy(tenantA, 10, 20);
+        long bPolicy = postTenantPolicy(tenantB, 30, 40);
+
+        // 对 A 做 upsert：只许动 A 自己的租户级旧行。
+        long aNew = postTenantPolicy(tenantA, 5, 6);
+
+        assertThat(rateLimitPolicyMapper.selectById(aOld).getStatus())
+                .as("A 自己的同维度旧 ACTIVE 行必须被置 INACTIVE").isEqualTo(INACTIVE);
+        assertThat(rateLimitPolicyMapper.selectById(aNew).getStatus()).isEqualTo(ACTIVE);
+        assertThat(activeRowsFor(tenantA, null)).as("A 的租户级维度仍恰好一条 ACTIVE").hasSize(1);
+
+        assertThat(rateLimitPolicyMapper.selectById(bPolicy).getStatus())
+                .as("跨租户隔离（§10 R2）：对 A 的 upsert 绝不许停用 B 的租户级 ACTIVE 行")
+                .isEqualTo(ACTIVE);
+        assertThat(activeRowsFor(tenantB, null)).as("B 的租户级维度仍恰好一条 ACTIVE").hasSize(1);
+    }
+
     // ---------------------------------------------------------------- 3) 两个维度共存
 
     /**
@@ -276,18 +325,23 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
                 .as("key 级维度仍恰好一条 ACTIVE").hasSize(1);
     }
 
-    // ---------------------------------------------------------------- 4) 写操作都广播失效（恰好一条）
+    // ---------------------------------------------------------------- 4) 写操作都广播失效（窗口内集合恰好一条）
 
     /**
-     * 一次写 = 一次广播，且 reason 与 version 必须正确。
+     * 一次写 = **恰好**一次广播，且 reason 与 version 必须正确。断言不是「收到一条匹配的就过」，而是
+     * 「把**整个有界窗口**的消息**收齐**，其 reason **集合恰好等于** {@code {期望 reason}}」——
+     * 这样才满足计划 {@code :1611} 的「断言不出现**别的** reason」（只断言「恰好一条」是 reason 受限的，
+     * 多发一条别的 reason 不会被发现）。
      * <ul>
-     *   <li>建一条路由 → 恰好一条 {@code route.create}（{@code version > 0}）；</li>
-     *   <li>upsert 一条租户级策略（**先停用旧行、再插新行**，两行两次落库）→ 恰好一条
-     *       {@code rate_limit.create} —— 收到第一条之后在同一有界窗口内再 poll 必须是 null；</li>
+     *   <li>建一条路由 → 窗口内集合恰好 {@code {route.create}}，且 {@code version > 0}；</li>
+     *   <li>upsert#1（无旧行可停用）→ 窗口内集合恰好 {@code {rate_limit.create}}；</li>
+     *   <li>upsert#2（**先停用旧行、再插新行**，两行两次落库）→ 仍恰好 {@code {rate_limit.create}}
+     *       （一次写 = 一次广播）；</li>
      *   <li>订阅后先用哨兵 {@code awaitSubscription(...)} 确认订阅建立，否则第一条真消息会被静默丢掉。</li>
      * </ul>
-     * 判别力由变异体 {@code M3}（去掉 {@code create} 里的 {@code publishAfterCommit}）提供：
-     * 第一条 {@code route.create} 收不到，{@code :253} 精确变红。
+     * 判别力由变异体 {@code F4}（在 {@code upsert} 的 insert 前多发一条**不同 reason**
+     * {@code rate_limit.deactivate}）提供：窗口内集合变成两条 ⇒ {@code :352} 一类的「集合恰好等于」断言
+     * 精确变红。（初版这里只做 reason 受限的「恰好一条」，见 {@code .m4t10review-logs} 的存活变异 {@code N3b}。）
      */
     @Test
     void bothWritesPublishExactlyOneInvalidationMessage() throws Exception {
@@ -297,26 +351,114 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
         long routeId = postRoute(uniqueModelName(), channelId);
         assertThat(routeId).isPositive();
 
-        ConfigInvalidateMessage created = awaitMessage(received, "route.create");
-        assertThat(created).as("建路由必须广播 reason=route.create").isNotNull();
-        assertThat(created.version()).as("失效消息必须带一个真实的水位版本号").isPositive();
-        assertThat(received.poll(MESSAGE_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))
-                .as("一次路由创建 = 恰好一条广播（有界窗口内不许有第二条）").isNull();
+        List<ConfigInvalidateMessage> routeWindow = drainBoundedWindow(received);
+        assertThat(routeWindow).extracting(ConfigInvalidateMessage::reason)
+                .as("建路由必须广播 reason=route.create，且窗口内不许出现别的 reason")
+                .containsExactlyInAnyOrder("route.create");
+        assertThat(routeWindow).allSatisfy(m -> assertThat(m.version())
+                .as("失效消息必须带一个真实的水位版本号（reason=%s）", m.reason()).isPositive());
 
         long tenantId = createTenant();
         postTenantPolicy(tenantId, 10, 20);
-        ConfigInvalidateMessage policyCreated = awaitMessage(received, "rate_limit.create");
-        assertThat(policyCreated).as("upsert 策略必须广播 reason=rate_limit.create").isNotNull();
-        assertThat(policyCreated.version()).as("失效消息必须带真实水位版本号").isPositive();
-        assertThat(received.poll(MESSAGE_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))
-                .as("upsert#1 只落一行（无旧行可停用）= 恰好一条广播").isNull();
+        List<ConfigInvalidateMessage> createOnce = drainBoundedWindow(received);
+        assertThat(createOnce).extracting(ConfigInvalidateMessage::reason)
+                .as("upsert#1 只落一行（无旧行可停用）= 恰好一条 rate_limit.create")
+                .containsExactlyInAnyOrder("rate_limit.create");
+        assertThat(createOnce).allSatisfy(m -> assertThat(m.version())
+                .as("失效消息必须带真实水位版本号（reason=%s）", m.reason()).isPositive());
 
         // upsert#2：先停用旧 ACTIVE 行、再插新行 —— 两行两次落库，仍只许一条广播。
         postTenantPolicy(tenantId, 5, 10);
-        ConfigInvalidateMessage second = awaitMessage(received, "rate_limit.create");
-        assertThat(second).as("upsert#2 必须广播 reason=rate_limit.create").isNotNull();
-        assertThat(received.poll(MESSAGE_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))
-                .as("一次写 = 一次广播：upsert 的两行落库绝不许发成两条（实际收到第二条才红）").isNull();
+        List<ConfigInvalidateMessage> createTwice = drainBoundedWindow(received);
+        assertThat(createTwice).extracting(ConfigInvalidateMessage::reason)
+                .as("一次写 = 一次广播：upsert 的两行落库只许发一条 rate_limit.create（多发别的 reason 也红）")
+                .containsExactlyInAnyOrder("rate_limit.create");
+        assertThat(createTwice).allSatisfy(m -> assertThat(m.version())
+                .as("失效消息必须带真实水位版本号（reason=%s）", m.reason()).isPositive());
+    }
+
+    // ---------------------------------------------------------------- 4b) route.update / route.delete 也各广播一条
+
+    /**
+     * 判据④「写操作都广播」对 {@code route.update} 与 {@code route.delete} 同样成立：各**恰好一条**、
+     * reason 正确、{@code version > 0}。
+     *
+     * <p>判别力由变异体 {@code F2a}（删 {@code update} 里 {@code publishAfterCommit("route.update")}）
+     * 与 {@code F2b}（删 {@code delete} 里 {@code publishAfterCommit("route.delete")}）提供：删掉对应那条，
+     * 本用例里对应窗口的第一个 poll 就变红（{@code .m4t10review-logs} 的存活变异 {@code N8} 即删
+     * {@code route.update} 而全类曾 14/0 全绿）。
+     */
+    @Test
+    void routeUpdateAndDeleteEachPublishExactlyOneInvalidationMessage() throws Exception {
+        long channelId = createChannel();
+        // 两条路由在**订阅之前**建好：setup 的 route.create 广播没有监听者，不会污染后面的有界窗口。
+        long toUpdate = postRoute(uniqueModelName(), channelId);
+        long toDelete = postRoute(uniqueModelName(), channelId);
+
+        BlockingQueue<String> received = subscribeAndAwait();
+
+        // ---- route.update ----
+        ResponseEntity<String> updated = put(ROUTES + "/" + toUpdate, Map.of("weight", 7), CLIENT_TENANT);
+        assertThat(updated.getStatusCode()).as("PUT 路由必须 200（响应体=%s）", updated.getBody())
+                .isEqualTo(HttpStatus.OK);
+        List<ConfigInvalidateMessage> updateWindow = drainBoundedWindow(received);
+        assertThat(updateWindow).extracting(ConfigInvalidateMessage::reason)
+                .as("PUT 路由 = 窗口内恰好一条 route.update")
+                .containsExactlyInAnyOrder("route.update");
+        assertThat(updateWindow).allSatisfy(m -> assertThat(m.version())
+                .as("失效消息必须带真实水位版本号（reason=%s）", m.reason()).isPositive());
+
+        // ---- route.delete ----
+        ResponseEntity<String> deleted = delete(ROUTES + "/" + toDelete, null);
+        assertThat(deleted.getStatusCode()).as("DELETE 路由必须 200（响应体=%s）", deleted.getBody())
+                .isEqualTo(HttpStatus.OK);
+        List<ConfigInvalidateMessage> deleteWindow = drainBoundedWindow(received);
+        assertThat(deleteWindow).extracting(ConfigInvalidateMessage::reason)
+                .as("DELETE 路由 = 窗口内恰好一条 route.delete")
+                .containsExactlyInAnyOrder("route.delete");
+        assertThat(deleteWindow).allSatisfy(m -> assertThat(m.version())
+                .as("失效消息必须带真实水位版本号（reason=%s）", m.reason()).isPositive());
+    }
+
+    // ---------------------------------------------------------------- 4c) rate_limit.update / rate_limit.deactivate 也各广播一条
+
+    /**
+     * 判据④ 对 {@code rate_limit.update} 与 {@code rate_limit.deactivate} 同样成立。
+     *
+     * <p>判别力由变异体 {@code F2c}（删 {@code update} 里 {@code publishAfterCommit("rate_limit.update")}）
+     * 与 {@code F2d}（删 {@code deactivate} 里 {@code publishAfterCommit("rate_limit.deactivate")}）提供。
+     * 两条策略刻意**不同维度**（租户级 + key 级），以便两条在订阅后都仍是 ACTIVE（PUT 要求目标仍 ACTIVE）。
+     */
+    @Test
+    void rateLimitUpdateAndDeactivateEachPublishExactlyOneInvalidationMessage() throws Exception {
+        long tenantId = createTenant();
+        // upsert#1 建租户级、upsert#2 建 key 级（不同维度，不会互相停用）；都在订阅之前。
+        long toUpdate = postTenantPolicy(tenantId, 10, 20);
+        long toDeactivate = postKeyPolicy(tenantId, KEY_LEVEL_API_KEY_ID, 30, 40);
+
+        BlockingQueue<String> received = subscribeAndAwait();
+
+        // ---- rate_limit.update ----
+        ResponseEntity<String> updated = put(RATE_LIMITS + "/" + toUpdate, Map.of("qps", 55, "burst", 66), tenantId);
+        assertThat(updated.getStatusCode()).as("PUT 策略必须 200（响应体=%s）", updated.getBody())
+                .isEqualTo(HttpStatus.OK);
+        List<ConfigInvalidateMessage> updateWindow = drainBoundedWindow(received);
+        assertThat(updateWindow).extracting(ConfigInvalidateMessage::reason)
+                .as("PUT 策略 = 窗口内恰好一条 rate_limit.update")
+                .containsExactlyInAnyOrder("rate_limit.update");
+        assertThat(updateWindow).allSatisfy(m -> assertThat(m.version())
+                .as("失效消息必须带真实水位版本号（reason=%s）", m.reason()).isPositive());
+
+        // ---- rate_limit.deactivate ----
+        ResponseEntity<String> deactivated = delete(RATE_LIMITS + "/" + toDeactivate, tenantId);
+        assertThat(deactivated.getStatusCode()).as("DELETE 策略必须 200（响应体=%s）", deactivated.getBody())
+                .isEqualTo(HttpStatus.OK);
+        List<ConfigInvalidateMessage> deactivateWindow = drainBoundedWindow(received);
+        assertThat(deactivateWindow).extracting(ConfigInvalidateMessage::reason)
+                .as("DELETE 策略 = 窗口内恰好一条 rate_limit.deactivate")
+                .containsExactlyInAnyOrder("rate_limit.deactivate");
+        assertThat(deactivateWindow).allSatisfy(m -> assertThat(m.version())
+                .as("失效消息必须带真实水位版本号（reason=%s）", m.reason()).isPositive());
     }
 
     // ---------------------------------------------------------------- 5) R1 全局 / R3.2 令牌租户
@@ -537,6 +679,54 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
         ResponseEntity<String> missing = put(ROUTES + "/9000000000", Map.of("weight", 1), CLIENT_TENANT);
         assertThat(missing.getStatusCode()).as("未知 id 的 PUT 必须 404（响应体=%s）", missing.getBody())
                 .isEqualTo(HttpStatus.NOT_FOUND);
+    }
+
+    // ---------------------------------------------------------------- 9c) PUT 路由撞唯一键：翻译 + 不半改
+
+    /**
+     * {@code PUT /api/routes/{id}} 也可能撞 {@code uk_model_route(model_name, channel_id)}（因为 PUT 允许
+     * 改 {@code modelName}/{@code channelId}，是已接受的偏差）⇒ **必须**把 {@link DuplicateKeyException}
+     * 翻译成 **400 {@code INVALID_PARAM}**（未翻译会落到兜底分支变 **500**）；message 可读且**不含
+     * SQL / 约束名**；事务回滚，那条路由**没被半改**、A 也不受影响。
+     *
+     * <p>判别力由变异体 {@code F1}（把 {@code updateRoute(entity)} 换成直接 {@code updateById}，去掉翻译）
+     * 提供：去掉之后 PUT 返回 500 ≠ 400，本用例精确变红（{@code .m4t10review-logs} 的存活变异 {@code N5}
+     * 即此，而当时全类 14/0 全绿 —— 本用例正是补上这一覆盖缺口）。
+     */
+    @Test
+    void updatingARouteOntoAnotherRoutesModelAndChannelIs400InvalidParamWithoutHalfWriting() throws Exception {
+        long channelA = createChannel();
+        long channelB = createChannel();
+        String modelA = uniqueModelName();
+        String modelB = uniqueModelName();
+        long routeA = postRoute(modelA, channelA);
+        long routeB = postRoute(modelB, channelB);
+
+        // 把 B 改到 A 的 (model_name, channel_id)：制造 uk_model_route 唯一键冲突。
+        Map<String, Object> collision = new HashMap<>();
+        collision.put("modelName", modelA);
+        collision.put("channelId", channelA);
+        ResponseEntity<String> res = put(ROUTES + "/" + routeB, collision, CLIENT_TENANT);
+
+        assertThat(res.getStatusCode())
+                .as("PUT 撞唯一键必须 400，不是 409、更不是 500（响应体=%s）", res.getBody())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
+        JsonNode envelope = body(res);
+        assertThat(envelope.path("code").asText()).as("PUT 撞唯一键必须回 INVALID_PARAM").isEqualTo("INVALID_PARAM");
+        String message = envelope.path("message").asText();
+        assertThat(message).as("PUT 撞唯一键的 message 必须可读（非空）").isNotBlank();
+        assertThat(message).as("message 不许泄漏 SQL / 约束名（实际=%s）", message)
+                .doesNotContainIgnoringCase("sql")
+                .doesNotContainIgnoringCase("duplicate")
+                .doesNotContainIgnoringCase("jdbc")
+                .doesNotContain("uk_model_route");
+
+        // 事务必须回滚：B 仍是旧值（没被半改），A 也不受影响。
+        ModelRouteEntity stillB = modelRouteMapper.selectById(routeB);
+        assertThat(stillB).as("被拒的 PUT 绝不许把目标行删掉").isNotNull();
+        assertThat(stillB.getModelName()).as("PUT 被拒后 B 必须保持旧 modelName").isEqualTo(modelB);
+        assertThat(stillB.getChannelId()).as("PUT 被拒后 B 必须保持旧 channelId").isEqualTo(channelB);
+        assertThat(modelRouteMapper.selectById(routeA).getModelName()).as("A 不受影响").isEqualTo(modelA);
     }
 
     // ---------------------------------------------------------------- 10) 夹具自守
@@ -796,19 +986,34 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
                 "Redis 订阅在 " + SUBSCRIPTION_TIMEOUT + " 内没有建立，用例无法判定消息是否发出");
     }
 
-    private static ConfigInvalidateMessage awaitMessage(BlockingQueue<String> received, String reason)
+    /**
+     * 在一个**有界窗口**内收齐频道上的**全部**失效消息（不是「等到一条匹配的就返回」）。
+     *
+     * <p>语义：先至多等 {@link #MESSAGE_TIMEOUT} 拿到**第一条**（拿不到**直接变红** —— 空集会让
+     * 「集合恰好等于 {X}」在所有实现下都假绿）；拿到第一条之后继续 poll，直到出现 {@link #QUIET_WINDOW}
+     * 长度的静默为止。返回的是「这一小段窗口里的消息**集合**」，断言可以要求它**恰好等于**期望的 reason
+     * 集合 —— 从而抓到「多发了一条**别的** reason」这类漏洞（计划 {@code :1611} 明文要求，
+     * 评审的存活变异 {@code N3b} 即此）。
+     */
+    private static List<ConfigInvalidateMessage> drainBoundedWindow(BlockingQueue<String> received)
             throws InterruptedException {
-        long deadline = System.nanoTime() + MESSAGE_TIMEOUT.toNanos();
-        while (System.nanoTime() < deadline) {
-            String payload = received.poll(200, TimeUnit.MILLISECONDS);
+        List<ConfigInvalidateMessage> messages = new ArrayList<>();
+        String first = received.poll(MESSAGE_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        assertThat(first).as("有界窗口内必须至少收到一条失效广播（空窗口无法判定「恰好一条」）").isNotNull();
+        messages.add(decode(first));
+        while (true) {
+            String payload = received.poll(QUIET_WINDOW.toMillis(), TimeUnit.MILLISECONDS);
             if (payload == null) {
-                continue;
+                return messages;
             }
-            ConfigInvalidateMessage message = ConfigInvalidateCodec.decode(payload);
-            if (message != null && reason.equals(message.reason())) {
-                return message;
-            }
+            messages.add(decode(payload));
         }
-        return null;
+    }
+
+    /** 解码一条失效载荷；解不开就带着原文变红（而不是静默丢弃 —— 丢弃会让「集合恰好等于」失真）。 */
+    private static ConfigInvalidateMessage decode(String payload) {
+        ConfigInvalidateMessage message = ConfigInvalidateCodec.decode(payload);
+        assertThat(message).as("失效广播的载荷必须能被 ConfigInvalidateCodec 解码（实际=%s）", payload).isNotNull();
+        return message;
     }
 }
