@@ -266,17 +266,9 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
     @Test
     void rotatingTheKeyReEncryptsToTheCurrentMasterKeyVersion() throws Exception {
         // 存量行：用**旧的** v1 主密钥加密（= 主密钥升到 v2 之前写入的渠道）。
-        ChannelEntity legacy = new ChannelEntity();
-        legacy.setName(uniqueChannelName());
-        legacy.setProvider("openai-compatible");
-        legacy.setBaseUrl("http://127.0.0.1:1");
-        legacy.setApiKeyCipher(new ChannelKeyService(V1_MASTER_KEY).encrypt(PLAINTEXT));
-        legacy.setKeyVersion(1);
-        legacy.setWeight(100);
-        legacy.setPriority(0);
-        legacy.setTimeoutMs(60_000);
-        legacy.setStatus(ACTIVE);
-        channelMapper.insert(legacy);
+        // 夹具由 {@link #insertLegacyV1Channel()} 单点定义（修复轮复评 M-4：此前本用例内联一份、
+        // 助手又有一份，两份会各自漂移）。
+        ChannelEntity legacy = insertLegacyV1Channel();
 
         String legacyCipher = legacy.getApiKeyCipher();
         assertThat(legacyCipher).as("存量行必须是 v1 密文，否则本用例没有可前进的起点").startsWith("v1:");
@@ -443,7 +435,10 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
         assertThatThrownBy(() -> rollbackProbe.createChannelThenFail(write, ACTOR))
                 .isInstanceOf(IllegalStateException.class);
 
-        assertThat(received.poll(ROLLBACK_WINDOW.toSeconds(), TimeUnit.SECONDS))
+        // 用 toMillis/MILLISECONDS 而不是 toSeconds/SECONDS（修复轮复评 M-1）：toSeconds 会截断，
+        // 将来谁把 ROLLBACK_WINDOW 调成亚秒值，这里会变成 **0 长度** 的 poll —— 「没有消息」永远绿，
+        // 而下面 :465 的正向投递对照仍按真实窗口等待，N7 那个「缺席窗口不可判别」的毛病就会悄悄回来。
+        assertThat(received.poll(ROLLBACK_WINDOW.toMillis(), TimeUnit.MILLISECONDS))
                 .as("回滚的写**绝不许**发布失效消息（发布必须在事务提交之后）").isNull();
         assertThat(configVersionMapper.current())
                 .as("水位不许被抬高（发布路径里的 raiseTo 也不许跑）").isEqualTo(watermarkBefore);
@@ -501,6 +496,25 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
         assertThat(updatedAudit.getDetail())
                 .as("租户更新的审计 detail 必须存在并记下这次变更后的状态")
                 .isNotNull().contains("DISABLED");
+    }
+
+    // ---------------------------------------------------------------- 7) 夹具自守
+
+    /**
+     * {@link #auditRowsForChannelName} 用 MyBatis-Plus 的 {@code like} 匹配 {@code detail}，而 LIKE 的
+     * {@code %} / {@code _} / {@code \} 是**元字符**。夹具名今天只含 {@code m4-ch-it-} + 8 位 UUID 十六进制，
+     * 所以是安全的 —— 但那是**假设**，不是断言。本用例把这条假设变成可执行事实：谁把前缀改成
+     * {@code m4_ch_it_}（下划线变成单字符通配符），这里先红，而不是让审计查询悄悄匹配到别的行
+     * （Task 8 修复轮复评 M-2）。
+     */
+    @Test
+    void fixtureNamesContainNoLikeMetacharacters() {
+        for (int i = 0; i < 8; i++) {
+            assertThat(uniqueChannelName()).as("渠道夹具名不许含 LIKE 元字符，否则审计查询会误匹配")
+                    .doesNotContain("%").doesNotContain("_").doesNotContain("\\");
+            assertThat(uniqueTenantName()).as("租户夹具名不许含 LIKE 元字符")
+                    .doesNotContain("%").doesNotContain("_").doesNotContain("\\");
+        }
     }
 
     // ---------------------------------------------------------------- 夹具与助手
