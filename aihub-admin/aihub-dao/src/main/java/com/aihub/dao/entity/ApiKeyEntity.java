@@ -17,7 +17,7 @@ import java.time.LocalDateTime;
  * URL 不带 {@code serverTimezone} / {@code connectionTimeZone} —— 时用的才是 **JVM 默认时区**），
  * 于是实体往返**自洽但与兄弟列差一个连接时区偏移**（本机 Asia/Shanghai 观测到 8 小时）：裸 SQL 写入方
  * （seeder / 运维）、以及将来任何 {@code where expire_at > now()} / {@code utc_timestamp()} 的比较
- * 都落在另一个基准上。显式换算只有在写入点（{@code ApiKeyService.mint}）与读取点
+ * 都落在另一个基准上。显式换算只有在写入点（{@code ApiKeyService.issue}）与读取点
  * （{@code ApiKeyService.loadFromDb}）各做一次，基准才写在代码里而不是连接的时区参数里。
  *
  * <p>跨服务的契约不受影响：{@code ApiKeyView.expireAt} 仍是 {@code Instant}（HTTP/JSON 里由
@@ -36,6 +36,16 @@ public class ApiKeyEntity {
     private String status;
     /** {@code DATETIME(3) NULL}，**UTC 墙上时间**（见类注释）；{@code null} 表示永不过期。 */
     private LocalDateTime expireAt;
+    /**
+     * {@code DATETIME(3) NULL}，**UTC 墙上时间**（与 {@link #expireAt} 同基准）。
+     *
+     * <p><b>诚实登记（Task 9）</b>：{@code api_key.last_used_at} 列存在
+     * （{@code V1__init_schema.sql:36}），但 M4 **没有任何写入方** —— 因此读出来的值**恒为
+     * {@code null}**。刻意不让读路径顺手写它：那会给一个只读接口引入副作用，也会把「上次使用时间」
+     * 的语义塞进一个与它无关的查询里。用 {@link LocalDateTime} 而不是 {@code Instant} 的理由与
+     * {@link #expireAt} 完全一致（CONVENTIONS §7 第 1 条）。
+     */
+    private LocalDateTime lastUsedAt;
 
     public Long getId() {
         return id;
@@ -91,5 +101,13 @@ public class ApiKeyEntity {
 
     public void setExpireAt(LocalDateTime expireAt) {
         this.expireAt = expireAt;
+    }
+
+    public LocalDateTime getLastUsedAt() {
+        return lastUsedAt;
+    }
+
+    public void setLastUsedAt(LocalDateTime lastUsedAt) {
+        this.lastUsedAt = lastUsedAt;
     }
 }

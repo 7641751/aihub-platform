@@ -81,7 +81,15 @@ public class ApiKeyService {
     }
 
     /**
-     * 铸造一把 key。{@code expireAt} 是**瞬时**（跨服务契约用 {@code Instant}）；
+     * 铸造一把 key 并绑定到一个**已存在**的租户上（{@code tenantId} 由调用方保证存在）。
+     *
+     * <p><b>这是密钥生成的唯一实现</b>：{@code newKeyId} + {@code newSecret} + {@code hash} → 组实体 →
+     * {@code insert} → 回填缓存 → 返回 {@link IssuedKey}。{@link #mint} 与
+     * {@code ApiKeyAdminService.create} 都只能经过这里 —— 密钥格式（{@code ak_} + 16 位
+     * {@code [a-z0-9]} + {@code .} + 32 字节 URL-safe base64）已被 {@code ApiKeyToolingTest} 的固定向量
+     * 钉死，**一个字节都不许变**。
+     *
+     * <p>{@code expireAt} 是**瞬时**（跨服务契约用 {@code Instant}）；
      * 落库时显式折成 {@code api_key.expire_at} 的基准 —— **UTC 墙上时间**
      * （{@code DATETIME(3)}，与兄弟列 {@code created_at} / {@code updated_at} 同基准）。
      *
@@ -91,18 +99,20 @@ public class ApiKeyService {
      * Asia/Shanghai），实体往返虽然自洽，但列里的值与兄弟列差 8 小时 —— 裸 SQL 写入方、以及将来
      * {@code where expire_at > now()} 的比较都会错。基准只写在这里与 {@link #loadFromDb} 的读回处
      * 各一次，**不依赖连接参数也不依赖 JVM 设置**。
+     *
+     * <p><b>{@code @Transactional} 在这里是承重的</b>：唯一的跨类调用方
+     * {@code ApiKeyAdminService.create} 是**另一个 bean**，只有走代理、注解才生效（同一个类内部的自调用
+     * 不会开启事务）。
      */
     @Transactional
-    public IssuedKey mint(String tenantName, String keyName, Instant expireAt) {
-        TenantEntity tenant = findOrCreateTenant(tenantName);
-
+    public IssuedKey issue(long tenantId, String tenantName, String keyName, Instant expireAt) {
         String keyId = ApiKeyHasher.newKeyId();
         String secret = ApiKeyHasher.newSecret();
         String keyHash = ApiKeyHasher.hash(secret);
 
         ApiKeyEntity entity = new ApiKeyEntity();
         entity.setKeyId(keyId);
-        entity.setTenantId(tenant.getId());
+        entity.setTenantId(tenantId);
         entity.setKeyHash(keyHash);
         entity.setName(keyName);
         entity.setStatus(ApiKeyView.STATUS_ACTIVE);
@@ -111,10 +121,20 @@ public class ApiKeyService {
 
         // 缓存载荷仍用**瞬时**（{@link ApiKeyCacheCodec} 存 epoch 秒，跨服务契约）：换算只发生在
         // 实体 ↔ 数据库之间，Redis / JSON 的线格式一个字节都没变。
-        cache(keyHash, new ApiKeyView(keyId, tenant.getId(), tenantName, ApiKeyView.STATUS_ACTIVE, expireAt,
+        cache(keyHash, new ApiKeyView(keyId, tenantId, tenantName, ApiKeyView.STATUS_ACTIVE, expireAt,
                 entity.getId()));
         log.info("已铸造 API Key keyId={} tenant={} name={}", keyId, tenantName, keyName);
         return new IssuedKey(keyId + "." + secret, keyId);
+    }
+
+    /**
+     * 「最小内部签发」入口（{@code ApiKeyMintRunner}）：先按名字 {@code findOrCreateTenant}，
+     * 再把生成整段**委托**给 {@link #issue} —— 生成逻辑因此只有一份实现。
+     */
+    @Transactional
+    public IssuedKey mint(String tenantName, String keyName, Instant expireAt) {
+        TenantEntity tenant = findOrCreateTenant(tenantName);
+        return issue(tenant.getId(), tenantName, keyName, expireAt);
     }
 
     public Optional<ApiKeyView> resolve(String keyHash) {
