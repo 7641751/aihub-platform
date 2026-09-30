@@ -10,6 +10,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * 控制面配置写的收尾动作（D4 + D5）：**抬水位** + **广播失效**。
@@ -96,6 +98,47 @@ public class ConfigChangePublisher {
         long version = stored == null ? now : Math.max(now, stored);
         publish(version, reason);
         return version;
+    }
+
+    /**
+     * 事务安全的发布入口：**有活动事务就注册 after-commit 钩子，没有活动事务就立即发布**。
+     *
+     * <p><b>两个分支都被钉死</b>（这是「先命名机制」的产物，Task 8 引入、Task 9/10 一律复用）：
+     * <ul>
+     *   <li>{@link TransactionSynchronizationManager#isSynchronizationActive()} 为真（即调用发生在某个
+     *       {@code @Transactional} 方法里）：
+     *       {@code registerSynchronization(new TransactionSynchronization() { afterCommit() { bumpAndPublish(reason); } })} ——
+     *       事务**提交之后**才抬水位并广播；事务回滚时钩子不执行，于是「广播了但水位没抬」不可能发生；</li>
+     *   <li>为假（服务层被非事务方式调用，例如单元测试或运维脚本直接调）：
+     *       **立即** {@link #bumpAndPublish(String)} —— 与旧行为一致，不会静默不发布。</li>
+     * </ul>
+     *
+     * <p><b>为什么必须走 afterCommit 而不是在事务里直接调 {@link #bumpAndPublish(String)}</b>：
+     * {@code bumpAndPublish} 自己会**写数据库水位**。在事务里调、随后事务回滚，会让「已广播的版本 V」
+     * 高于「持久水位」—— 而订阅方（gateway，Task 4）收到 V 之后会把**自己的写入水位抬到 V**。
+     * 于是任何**真实但更旧**的快照都会被 {@code writeRedis}/lastGood 双双拒绝：共享条目一直是空的、
+     * 每个实例每一轮 TTL 都要回源 admin，直到某次成功的写产生一个超过 V 的版本才自愈
+     * （有界、能自愈，但是**静默**的 —— 没有任何一条 WARN 指向它）。
+     *
+     * <p><b>调用纪律</b>：控制面的写路径（Task 8/9/10）一律调本方法，**不许**直接调
+     * {@link #bumpAndPublish(String)}。发布失败仍然只计数 + WARN（见 {@link #publish(long, String)}），
+     * 绝不把广播失败升级成业务失败。
+     *
+     * @param reason 失效原因 token（**有限枚举**，如 {@code "channel.create"}），语义与
+     *               {@link #bumpAndPublish(String)} 完全一致
+     */
+    public void publishAfterCommit(String reason) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    bumpAndPublish(reason);
+                }
+            });
+            return;
+        }
+        // 没有活动事务：没有任何东西可以回滚，立即发布就是正确的语义。
+        bumpAndPublish(reason);
     }
 
     /**
