@@ -1650,9 +1650,19 @@ git commit -m "feat(console): model route and rate-limit policy CRUD with dimens
 - Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/BillingController.java`
 - Modify: `ChannelController`（Task 8 的）增加 `POST /api/channels/{id}/probe`
 - Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ProbeAndQueryIntegrationTest.java`
+- **Modify（2026-09-30 控制器补，两处都属"缺路径"缺陷类）**：
+  - `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/MybatisMapperConfig.java` —— **分页拦截器必须加在这个既有 `@Configuration` 里**（见下方 Interfaces 第 1 条：仓库里**没有任何** `PaginationInnerInterceptor`，照计划字面写 `selectPage` 会**静默返回全表**）；
+  - `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ChannelAdminIntegrationTest.java` —— **探测用例放这里**（它已经持有 `aihub.channel.master-key` + 渠道夹具，探测要解密渠道密钥；放进新文件会 fork **第 8 个** Spring 上下文，见 Interfaces 第 6 条）。
 
 **Interfaces:**
 - Consumes: `RequestLogMapper`（既有）、`BillingDailyMapper`（本任务新建）、`ChannelKeyService` 的解密入口
+- **（2026-09-30 控制器补 —— 4 条"照字面执行会出错 / 与已定死的规范冲突"）**
+  1. **⚠️ 分页会静默失效（高危）**：全仓**实测没有任何** `MybatisPlusInterceptor` / `PaginationInnerInterceptor`（`Select-String` 0 命中，`application.yml` 也没有 pagination 配置）⇒ 在 MyBatis-Plus 里**没有分页拦截器时 `selectPage(Page, wrapper)` 不会加 `LIMIT`**，而是执行原查询把**全部匹配行**塞进 `Page.getRecords()`（`total` 也不会算）。这正好**违反**本任务的验收判据"分页有上界"，而且空占位用例抓不到。⇒ **必须**在既有 `MybatisMapperConfig`（`aihub-dao`，已是 `@Configuration` + `@MapperScan`）里加一个 `@Bean MybatisPlusInterceptor` + `PaginationInnerInterceptor`；并**必须**用一条用例证明它真的加上了 `LIMIT`（查 N 行、`size=2` ⇒ 恰好 2 条且 `total=N`），判别力由"删掉该 `@Bean` ⇒ 该用例变红"提供。
+  2. **`GET /api/billing/daily` 必须带 `tenantId`**：原文只写 `?from=&to=`，而 `billing_daily` 有 `tenant_id NOT NULL`，且 `docs/CONVENTIONS.md` §10 的 **R3.1** 明文把 `/api/billing/daily` 归为**运营查询**、要求**必须显式 `tenantId`**（缺省 400）。⇒ 改为 `GET /api/billing/daily?tenantId=&from=&to=`，缺 `tenantId` 或时间范围 → **400**。三个查询端点（logs / audit / billing）语义统一。
+  3. **`page`/`size` 的上下界与默认值必须钉死**（否则"上界"只是文档承诺）：`size` 缺省 **20**、`>200` **钳到 200**、`<1` → 400 `INVALID_PARAM`；`page` 缺省 **0**、`<0` → 400；`from`/`to` 必须能解析成带 `Z` 的 `Instant`（解析失败 400）、且 `from <= to`（否则 400）。排序固定 `created_at DESC`（`request_log` / `audit_log` 都是分区表，无 `ORDER BY` 的分页没有意义）。
+  4. **`ChannelProbeService` 的边界**：渠道不存在 → **404 `NOT_FOUND`**（渠道停用**仍可探测** —— 它是诊断动作，不是数据面调用）；**单次**请求、**超时上限 3 秒**（必须有界，不许无限等）；响应 `{reachable, httpStatus, latencyMs, message}`，**绝不回显密钥**（明文、密文、主密钥都不许），`message` 只放简短非敏感原因；**不写审计**（`AuditAction` 里**没有** PROBE 常量，**不要新增**共享常量）；`ChannelKeyService.decrypt` 返回 `Optional` 且**永不抛** ⇒ 解不开时按"不可达 + 非敏感原因"处理，不要让异常穿到控制器。
+  5. **视图里不许出现敏感材料**：`RequestLogView` / `AuditLogView` 都**不含**任何明文密钥、`key_hash`、`api_key_cipher` 密文、主密钥、控制台口令（`audit_log.detail` 是**非敏感字段的变更摘要** —— 写入侧 Task 7/8/9/10 已各自保证；这里只做只读回显，**但必须有用例**断言查回来的响应体里不含本次夹具的明文与 `key_hash`，否则"不含敏感内容"是一句没有牙齿的承诺）。
+  6. **Spring 上下文预算（必须仍是 7）**：探测用例要解密渠道密钥 ⇒ 需要 `aihub.channel.master-key`，而该属性只存在于 `ChannelAdminIntegrationTest` 的 `@TestPropertySource`；`@Import` 会把**导入者类**算进上下文缓存键，所以**任何**新测试类都无法与它共享上下文（新写一个带同样属性的类 ⇒ **第 8 个**上下文）。⇒ 定死：**探测的用例写进 `ChannelAdminIntegrationTest`**（改该文件），**`ProbeAndQueryIntegrationTest` 只声明 `aihub.console.secret` 且不加 `@Import`** ⇒ 它与 `ConsoleLoginIntegrationTest` / `Task 9/10` 的集成测试**共用**同一个上下文，套件总数**仍是 7**。跑完**必须实测** `Tomcat started on port` 的次数并写进报告（基线 7）。
 - Produces:
   - `ChannelProbeService.probe(long channelId) : ProbeResult`（record：`reachable`、`httpStatus`、`latencyMs`、`message`；**绝不回显密钥**；单次请求，超时上限 3 秒）
   - `RequestLogQueryService.page(long tenantId, Instant from, Instant to, Long apiKeyId, Long channelId, int page, int size) : Page<RequestLogView>`
@@ -1682,15 +1692,28 @@ void probingAChannelReportsReachabilityWithoutLeakingTheKey() {
     var res = post("/api/channels/" + id + "/probe", Map.of());
     assertThat(res.body()).contains("\"reachable\":true").doesNotContain("sk-channel-plaintext-synthetic");
 }
+// ⚠️ 这条用例按 Interfaces 第 6 条**落在 `ChannelAdminIntegrationTest`**（那里才有 `aihub.channel.master-key`），
+//    不是落在 `ProbeAndQueryIntegrationTest`。`upstream` / `id` 必须落成真实夹具：进程内 HTTP 假上游 +
+//    一条 baseUrl 指向它的渠道（渠道密钥用合成明文，断言里出现的就是它），并且**必须**同时断言
+//    `latencyMs >= 0`、**渠道不存在时 404**、以及**失败路径**（上游不回包 ⇒ 有界超时后 `reachable=false`）。
 
 @Test
 void logsQueryRequiresATenantAndATimeRange() {
     assertThat(get("/api/logs?page=0&size=10").statusCode()).as("禁止无界扫描（索引在 V2，见 D1）").isEqualTo(400);
     assertThat(get("/api/logs?tenantId=1&from=2026-09-01T00:00:00Z&to=2026-09-30T00:00:00Z").statusCode()).isEqualTo(200);
 }
+// ⚠️ 同款"缺参即 400"必须对 **`/api/audit` 与 `/api/billing/daily`** 各来一条（三者语义统一，见 Interfaces 第 2 条：
+//    billing 也要 `tenantId`）。正例里的 `tenantId=1` 只是个**存在的**夹具租户（日志/账单查询不需要该租户有数据）。
 
 @Test
-void logsPagingIsBoundedAndOrderedByCreatedAtDescending() { /* size>200 被钳到 200；按 created_at DESC */ }
+void logsPagingIsBoundedAndOrderedByCreatedAtDescending() {
+    // ⚠️ **不许留空占位**（空 `{}` 的用例是假绿；Task 10 的 Step 1 犯过同一个错）。必须落地：
+    //   ① 造 **3 行**本用例独有的 `request_log`（不同 created_at）⇒ `size=2` 时**恰好返回 2 条**、
+    //      且 `total == 3`（这条同时是**分页拦截器真的加了 LIMIT** 的判别证据：删掉 `MybatisInterceptor`
+    //      的 `@Bean` 之后它必须红 —— 没有拦截器时 MyBatis-Plus 会返回**全表**，正是"无界扫描"）；
+    //   ② 顺序按 `created_at DESC`（断言三条 id 的先后，而不是只断言"有 3 条"）；
+    //   ③ `size=201` 被**钳到 200**（断言实际页大小，不是只断言 200 状态码）；`size=0` 与 `page=-1` → **400**。
+}
 ```
 
 - [ ] **Step 2–4: 失败 → 实现 → 通过**
@@ -1700,8 +1723,11 @@ Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am tes
 - [ ] **Step 5: 提交**
 
 ```bash
+# 2026-09-30 控制器补两处 Modify（原清单缺它们 = Task 8/9 的"Files 缺路径"缺陷类）：
+#   MybatisMapperConfig 承载分页拦截器；ChannelAdminIntegrationTest 承载探测用例（保持 7 个上下文）。
 git add aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/BillingDailyEntity.java \
         aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/BillingDailyMapper.java \
+        aihub-admin/aihub-dao/src/main/java/com/aihub/dao/MybatisMapperConfig.java \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/config/ChannelProbeService.java \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/log/RequestLogQueryService.java \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/log/AuditQueryService.java \
@@ -1709,12 +1735,14 @@ git add aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/BillingDailyEnt
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ChannelController.java \
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/LogQueryController.java \
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/BillingController.java \
-        aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ProbeAndQueryIntegrationTest.java
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ProbeAndQueryIntegrationTest.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ChannelAdminIntegrationTest.java
 git commit -m "feat(console): channel probe, request-log paging and daily billing query"
 ```
 
-**验收判据：** 探测真实打一次上游并回报可达性与耗时、响应里没有密钥；`/api/logs` 强制 tenant + 时间范围且分页有上界；`/api/billing/daily` 按租户与日期范围可查。
+**验收判据：** 探测真实打一次上游（**单次、≤3 秒、有界**）并回报可达性与耗时、**响应与方法内都不出现密钥**、渠道不存在时 404；`/api/logs`、`/api/audit`、`/api/billing/daily` **三者都**强制 `tenantId` + 时间范围（缺一即 400）；**分页真的有 `LIMIT`**（`size=2` 对 3 行 ⇒ 恰好 2 条且 `total=3`）；`size` 钳到 200、非法 `page`/`size` 400；`created_at DESC`；视图里不含明文/`key_hash`；**套件 Spring 上下文仍是 7**（探测用例在 `ChannelAdminIntegrationTest`、查询用例与 `ConsoleLoginIntegrationTest` 共用上下文）。
 **RED 证据：** `logsQueryRequiresATenantAndATimeRange` 在「允许无界查询」的实现下红（这正是「分区表上全表扫描」的入口）。
+⚠️ **（2026-09-30 控制器补）RED 必须落在被测断言上**：Task 9 与 Task 10 的自然 RED **都**全红在 `404`（端点未映射）—— 那种红**不能**证明断言的判别力。⇒ 本任务的测试必须只依赖 **HTTP + 既有 mapper/entity**（这样能在服务层存在之前编译并跑红），并且**每一条行为都必须配一条自己的变异体**证明它能把对应断言打红（尤其：**删掉分页拦截器 `@Bean` ⇒ 分页用例必须红**）。
 
 ---
 ## Task 12: 配额控制面 + Lua 预扣契约
