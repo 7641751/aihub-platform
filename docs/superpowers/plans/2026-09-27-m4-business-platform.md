@@ -1335,6 +1335,8 @@ git commit -m "feat(audit): record audit rows in the business transaction"
 - Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/TenantController.java`
 - Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ChannelController.java`
 - Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ChannelAdminIntegrationTest.java`
+- Modify: `aihub-admin/aihub-service/src/main/java/com/aihub/service/config/ConfigChangePublisher.java`（Task 2 建的类，本任务给它加 `publishAfterCommit(String reason)`，见下方机制说明）
+  - ⚠️ **这条是 2026-09-30 补的，补的是一个会产出「编译不过的提交」的缺陷**：本任务正文早就写着「本任务的 Files **必须**列上它」，但 Files 清单与下方 `git add` 清单里**都没有**这个路径。若照原样执行，提交里会包含**调用** `publishAfterCommit` 的新文件、却不含**定义**它的改动 ⇒ 提交出来的树编译不过（同一类缺陷在 M4 计划第三轮评审里被记为 F1/F2）。
 
 **Interfaces:**
 - Consumes: `ChannelKeyService`（**复用既有加密入口，先读它的签名，不要新写一份加密**）、`ConfigChangePublisher`（Task 2）、`AuditService`（Task 7）、`ChannelMapper`/`TenantMapper`（既有）
@@ -1380,13 +1382,21 @@ void everyWritePublishesAnInvalidationMessage() {
 void rolledBackWritePublishesNothingAndDoesNotRaiseTheWatermark() {
     // 造一个**必然回滚**的写：服务层方法写完渠道后抛异常 → 事务回滚。
     long watermarkBefore = configVersionMapper.current();
-    assertThatThrownBy(() -> channelAdminService.createThenFail(request)).isInstanceOf(IllegalStateException.class);
+    long channelsBefore = channelMapper.selectCount(null);
+    // ⚠️ 2026-09-30 修正：**不许**为测试在生产服务上加 `createThenFail` 这种「只有测试会用」的方法。
+    // 改用**测试树里的**探针 bean（嵌套 @TestConfiguration）调用真实的 `ChannelAdminService.create(...)`
+    // 之后在同一事务里抛异常。两条纪律（Task 7 的评审逐条换来的）：探针必须是**真的被 Spring 代理**的 bean；
+    // 本用例自己**不许**标 `@Transactional` —— 否则测试自己的事务成了边界，回滚什么也证明不了。
+    assertThatThrownBy(() -> rollbackProbe.createChannelThenFail(request)).isInstanceOf(IllegalStateException.class);
     // ① 频道上**一条消息都没有**（用真 Redis 订阅 + 有界等待，等不到才是通过）；
     assertThat(received.poll(2, TimeUnit.SECONDS)).as("回滚的写绝不许发布失效消息").isNull();
     // ② 水位**没有被抬高**（发布路径里的 raiseTo 也不许跑）。
     assertThat(configVersionMapper.current()).isEqualTo(watermarkBefore);
     // ③ 渠道也没落库（证明这次写真的回滚了，否则上面两条是假绿）。
-    assertThat(channelMapper.selectCount(null)).isZero();
+    // ⚠️ 2026-09-30 修正：原写 `isZero()` —— 那是**全表计数**，而渠道表与 Testcontainers 容器都是 JVM 级共享的
+    // （`DemoChannelSeeder` 与其它用例都会插渠道），断言「等于 0」会因为「谁先跑」而红（N12 的同一课，Task 7 已踩过）。
+    // 改成断言**增量**：回滚之后渠道数必须不变。
+    assertThat(channelMapper.selectCount(null)).as("渠道数必须保持不变（回滚了才没有新增）").isEqualTo(channelsBefore);
 }
 ```
 
@@ -1407,6 +1417,7 @@ Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am tes
 ```bash
 git add aihub-admin/aihub-service/src/main/java/com/aihub/service/tenant/ \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/channel/ChannelAdminService.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/config/ConfigChangePublisher.java \
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/TenantController.java \
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/ChannelController.java \
         aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ChannelAdminIntegrationTest.java
