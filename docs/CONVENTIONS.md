@@ -298,9 +298,18 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
      与 `Timestamp` 绑定。第 4 行用的是 **JVM 的墙上时间**、任何方言下都不被换算（本机 = 20:00.123），
      所以无参数连接的 1/4 是「只有第 1 行落在那个 UTC 窗口里」、`Timestamp` 绑定的 3/4 是「另外三行」；
      在 `serverTimezone=UTC` 上四行塌成 12:00.123 / 12:00.123 / 12:00.123 / 20:00.123，两种绑定都选中前三行。
-     注意在 `-Duser.timezone=UTC` 的 JVM 上这个 fixture 会退化成四行全在 12:00.123、两种绑定都是 **4/4**
-     —— 那个被推翻的数字就是这么来的，它不是生产方言的性质。**数字随 fixture 变，性质不变：
-     生产（UTC）方言下两种绑定等价，无参数（LOCAL）方言下不等价。**
+     **计数同时取决于方言与 JVM 时区**，只作形状举例、不作判据：UTC 的 JVM 上 LOCAL 类方言（无参数 /
+     `serverTimezone=UTC` / `connectionTimeZone=UTC` / `=SERVER`）会塌成四行全在 12:00.123、两种绑定都是 4/4；
+     而**钉死的非 UTC 时区不受 JVM 时区影响** —— `connectionTimeZone=Asia/Shanghai` 在 UTC 的 JVM 上是
+     **2/4 与 2/4**、在 Asia/Shanghai 的 JVM 上是 **1 与 3**（2026-09-30 两次实测）。当年那个被推翻的 `4/4`
+     **多半**就是某次 UTC JVM 上的运行结果，但那次运行**没有留下任何记录**，所以这里只登记为**推断，不写成出处**。
+     **与 JVM 时区无关、可以当判据的那一条**（已固化成可重跑用例
+     `com.aihub.admin.time.TimeBasisOffsetFixtureTest#onTheUtcConnectionBothBindingsSelectTheSameRows`）：
+     **UTC 方言下两种绑定选中同一批行** —— 生产就是 UTC 方言，所以「承载方式不影响结果」在生产上成立。
+     本节与其它处引用的 `+28800000` / `−18000000` / `0` 三个毫秒数、以及「最小非零偏移 60 分钟」，
+     分别由仓库内的 `com.aihub.admin.time.TimeBasisOffsetFixtureTest`（三条位移用例，各自钉死一个
+     `connectionTimeZone`）与 `com.aihub.admin.time.TimeZoneOffsetExtremesTest` 产生，都可用
+     `mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=…"` 重跑。
      **这不是「生产上正在发生的错误」**：发布的两个 URL 都钉了 `serverTimezone=UTC`
      （`application.yml:8`、`docker-compose.yml:65`），第二次独立评审在那条连接上实测**旧写法与新写法
      逐位相等**（`channel.updated_at` 与 `api_key.expire_at` 两个列的 `old − new` 都是 **0**）。
