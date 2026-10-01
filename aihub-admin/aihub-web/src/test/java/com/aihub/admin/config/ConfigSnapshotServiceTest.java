@@ -7,6 +7,7 @@ import com.aihub.admin.support.AbstractIntegrationTest;
 import com.aihub.common.config.ChannelDescriptor;
 import com.aihub.common.config.ConfigSnapshot;
 import com.aihub.common.config.ModelRouteDescriptor;
+import com.aihub.common.config.QuotaDescriptor;
 import com.aihub.common.config.RatePolicy;
 import com.aihub.common.crypto.AesGcmChannelCipher;
 import com.aihub.common.crypto.ChannelKeyRegistry;
@@ -26,6 +27,7 @@ import java.util.Base64;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 /**
  * 快照组装（{@code GET /internal/config/snapshot} 的数据面）。**必须真起容器**：这里要钉住的是
@@ -111,6 +113,7 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
         assertThat(snapshot.channels()).isEmpty();
         assertThat(snapshot.routes()).isEmpty();
         assertThat(snapshot.ratePolicies()).isEmpty();
+        assertThat(snapshot.quotas()).as("空库（@BeforeEach 清了 quota 表）不得带出任何额度").isEmpty();
         assertThat(snapshot.version())
                 .as("空控制面 + 被显式归零的水位（决策 D5：水位是持久的，这个 0 来自 @BeforeEach 的归零，"
                         + "不是「版本恒为 0」）")
@@ -385,12 +388,46 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
         assertThat(snapshot.keyPolicies(tenantId, 43L)).as("别的 key 取不到").isEmpty();
     }
 
+    /**
+     * Task 13：快照必须真的把 {@code quota} 表的额度行带出来 —— 「额度来自配置快照」这条验收判据的
+     * 组装层证据。网关不连数据库，这是额度到达数据面的唯一通路。
+     *
+     * <p>数据刻意用**同一租户的两个周期** + **另一个租户的零额度行**：这样才能钉住
+     * 「按 {@code (tenant_id, period)} 精确镜像」而不是「只按租户取第一条」。判别力由变异体①
+     * （{@code ConfigSnapshotService} 不查 {@code quota} 表）提供：那时 {@code quotas} 为空，本用例精确变红。
+     */
+    @Test
+    void theSnapshotCarriesTheQuotaRowsFromTheQuotaTable() {
+        insertQuota(7_101L, "202601", 100L, 7L);
+        insertQuota(7_101L, "202602", 200L, 8L);
+        insertQuota(7_102L, "202601", 0L, 0L); // 零额度 = 不限（D15），但行本身要出现在快照里
+
+        ConfigSnapshot snapshot = service.snapshot();
+
+        assertThat(snapshot.quotas()).extracting(QuotaDescriptor::tenantId, QuotaDescriptor::period)
+                .as("快照必须逐行带上 quota 表的 (tenant_id, period)（额度到达数据面的唯一通路）")
+                .containsExactlyInAnyOrder(tuple(7_101L, "202601"), tuple(7_101L, "202602"), tuple(7_102L, "202601"));
+        assertThat(snapshot.quota(7_101L, "202601")).contains(new QuotaDescriptor(7_101L, "202601", 100L, 7L));
+        assertThat(snapshot.quota(7_101L, "202602"))
+                .as("同一租户的另一个周期必须取到它自己的额度（按 period 精确匹配）")
+                .contains(new QuotaDescriptor(7_101L, "202602", 200L, 8L));
+        assertThat(snapshot.quota(7_101L, "202603")).as("没有该周期的行 = 不限（D15）").isEmpty();
+        assertThat(snapshot.quota(7_102L, "202601")).contains(new QuotaDescriptor(7_102L, "202601", 0L, 0L));
+    }
+
     // --- SQL 助手 -------------------------------------------------------
+
+    private void insertQuota(long tenantId, String period, long tokenLimit, long requestLimit) {
+        jdbcTemplate.update("insert into quota (tenant_id, period, token_limit, request_limit) values (?, ?, ?, ?)",
+                tenantId, period, tokenLimit, requestLimit);
+    }
 
     private void deleteEverything() {
         jdbcTemplate.update("delete from model_route");
         jdbcTemplate.update("delete from rate_limit_policy");
         jdbcTemplate.update("delete from channel");
+        // 额度表也是 JVM 级共享的：不清它，「快照恰好带上这几条额度」会变成对执行顺序的断言。
+        jdbcTemplate.update("delete from quota");
     }
 
     private Long insertTenant(String name) {

@@ -3,13 +3,16 @@ package com.aihub.service.config;
 import com.aihub.common.config.ChannelDescriptor;
 import com.aihub.common.config.ConfigSnapshot;
 import com.aihub.common.config.ModelRouteDescriptor;
+import com.aihub.common.config.QuotaDescriptor;
 import com.aihub.common.config.RatePolicy;
 import com.aihub.dao.entity.ChannelEntity;
 import com.aihub.dao.entity.ModelRouteEntity;
+import com.aihub.dao.entity.QuotaEntity;
 import com.aihub.dao.entity.RateLimitPolicyEntity;
 import com.aihub.dao.mapper.ChannelMapper;
 import com.aihub.dao.mapper.ConfigVersionMapper;
 import com.aihub.dao.mapper.ModelRouteMapper;
+import com.aihub.dao.mapper.QuotaMapper;
 import com.aihub.dao.mapper.RateLimitPolicyMapper;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import org.slf4j.Logger;
@@ -28,7 +31,11 @@ import java.util.Set;
 
 /**
  * 组装 {@code GET /internal/config/snapshot} 的响应：一次调用把网关需要的**全部**配置给它
- * （渠道 + 密文 + 路由 + 限流策略 + 版本号）。设计文档 §7.2 的明文接口。
+ * （渠道 + 密文 + 路由 + 限流策略 + **租户周期额度** + 版本号）。设计文档 §7.2 的明文接口。
+ *
+ * <p><b>额度（Task 13 新增）</b>：{@code quota} 表按 {@code (tenant_id, period)} 的额度行被镜像进快照
+ * （见 {@link #quotas()}），网关（数据面）从快照里读它 —— 网关不连数据库，这是额度到达数据面的唯一通路。
+ * 没有行 或 {@code token_limit == 0} 表示**不限**（决策 D15）。
  *
  * <p><b>version 是单调的</b>（决策 D5）：{@code max(三张表的 max(updated_at), config_version 的水位)}。
  * V1 的三张表都有 {@code ON UPDATE CURRENT_TIMESTAMP(3)}，因此任何一次配置写入都会推进版本；
@@ -82,17 +89,20 @@ public class ConfigSnapshotService {
     private final ChannelMapper channelMapper;
     private final ModelRouteMapper modelRouteMapper;
     private final RateLimitPolicyMapper rateLimitPolicyMapper;
+    private final QuotaMapper quotaMapper;
     private final JdbcTemplate jdbcTemplate;
     private final ConfigVersionMapper configVersionMapper;
     private final String defaultModel;
 
     public ConfigSnapshotService(ChannelMapper channelMapper, ModelRouteMapper modelRouteMapper,
-                                 RateLimitPolicyMapper rateLimitPolicyMapper, JdbcTemplate jdbcTemplate,
+                                 RateLimitPolicyMapper rateLimitPolicyMapper, QuotaMapper quotaMapper,
+                                 JdbcTemplate jdbcTemplate,
                                  ConfigVersionMapper configVersionMapper,
                                  @Value("${aihub.upstream.default-model:}") String defaultModel) {
         this.channelMapper = channelMapper;
         this.modelRouteMapper = modelRouteMapper;
         this.rateLimitPolicyMapper = rateLimitPolicyMapper;
+        this.quotaMapper = quotaMapper;
         this.jdbcTemplate = jdbcTemplate;
         this.configVersionMapper = configVersionMapper;
         this.defaultModel = defaultModel;
@@ -102,7 +112,8 @@ public class ConfigSnapshotService {
     public ConfigSnapshot snapshot() {
         return new ConfigSnapshot(currentVersion(), System.currentTimeMillis(),
                 channels(), routes(), ratePolicies(),
-                defaultModel == null || defaultModel.isBlank() ? null : defaultModel);
+                defaultModel == null || defaultModel.isBlank() ? null : defaultModel,
+                quotas());
     }
 
     /**
@@ -241,5 +252,31 @@ public class ConfigSnapshotService {
             }
         }
         return policies;
+    }
+
+    /**
+     * 把 {@code quota} 表的额度行**原样**组装进快照（Task 13）：网关不连数据库，这是额度到达数据面的
+     * **唯一**通路。组装的是**镜像**：只搬 {@code (tenant_id, period)} 这两维与两个**额度**
+     * （{@code token_limit} / {@code request_limit}），已用量（{@code token_used} /
+     * {@code request_used}）**不进快照** —— 那是数据面（Redis 预扣 + 每日对账）的账。
+     *
+     * <p><b>不做状态过滤</b>（与三张配置表不同）：{@code quota} 表没有 {@code status} 列，
+     * 「没有行」本身就是「不限」（决策 D15）；{@code 0} 的额度同样表示不限 —— 判定由数据面负责。
+     *
+     * <p>按 {@code tenant_id ASC, period ASC} 排序：让同一份数据的载荷**确定**（本地/Redis 往返与
+     * 用例断言都拿它当契约）。
+     */
+    private List<QuotaDescriptor> quotas() {
+        QueryWrapper<QuotaEntity> query = new QueryWrapper<>();
+        query.orderByAsc("tenant_id").orderByAsc("period");
+        List<QuotaDescriptor> quotas = new ArrayList<>();
+        for (QuotaEntity entity : quotaMapper.selectList(query)) {
+            quotas.add(new QuotaDescriptor(
+                    entity.getTenantId() == null ? 0L : entity.getTenantId(),
+                    entity.getPeriod(),
+                    entity.getTokenLimit() == null ? 0L : entity.getTokenLimit(),
+                    entity.getRequestLimit() == null ? 0L : entity.getRequestLimit()));
+        }
+        return quotas;
     }
 }

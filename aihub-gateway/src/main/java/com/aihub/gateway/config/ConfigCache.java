@@ -2,6 +2,7 @@ package com.aihub.gateway.config;
 
 import com.aihub.common.config.ConfigSnapshot;
 import com.aihub.common.config.ConfigSnapshotCodec;
+import com.aihub.common.config.QuotaDescriptor;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Ticker;
@@ -89,6 +90,23 @@ public class ConfigCache {
 
     public Optional<ConfigSnapshot> local() {
         return Optional.ofNullable(local.getIfPresent(REDIS_KEY));
+    }
+
+    /**
+     * 该 {@code (tenantId, period)} 的额度（Task 13：网关从快照里读额度，不连数据库）。
+     *
+     * <p>额度是快照的一部分（{@link ConfigSnapshot#quota(long, String)}），本方法把它从**本地层里
+     * 那份快照**取出来 —— 网关在每次请求上都会先经 {@code ConfigClient.current()}（它会把被服务的快照
+     * 回填进本地层），因此到这里时本地层通常已经持有当前快照。
+     *
+     * <p><b>按「租户 + 周期」精确查找</b>（{@code period} 是 UTC 的 {@code YYYYMM}）：同一租户在不同
+     * 周期各有额度行，跨周期取错会让错误的预算生效 —— 这正是本方法不能只按 {@code tenantId} 找的原因。
+     *
+     * <p>返回空表示**不限**（决策 D15：快照里没有该 {@code (tenant, period)} 的行 = 与 M3 一致）；
+     * 返回的行里 {@code tokenLimit == 0} 同样表示**不限**。判定「是否受限」由调用方（配额过滤器）负责。
+     */
+    public Optional<QuotaDescriptor> quota(long tenantId, String period) {
+        return local().flatMap(snapshot -> snapshot.quota(tenantId, period));
     }
 
     /**

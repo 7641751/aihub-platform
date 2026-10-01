@@ -51,6 +51,12 @@ class InternalConfigSnapshotIntegrationTest extends AbstractIntegrationTest {
     private static final String INACTIVE = "INACTIVE";
     private static final String SYNTHETIC_PLAINTEXT = "sk-channel-plaintext-synthetic";
 
+    /**
+     * 额度用例独有的周期（Task 13）。用一个**不会与别的用例相撞**的 {@code YYYYMM}，
+     * 使「本用例的额度行在线上」这条断言可以按 {@code (tenantId, period)} 定向查。
+     */
+    private static final String QUOTA_PERIOD = "202601";
+
     /** 与网关侧 {@code new ObjectMapper()} 同款：不共享 admin 的配置，独立地读一遍响应体。 */
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -127,14 +133,20 @@ class InternalConfigSnapshotIntegrationTest extends AbstractIntegrationTest {
         insertPolicy(tenantId, null, 20, 40, ACTIVE);
         insertPolicy(tenantId, null, 999, 999, INACTIVE);
         insertPolicy(tenantId, 42L, 5, 10, ACTIVE);
+        // Task 13：额度行用**本用例独有的 (tenantId, period)**；`quota` 表是 JVM 级共享的，
+        // 别的用例也在往里写 ⇒ 下面的断言**只按 (tenantId, period) 定向查，绝不数组计数**。
+        insertQuota(tenantId, QUOTA_PERIOD, 1_000L, 7L);
 
         JsonNode envelope = MAPPER.readTree(get(signed()).getBody());
         JsonNode data = envelope.path("data");
 
-        // ① 顶层信封 + data 的键集合（= ConfigSnapshot 的六个分量，网关逐个按名读）。
+        // ① 顶层信封 + data 的键集合（= ConfigSnapshot 的**七个**分量，网关逐个按名读）。
+        //    **Task 13 新增 `quotas`**：额度是「控制面写、数据面读」的镜像，网关不连数据库，
+        //    这是额度到达数据面的唯一通路（`ConfigSnapshotService` / `ConfigSnapshot#quota`）。
         assertThat(envelope.path("code").asText()).isEqualTo("OK");
         assertThat(names(data)).containsExactlyInAnyOrder(
-                "version", "generatedAtEpochMilli", "channels", "routes", "ratePolicies", "defaultModel");
+                "version", "generatedAtEpochMilli", "channels", "routes", "ratePolicies", "defaultModel",
+                "quotas");
         // 指代明确化（2026-09-29）：这里的"决策 5"是 **M3**（2026-09-23-m3-traffic-governance.md）的决策 5 ——
         // 「快照 version = max(三张配置表的 updated_at) 折算成 epoch 毫秒；没有任何配置行时为 0」。
         // 因为它，本断言才成立：插入了真实配置行 ⇒ updated_at 被推进 ⇒ version 必须为正，而 0 只表示"一条都没有"。
@@ -185,6 +197,23 @@ class InternalConfigSnapshotIntegrationTest extends AbstractIntegrationTest {
         assertThat(policies.get(0).path("qps").asInt()).isEqualTo(20);
         assertThat(policies.get(1).path("apiKeyId").asLong()).isEqualTo(42L);
         assertThat(policies.get(1).path("qps").asInt()).isEqualTo(5);
+
+        // ⑤ 额度段（Task 13）：键名与 `ConfigSnapshot#quota` / `QuotaDescriptor` 逐一对应，
+        //    且**只搬额度、不搬已用量**（token_used/request_used 是数据面的账，不许进快照）。
+        JsonNode quotas = data.path("quotas");
+        JsonNode mine = null;
+        for (JsonNode q : quotas) {
+            if (q.path("tenantId").asLong() == tenantId && QUOTA_PERIOD.equals(q.path("period").asText())) {
+                mine = q;
+            }
+        }
+        assertThat(mine)
+                .as("本用例的额度行必须出现在线上（按 (tenantId, period) 定向查 —— 该表是 JVM 级共享的，"
+                        + "别的用例也在写，所以这里**不是**数组计数）")
+                .isNotNull();
+        assertThat(names(mine)).containsExactlyInAnyOrder("tenantId", "period", "tokenLimit", "requestLimit");
+        assertThat(mine.path("tokenLimit").asLong()).isEqualTo(1_000L);
+        assertThat(mine.path("requestLimit").asLong()).isEqualTo(7L);
     }
 
     private ResponseEntity<String> get(HttpHeaders headers) {
@@ -236,6 +265,17 @@ class InternalConfigSnapshotIntegrationTest extends AbstractIntegrationTest {
     private void insertPolicy(Long tenantId, Long apiKeyId, int qps, int burst, String status) {
         jdbcTemplate.update("insert into rate_limit_policy (tenant_id, api_key_id, qps, burst, status) "
                 + "values (?, ?, ?, ?, ?)", tenantId, apiKeyId, qps, burst, status);
+    }
+
+    /**
+     * 插入一条额度行（Task 13）。{@code quota} 表**没有** {@code status} 列：「没有行」本身就是「不限」（D15），
+     * 所以这里也没有 status 参数；{@code uk_quota_tenant_period} 保证 {@code (tenant_id, period)} 唯一。
+     */
+    private void insertQuota(Long tenantId, String period, long tokenLimit, long requestLimit) {
+        jdbcTemplate.update("insert into quota (tenant_id, period, token_limit, token_used, request_limit, "
+                        + "request_used, version, created_at, updated_at) "
+                        + "values (?, ?, ?, 0, ?, 0, 0, UTC_TIMESTAMP(3), UTC_TIMESTAMP(3))",
+                tenantId, period, tokenLimit, requestLimit);
     }
 
     private static String b64Key(int seed) {

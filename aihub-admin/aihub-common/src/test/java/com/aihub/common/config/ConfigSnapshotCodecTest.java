@@ -30,7 +30,10 @@ class ConfigSnapshotCodecTest {
                 List.of(new ModelRouteDescriptor("deepseek-chat", 11L, 100, 0, "ACTIVE"),
                         new ModelRouteDescriptor("deepseek-chat", 12L, 300, 0, "ACTIVE")),
                 List.of(new RatePolicy(7L, null, 20, 40), new RatePolicy(7L, 42L, 100, 200)),
-                "deepseek-chat");
+                "deepseek-chat",
+                // 同一租户的两个不同周期：编解码必须逐字保住 period，否则跨周期会取错额度（Task 13）。
+                List.of(new QuotaDescriptor(7L, "202601", 100L, 7L),
+                        new QuotaDescriptor(7L, "202602", 200L, 8L)));
     }
 
     @Test
@@ -46,11 +49,29 @@ class ConfigSnapshotCodecTest {
         assertThat(lines.get(4)).isEqualTo("R|deepseek-chat|12|300|0|ACTIVE");
         assertThat(lines.get(5)).isEqualTo("L|7||20|40");
         assertThat(lines.get(6)).isEqualTo("L|7|42|100|200");
+        // Q 段（Task 13）：两条额度行都必须被编码，且 period 逐字保留。
+        assertThat(lines.get(7)).isEqualTo("Q|7|202601|100|7");
+        assertThat(lines.get(8)).isEqualTo("Q|7|202602|200|8");
     }
 
     @Test
     void roundTripsAFullyPopulatedSnapshot() {
         assertThat(ConfigSnapshotCodec.decode(ConfigSnapshotCodec.encode(populated()))).isEqualTo(populated());
+    }
+
+    /**
+     * 额度往返**必须把 {@code quotas} 带回来**（变异体②的判别点）：只编码不解码会让 {@code quotas}
+     * 变成空表 —— 而空表正是「所有租户都不限」（D15）的默认值，于是「额度悄悄丢了」在生产上
+     * **不可观测**。这条断言要求解码后的额度与原文逐字段相等。
+     */
+    @Test
+    void roundTripsTheQuotasSection() {
+        ConfigSnapshot decoded = ConfigSnapshotCodec.decode(ConfigSnapshotCodec.encode(populated()));
+
+        assertThat(decoded).isNotNull();
+        assertThat(decoded.quotas()).containsExactlyInAnyOrder(
+                new QuotaDescriptor(7L, "202601", 100L, 7L),
+                new QuotaDescriptor(7L, "202602", 200L, 8L));
     }
 
     @Test
@@ -89,6 +110,24 @@ class ConfigSnapshotCodecTest {
         assertThat(ConfigSnapshotCodec.decode("#v1|0||0\nC|11|x|https://x|v1:QUJD|1|bad|ACTIVE|100|0")).isNull();
         assertThat(ConfigSnapshotCodec.decode("#v1|0||0\nR|m|11|100")).isNull();
         assertThat(ConfigSnapshotCodec.decode("#v1|0||0\nL|7||20")).isNull();
+        // Q 段字段数不对同样判死（与 C/R/L 同一口径）。
+        assertThat(ConfigSnapshotCodec.decode("#v1|0||0\nQ|7|202601|100")).isNull();
+    }
+
+    /**
+     * 额度查找**只认「租户 + 周期」**：跨周期取错会让错误的预算生效。变异体④（ConfigCache 只按
+     * tenantId 找）在网关侧的对应断言落在 {@code ConfigCacheTest}，这里钉住共享 record 本身的查找语义。
+     */
+    @Test
+    void quotaIsFoundByTenantAndPeriodOnly() {
+        ConfigSnapshot snapshot = populated();
+
+        assertThat(snapshot.quota(7L, "202601")).contains(new QuotaDescriptor(7L, "202601", 100L, 7L));
+        assertThat(snapshot.quota(7L, "202602")).as("同租户的不同周期必须各自取到自己的额度")
+                .contains(new QuotaDescriptor(7L, "202602", 200L, 8L));
+        assertThat(snapshot.quota(7L, "202603")).as("没有该周期的行 = 不限（D15）").isEmpty();
+        assertThat(snapshot.quota(8L, "202601")).as("别的租户取不到").isEmpty();
+        assertThat(snapshot.quota(7L, null)).isEmpty();
     }
 
     @Test

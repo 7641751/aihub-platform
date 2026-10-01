@@ -4,6 +4,7 @@ import com.aihub.admin.support.AbstractIntegrationTest;
 import com.aihub.dao.mapper.ChannelMapper;
 import com.aihub.dao.mapper.ConfigVersionMapper;
 import com.aihub.dao.mapper.ModelRouteMapper;
+import com.aihub.dao.mapper.QuotaMapper;
 import com.aihub.dao.mapper.RateLimitPolicyMapper;
 import com.aihub.service.config.ConfigChangePublisher;
 import com.aihub.service.config.ConfigSnapshotService;
@@ -66,6 +67,9 @@ class ConfigSnapshotVersionTest extends AbstractIntegrationTest {
     private RateLimitPolicyMapper policyMapper;
 
     @Autowired
+    private QuotaMapper quotaMapper;
+
+    @Autowired
     private JdbcTemplate jdbcTemplate;
 
     @Autowired
@@ -114,8 +118,9 @@ class ConfigSnapshotVersionTest extends AbstractIntegrationTest {
         long v = publisher.bumpAndPublish("channel.update");
         deleteAllRoutes();                                               // 把库里的配置清空
 
+        // Task 13：ConfigSnapshotService 的构造器新增了 QuotaMapper（额度也入快照）。
         ConfigSnapshotService fresh = new ConfigSnapshotService(channelMapper, routeMapper, policyMapper,
-                jdbcTemplate, configVersionMapper, "default-model");
+                quotaMapper, jdbcTemplate, configVersionMapper, "default-model");
         assertThat(configVersionMapper.current())
                 .as("水位那一行（config_version.id = 1）在库里，不在进程里")
                 .isGreaterThanOrEqualTo(v);

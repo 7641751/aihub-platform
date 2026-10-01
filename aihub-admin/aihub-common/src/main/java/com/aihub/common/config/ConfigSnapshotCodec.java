@@ -14,10 +14,15 @@ import java.util.List;
  * C|{id}|{name}|{baseUrl}|{apiKeyCipher}|{keyVersion}|{timeoutMs}|{status}|{weight}|{priority}
  * R|{modelName}|{channelId}|{weight}|{priority}|{status}
  * L|{tenantId}|{apiKeyId}|{qps}|{burst}
+ * Q|{tenantId}|{period}|{tokenLimit}|{requestLimit}
  * </pre>
  * 字段内转义 {@code \} {@code |} {@code \n} {@code \r}（与 {@code MeteringEventCodec} /
  * {@code ApiKeyCacheCodec} 同一套转义器语义）。**未知段字母被跳过**：将来加新段时，老网关
  * 读到新载荷不会整体判死，而是丢掉不认识的那一段。
+ *
+ * <p><b>{@code Q} 段（Task 13 新增）</b>：租户周期额度，{@code period} 是 UTC 的 {@code YYYYMM}。
+ * 它**必须**与 {@code C}/{@code R}/{@code L} 一样被编**和**解 —— 只编不解会让本地/Redis 往返静默丢掉额度
+ * （快照里 {@code quotas} 变成空表 = 所有租户都不限，正好是 D15 的默认值，于是缺陷不可见）。
  */
 public final class ConfigSnapshotCodec {
 
@@ -29,11 +34,14 @@ public final class ConfigSnapshotCodec {
     private static final String SECTION_CHANNEL = "C";
     private static final String SECTION_ROUTE = "R";
     private static final String SECTION_POLICY = "L";
+    private static final String SECTION_QUOTA = "Q";
     private static final int HEADER_FIELDS = 4;
     private static final int CHANNEL_FIELDS = 10;
     private static final int ROUTE_FIELDS = 6;
     /** 段字母本身也算一个字段：{@code L|7||20|40} 切开是 5 个 token（与 {@code C}=10 / {@code R}=6 同一口径）。 */
     private static final int POLICY_FIELDS = 5;
+    /** {@code Q|1|202601|100|7} 切开是 5 个 token（段字母算一个字段，同一口径）。 */
+    private static final int QUOTA_FIELDS = 5;
 
     private ConfigSnapshotCodec() {
     }
@@ -71,6 +79,13 @@ public final class ConfigSnapshotCodec {
                     .append(policy.qps()).append(DELIMITER)
                     .append(policy.burst());
         }
+        for (QuotaDescriptor quota : snapshot.quotas()) {
+            out.append('\n').append(SECTION_QUOTA).append(DELIMITER)
+                    .append(quota.tenantId()).append(DELIMITER)
+                    .append(escape(quota.period())).append(DELIMITER)
+                    .append(quota.tokenLimit()).append(DELIMITER)
+                    .append(quota.requestLimit());
+        }
         return out.toString();
     }
 
@@ -87,6 +102,7 @@ public final class ConfigSnapshotCodec {
         List<ChannelDescriptor> channels = new ArrayList<>();
         List<ModelRouteDescriptor> routes = new ArrayList<>();
         List<RatePolicy> policies = new ArrayList<>();
+        List<QuotaDescriptor> quotas = new ArrayList<>();
         try {
             long version = Long.parseLong(header.get(1));
             String defaultModel = emptyToNull(header.get(2));
@@ -124,12 +140,20 @@ public final class ConfigSnapshotCodec {
                                 optionalLong(fields.get(1)), optionalLong(fields.get(2)),
                                 Integer.parseInt(fields.get(3)), Integer.parseInt(fields.get(4))));
                     }
+                    case SECTION_QUOTA -> {
+                        if (fields.size() != QUOTA_FIELDS) {
+                            return null;
+                        }
+                        quotas.add(new QuotaDescriptor(
+                                Long.parseLong(fields.get(1)), emptyToNull(fields.get(2)),
+                                Long.parseLong(fields.get(3)), Long.parseLong(fields.get(4))));
+                    }
                     // 不认识的段字母：跳过（前向兼容），不让整份载荷判死。
                     default -> {
                     }
                 }
             }
-            return new ConfigSnapshot(version, generatedAt, channels, routes, policies, defaultModel);
+            return new ConfigSnapshot(version, generatedAt, channels, routes, policies, defaultModel, quotas);
         } catch (RuntimeException e) {
             return null;
         }

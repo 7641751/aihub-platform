@@ -1971,7 +1971,13 @@ git commit -m "test(quota): cover the request dimension, the HTTP contract and t
   - `aihub-admin/aihub-service/src/main/java/com/aihub/service/config/ConfigSnapshotService.java`（**Modify**：查 `quota` 表并入快照）
   - `aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/QuotaAdminService.java`（**Modify**：`update` 成功后 `ConfigChangePublisher.publishAfterCommit("quota.update")` —— Task 12 留的显式待办）
   - `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigCache.java`（**Modify**：暴露快照里的额度查询）
-  - 既有契约测试会因此变红/需要更新：`aihub-gateway/src/test/java/com/aihub/gateway/admin/AdminClientSnapshotContractTest.java`、`aihub-admin/.../config/ConfigSnapshotVersionTest.java`（**如实报告你改了哪些断言、为什么**；**不许放宽**）。
+  - 既有契约测试会因此变红/需要更新：`aihub-gateway/src/test/java/com/aihub/gateway/admin/AdminClientSnapshotContractTest.java`、`aihub-admin/.../config/ConfigSnapshotVersionTest.java`（**如实报告你改了哪些断言、为什么**；**不许放宽**）、
+    以及 **`aihub-admin/aihub-web/src/test/java/com/aihub/admin/config/InternalConfigSnapshotIntegrationTest.java`** ——
+    它的 `theResponseBodyCarriesExactlyThePathsTheGatewayParserReads` 断言的 `data` 顶层键集合**恰好**是那六个分量，
+    加了 `quotas` 就**必然**变红；这是**正确的信号**（它钉住线上形状）⇒ 必须**把 `quotas` 加进期望集合并补该段的定向断言**
+    （`quota` 表是 JVM 级共享的，**不许数组计数**，按 `(tenantId, period)` 定向查）。
+    ⚠️ **2026-10-01 控制器登记**：这条路径在上面的初次折叠里**被我漏掉了**（"Files 缺路径"缺陷类第 5 次出现，这次是折叠者自己的疏漏）——
+    它是在控制器跑 admin 全量时变红才暴露的，说明"只跑聚焦用例"会漏掉**形状级**既有断言。
 
 **Interfaces:**
 - Consumes: `QuotaScript`/`QuotaKeys`/`QuotaPeriod`/`QuotaDecision`（Task 12）；`TokenEstimator`（M2 既有，**复用，不新写**）；`GatewayErrors`；`ApiKeyAuthFilter.ATTRIBUTE_KEY_VIEW`（取 `tenantId`）

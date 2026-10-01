@@ -8,6 +8,7 @@ import com.aihub.common.config.ChannelDescriptor;
 import com.aihub.common.config.ConfigSnapshot;
 import com.aihub.common.config.ConfigSnapshotCodec;
 import com.aihub.common.config.ModelRouteDescriptor;
+import com.aihub.common.config.QuotaDescriptor;
 import com.aihub.gateway.admin.AdminClient;
 import com.aihub.gateway.upstream.UpstreamProperties;
 import com.github.benmanes.caffeine.cache.Ticker;
@@ -100,6 +101,35 @@ class ConfigCacheTest {
     private ConfigCache cache(GatewayConfigProperties configProperties) {
         lenient().when(redis.opsForValue()).thenReturn(values);
         return new ConfigCache(redis, configProperties);
+    }
+
+    /**
+     * Task 13：网关从快照里读额度（不连数据库）。这里只量**本地层那份快照**的额度查找，且要求
+     * **按 {@code (tenant, period)} 精确匹配** —— 变异体④（只按 {@code tenantId} 找）会让「另一个周期」
+     * 那条断言返回 202601 的那份、精确变红。
+     */
+    @Test
+    void quotaIsReadFromTheLocalSnapshotByTenantAndPeriod() {
+        ConfigCache cache = cache();
+        cache.putLocal(new ConfigSnapshot(5L, 50L,
+                List.of(new ChannelDescriptor(1L, "ch", "https://ch.example.com", "v1:QUJD", 1, 60_000, "ACTIVE",
+                        100, 0)),
+                List.of(), List.of(), "m",
+                List.of(new QuotaDescriptor(7L, "202601", 100L, 4L),
+                        new QuotaDescriptor(7L, "202602", 200L, 8L))));
+
+        assertThat(cache.quota(7L, "202601")).contains(new QuotaDescriptor(7L, "202601", 100L, 4L));
+        assertThat(cache.quota(7L, "202602"))
+                .as("同一租户的不同周期必须各自取到自己的额度（忽略 period 的实现会在这里返回 202601 那份）")
+                .contains(new QuotaDescriptor(7L, "202602", 200L, 8L));
+        assertThat(cache.quota(7L, "202603")).as("没有该周期的行 = 不限（D15）").isEmpty();
+        assertThat(cache.quota(8L, "202601")).as("别的租户取不到").isEmpty();
+    }
+
+    /** 本地层还空着时（快照尚未回填）额度查询返回空 —— 调用方据此走「不限」（D15）。 */
+    @Test
+    void quotaIsEmptyWhenNoSnapshotIsCachedLocally() {
+        assertThat(cache().quota(7L, "202601")).isEmpty();
     }
 
     /** 一个总是返回给定快照的 admin 替身（覆写 configSnapshot 的默认实现）。 */

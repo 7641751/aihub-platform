@@ -1,6 +1,9 @@
 package com.aihub.admin.console;
 
 import com.aihub.admin.support.AbstractIntegrationTest;
+import com.aihub.common.config.ConfigInvalidateCodec;
+import com.aihub.common.config.ConfigInvalidateMessage;
+import com.aihub.common.config.ConfigInvalidateTopology;
 import com.aihub.common.quota.QuotaPeriod;
 import com.aihub.dao.entity.AuditLogEntity;
 import com.aihub.dao.entity.QuotaEntity;
@@ -18,6 +21,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.listener.ChannelTopic;
+import org.springframework.data.redis.listener.RedisMessageListenerContainer;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -31,13 +38,16 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -92,6 +102,16 @@ class QuotaAdminIntegrationTest extends AbstractIntegrationTest {
     /** 有界等待上限：并发/轮询挂死时带原因变红，绝不让用例永不返回。 */
     private static final long WAIT_SECONDS = 30L;
 
+    /**
+     * 收一条失效广播的**有界窗口**（与 {@code RouteAndRateLimitAdminIntegrationTest} 同一口径）：
+     * 先至多等 {@link #MESSAGE_TIMEOUT} 拿第一条，再 poll 到 {@link #QUIET_WINDOW} 静默为止，收齐这一小段
+     * 窗口里的**全部**消息 —— 断言因此可以要求 reason **集合恰好等于** {@code {quota.update}}。
+     */
+    private static final Duration MESSAGE_TIMEOUT = Duration.ofSeconds(5);
+    private static final Duration QUIET_WINDOW = Duration.ofSeconds(2);
+    private static final Duration SUBSCRIPTION_TIMEOUT = Duration.ofSeconds(5);
+    private static final String SUBSCRIPTION_PROBE = "subscription-probe";
+
     // 每个用例自己的租户（配额表按 (tenant, period) 唯一；容器共享，绝不复用别类的租户）。
     private static final long T_GET = 901_001L;
     private static final long T_PUT_TOKEN = 901_002L;
@@ -101,10 +121,12 @@ class QuotaAdminIntegrationTest extends AbstractIntegrationTest {
     private static final long T_CONFLICT = 901_006L;
     private static final long T_AUDIT_TOKEN = 901_007L;
     private static final long T_AUDIT_TARGET = 901_008L;
+    private static final long T_PUBLISH_TOKEN = 901_009L;
+    private static final long T_PUBLISH_BODY = 901_010L;
 
     /** 本类用到的全部夹具租户：前后各清一次。 */
-    private static final List<Long> FIXTURE_TENANTS =
-            List.of(T_GET, T_PUT_TOKEN, T_PUT_BODY, T_VALIDATION, T_VIEWER, T_CONFLICT, T_AUDIT_TOKEN, T_AUDIT_TARGET);
+    private static final List<Long> FIXTURE_TENANTS = List.of(T_GET, T_PUT_TOKEN, T_PUT_BODY, T_VALIDATION, T_VIEWER,
+            T_CONFLICT, T_AUDIT_TOKEN, T_AUDIT_TARGET, T_PUBLISH_TOKEN, T_PUBLISH_BODY);
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -123,6 +145,14 @@ class QuotaAdminIntegrationTest extends AbstractIntegrationTest {
     @Autowired
     private QuotaAdminService quotaAdminService;
 
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
+    @Autowired
+    private RedisConnectionFactory redisConnectionFactory;
+
+    private RedisMessageListenerContainer listenerContainer;
+
 
     /** 唯一夹具前后各清一次：容器是 JVM 级共享的，不依赖「表是干净的」。 */
     @BeforeEach
@@ -131,6 +161,15 @@ class QuotaAdminIntegrationTest extends AbstractIntegrationTest {
         for (long tenant : FIXTURE_TENANTS) {
             quotaMapper.delete(new LambdaQueryWrapper<QuotaEntity>().eq(QuotaEntity::getTenantId, tenant));
             auditLogMapper.delete(new LambdaQueryWrapper<AuditLogEntity>().eq(AuditLogEntity::getTenantId, tenant));
+        }
+    }
+
+    /** 订阅容器是本类自己搭的（{@code AbstractIntegrationTest} 不提供），用完必须销毁。 */
+    @AfterEach
+    void stopListenerContainer() throws Exception {
+        if (listenerContainer != null) {
+            listenerContainer.destroy();
+            listenerContainer = null;
         }
     }
 
@@ -298,6 +337,99 @@ class QuotaAdminIntegrationTest extends AbstractIntegrationTest {
                 .as("R2：审计的 tenant_id = **目标配额行的**租户（不是令牌租户）").isEqualTo(targetTenant);
         assertThat(rows.get(0).getAction())
                 .as("action 必须是既有常量 QUOTA_UPDATE（不新增常量）").isEqualTo(AuditAction.QUOTA_UPDATE);
+    }
+
+    // ---------------------------------------------------------------- 7) 提交后广播（Task 13）
+
+    /**
+     * Task 13：一次成功的配额写必须**恰好**广播一条 {@code quota.update}（额度已进快照，网关靠这条消息
+     * 立刻丢掉旧快照）。断言照抄 {@code RouteAndRateLimitAdminIntegrationTest} 的纪律：把**有界窗口**里的
+     * 消息**收齐**，其 reason **集合恰好等于** {@code {quota.update}} —— 只断言「恰好一条」是 reason
+     * 受限的，多发一条别的 reason 不会被发现。
+     *
+     * <p>判别力由变异体③（去掉 {@code QuotaAdminService.update} 里的
+     * {@code publishAfterCommit("quota.update")}）提供：那时窗口是空的，本用例第一个 poll 就红。
+     */
+    @Test
+    void anUpdatePublishesExactlyOneQuotaUpdateInvalidationMessage() throws Exception {
+        long tokenTenant = T_PUBLISH_TOKEN;
+        long bodyTenant = T_PUBLISH_BODY;
+        String period = QuotaPeriod.of(System.currentTimeMillis());
+
+        // 订阅必须在写之前建立（哨兵确认），否则那条真消息会被静默丢掉。
+        BlockingQueue<String> received = subscribeAndAwait();
+
+        ResponseEntity<String> response = exchange(HttpMethod.PUT, QUOTAS,
+                quotaBody(bodyTenant, period, 50L, 3L), tokenTenant, ConsoleClaims.ROLE_ADMIN);
+        assertThat(response.getStatusCode()).as("PUT /api/quotas 必须 200（响应体=%s）", response.getBody())
+                .isEqualTo(HttpStatus.OK);
+
+        List<ConfigInvalidateMessage> window = drainBoundedWindow(received);
+        assertThat(window).extracting(ConfigInvalidateMessage::reason)
+                .as("一次配额写 = 窗口内恰好一条 quota.update（多发别的 reason 也红）")
+                .containsExactlyInAnyOrder("quota.update");
+        assertThat(window).allSatisfy(message -> assertThat(message.version())
+                .as("失效消息必须带一个真实的水位版本号（reason=%s）", message.reason()).isPositive());
+    }
+
+    // ---------------------------------------------------------------- 失效广播订阅
+
+    private RedisMessageListenerContainer container() {
+        listenerContainer = new RedisMessageListenerContainer();
+        listenerContainer.setConnectionFactory(redisConnectionFactory);
+        listenerContainer.afterPropertiesSet();
+        listenerContainer.start();
+        return listenerContainer;
+    }
+
+    /** 装一条真 Redis 订阅，并在返回之前**确认订阅已经建立**（否则第一条真消息会被静默丢掉）。 */
+    private BlockingQueue<String> subscribeAndAwait() throws InterruptedException {
+        BlockingQueue<String> received = new LinkedBlockingQueue<>();
+        container().addMessageListener((message, channel) -> received.add(new String(message.getBody())),
+                new ChannelTopic(ConfigInvalidateTopology.CHANNEL));
+        awaitSubscription(received);
+        return received;
+    }
+
+    private void awaitSubscription(BlockingQueue<String> received) throws InterruptedException {
+        long deadline = System.nanoTime() + SUBSCRIPTION_TIMEOUT.toNanos();
+        long sequence = 0L;
+        while (System.nanoTime() < deadline) {
+            String probe = SUBSCRIPTION_PROBE + "-" + sequence++;
+            redisTemplate.convertAndSend(ConfigInvalidateTopology.CHANNEL, probe);
+            if (probe.equals(received.poll(200, TimeUnit.MILLISECONDS))) {
+                return;
+            }
+        }
+        throw new IllegalStateException(
+                "Redis 订阅在 " + SUBSCRIPTION_TIMEOUT + " 内没有建立，用例无法判定消息是否发出");
+    }
+
+    /**
+     * 在一个**有界窗口**内收齐频道上的**全部**失效消息（不是「等到一条匹配的就返回」）。
+     * 先至多等 {@link #MESSAGE_TIMEOUT} 拿第一条（拿不到**直接变红**，空集会让「集合恰好等于 {X}」假绿），
+     * 拿到后继续 poll 到 {@link #QUIET_WINDOW} 静默为止。
+     */
+    private static List<ConfigInvalidateMessage> drainBoundedWindow(BlockingQueue<String> received)
+            throws InterruptedException {
+        List<ConfigInvalidateMessage> messages = new ArrayList<>();
+        String first = received.poll(MESSAGE_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        assertThat(first).as("有界窗口内必须至少收到一条失效广播（空窗口无法判定「恰好一条」）").isNotNull();
+        messages.add(decode(first));
+        while (true) {
+            String payload = received.poll(QUIET_WINDOW.toMillis(), TimeUnit.MILLISECONDS);
+            if (payload == null) {
+                return messages;
+            }
+            messages.add(decode(payload));
+        }
+    }
+
+    /** 解码一条失效载荷；解不开就带着原文变红（而不是静默丢弃 —— 丢弃会让「集合恰好等于」失真）。 */
+    private static ConfigInvalidateMessage decode(String payload) {
+        ConfigInvalidateMessage message = ConfigInvalidateCodec.decode(payload);
+        assertThat(message).as("失效广播的载荷必须能被 ConfigInvalidateCodec 解码（实际=%s）", payload).isNotNull();
+        return message;
     }
 
     // ---------------------------------------------------------------- HTTP / DB 助手

@@ -8,6 +8,7 @@ import com.aihub.dao.entity.QuotaEntity;
 import com.aihub.dao.mapper.QuotaMapper;
 import com.aihub.service.audit.AuditAction;
 import com.aihub.service.audit.AuditService;
+import com.aihub.service.config.ConfigChangePublisher;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
@@ -41,9 +42,14 @@ import java.util.Map;
  * 见 {@code QuotaMapper.compareAndSwapLimits}）：拿到当前 {@code version} 后走 CAS，
  * **受影响行数为 0 ⇒ 并发冲突 ⇒ 抛 {@link BizException}（绝不静默覆盖）**。
  *
- * <p><b>数据面生效不在本类</b>：{@code config snapshot} 目前**不携带** {@code quota}（gateway 不连数据库，
- * 它怎么拿到额度是 Task 13 的职责）；因此本类**不**发布配置失效消息（与渠道/路由/限流的写路径不同）。
- * 若 Task 13 把额度接进快照，再回来在这里补 {@code ConfigChangePublisher.publishAfterCommit("quota.update")}。
+ * <p><b>数据面生效（Task 13 接通）</b>：{@code quota} 的额度行现在**会被组装进配置快照**
+ * （{@code ConfigSnapshotService#quotas()}），网关（数据面）从快照里读它。因此一次成功的 {@code update}
+ * 必须在事务提交后发布 {@code quota.update} 失效消息，让网关立刻丢掉手上的旧快照 —— 否则「控制台改了
+ * 额度、数据面最长一个 TTL 之后才生效」与渠道/路由/限流的写路径不一致。
+ *
+ * <p>发布走 {@link ConfigChangePublisher#publishAfterCommit(String)}（不是 {@code bumpAndPublish}）：
+ * 本类的 {@link #update} 是 {@code @Transactional}，发布必须在**提交之后**（回滚的写不许广播，
+ * 也不许抬水位）。发布失败只计数 + WARN，绝不把「广播失败」升级成「业务失败」（控制台的写已经提交了）。
  */
 @Service
 public class QuotaAdminService {
@@ -51,20 +57,27 @@ public class QuotaAdminService {
     /** {@code audit_log.target_type} 的取值。 */
     private static final String TARGET_TYPE = "QUOTA";
 
+    /** 配额写路径的失效 reason（有限枚举，进日志与消息正文）。 */
+    private static final String INVALIDATE_REASON_QUOTA_UPDATE = "quota.update";
+
     private final QuotaMapper quotaMapper;
     private final AuditService auditService;
+    private final ConfigChangePublisher configChangePublisher;
     private final Clock clock;
 
     /** Spring 注入用的构造器：时钟默认 {@code Clock.systemUTC()}（不依赖 JVM 默认时区）。 */
     @Autowired
-    public QuotaAdminService(QuotaMapper quotaMapper, AuditService auditService) {
-        this(quotaMapper, auditService, Clock.systemUTC());
+    public QuotaAdminService(QuotaMapper quotaMapper, AuditService auditService,
+                             ConfigChangePublisher configChangePublisher) {
+        this(quotaMapper, auditService, configChangePublisher, Clock.systemUTC());
     }
 
     /** 可注入时钟的构造器（用例钉固定瞬时）。 */
-    public QuotaAdminService(QuotaMapper quotaMapper, AuditService auditService, Clock clock) {
+    public QuotaAdminService(QuotaMapper quotaMapper, AuditService auditService,
+                             ConfigChangePublisher configChangePublisher, Clock clock) {
         this.quotaMapper = quotaMapper;
         this.auditService = auditService;
+        this.configChangePublisher = configChangePublisher;
         this.clock = clock;
     }
 
@@ -140,6 +153,10 @@ public class QuotaAdminService {
         // R2：审计 tenant_id = 该配额行的租户 id（不是操作者的、不是 NULL）。
         auditService.record(tenantId, actor, AuditAction.QUOTA_UPDATE, TARGET_TYPE, String.valueOf(current.id()),
                 Map.of("period", period, "tokenLimit", tokenLimit, "requestLimit", requestLimit));
+
+        // 让数据面（网关）立刻丢掉手上的旧快照：quota 现在会被组装进快照（Task 13）。
+        // 走 publishAfterCommit —— 本方法在事务里，发布必须在**提交之后**（回滚的写不许广播、不许抬水位）。
+        configChangePublisher.publishAfterCommit(INVALIDATE_REASON_QUOTA_UPDATE);
 
         return summary(find(tenantId, period));
     }
