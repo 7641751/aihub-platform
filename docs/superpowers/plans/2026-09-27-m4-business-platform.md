@@ -1959,6 +1959,20 @@ git commit -m "test(quota): cover the request dimension, the HTTP contract and t
 - Test: `aihub-gateway/src/test/java/com/aihub/gateway/quota/QuotaDegradeTest.java`
 - Test: `aihub-gateway/src/test/java/com/aihub/gateway/quota/QuotaCorrectionTest.java`
 
+- **Modify（2026-10-01 控制器补 —— 「额度取值源」缺失，属"Files 缺路径"缺陷类）**：
+  额度**必须经过配置快照**才能到网关。实测（`Select-String`）：`aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigSnapshot.java:20-22`
+  的快照只有 `version/generatedAtEpochMilli/channels/routes/ratePolicies/defaultModel` —— **没有 quota**；
+  而 `QuotaAdminService.java:44-46` 自己写着「`config snapshot` 目前**不携带** `quota`（gateway 不连数据库，
+  它怎么拿到额度是 **Task 13 的职责**）… 若 Task 13 把额度接进快照，再回来在这里补
+  `ConfigChangePublisher.publishAfterCommit("quota.update")`」。⇒ 本任务**必须**包含下列改动（**`aihub-common` 由控制器显式授权可改**）：
+  - `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/QuotaDescriptor.java`（**Create**：`record QuotaDescriptor(long tenantId, String period, long tokenLimit, long requestLimit)`）
+  - `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigSnapshot.java`（**Modify**：+`List<QuotaDescriptor> quotas` + 一个 `Optional<QuotaDescriptor> quota(long tenantId, String period)` 查找）
+  - `aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigSnapshotCodec.java`（**Modify**：编解码带上 `quotas`；**快照的**格式纪律与既有字段一致，不许悄悄改形状而不动编解码）
+  - `aihub-admin/aihub-service/src/main/java/com/aihub/service/config/ConfigSnapshotService.java`（**Modify**：查 `quota` 表并入快照）
+  - `aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/QuotaAdminService.java`（**Modify**：`update` 成功后 `ConfigChangePublisher.publishAfterCommit("quota.update")` —— Task 12 留的显式待办）
+  - `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigCache.java`（**Modify**：暴露快照里的额度查询）
+  - 既有契约测试会因此变红/需要更新：`aihub-gateway/src/test/java/com/aihub/gateway/admin/AdminClientSnapshotContractTest.java`、`aihub-admin/.../config/ConfigSnapshotVersionTest.java`（**如实报告你改了哪些断言、为什么**；**不许放宽**）。
+
 **Interfaces:**
 - Consumes: `QuotaScript`/`QuotaKeys`/`QuotaPeriod`/`QuotaDecision`（Task 12）；`TokenEstimator`（M2 既有，**复用，不新写**）；`GatewayErrors`；`ApiKeyAuthFilter.ATTRIBUTE_KEY_VIEW`（取 `tenantId`）
   - ⚠️ **配额是租户级的**：`quota` 表只有 `(tenant_id, period)`（V1 的 `uk_quota_tenant_period`），**没有 `api_key_id`** —— 不要照抄限流的「两维」结构
@@ -1969,6 +1983,42 @@ git commit -m "test(quota): cover the request dimension, the HTTP contract and t
   - **两种"配额没生效"的原因必须分开计数**（E.4-(a)）：`aihub.quota.degraded`（Redis 不可用 → 按 D7 放行）与 **`aihub.quota.script_error`**（Lua 返回了非预期形状 / 解析失败 → 同样是放行，但**这是缺陷不是降级**）。把它们合成一个计数器，等于让"脚本写错了"永远藏在"Redis 挂了"后面
   - 超额响应：`429` + `{"error":{"message":…,"type":"insufficient_quota","param":null,"code":"insufficient_quota"}}`（D6）
   - `RedisQuotaLimiter.reserve(long tenantId, long estimatedTokens) : QuotaDecision`、`adjust(long tenantId, String period, long estimate, long actual) : void`
+
+- **（2026-10-01 控制器补 —— 8 条"照字面执行会出错 / 与既有铁律冲突"）**
+  1. **⚠️ 额度取值源 = 配置快照，不是数据库**：`QuotaResolver` **只能**从 `ConfigCache` 的快照里取额度
+     （见 Files 的 Modify 段；本任务要把额度接进快照）。**不许**直连 MySQL（网关没有该依赖），
+     **也不许**每请求回源 admin —— 那是 **Task 14** 的 Redis 不可用**兜底**路径。
+  2. **⚠️ 网关上不许出现"真 Redis"测试**（CONVENTIONS §8 item 3：*网关的测试永远不允许依赖 Docker*；
+     既有 `ratelimit/RedisRateLimiterTest` 的做法就是**Mockito mock `StringRedisTemplate`**，并在 javadoc 里写明
+     "**行为**（脚本真的在 Redis 里原子地…）由 **admin 侧**的真 Redis 集成测试负责"）。
+     ⇒ 计划 Step 1 的 `theRealUsageCorrectsTheEstimateBothWays` **直接读 `redis.opsForHash()` 是违规的**，必须改写成：
+     - **网关侧**（`QuotaCorrectionTest`）：用 mock 断言**调用约定** —— `adjust` **每请求恰好一次**、
+       `actual` 取自 `MeteringEvent.totalTokens()`、传给 Redis 的增量 = `actual − estimate`（**双向**：actual 小于估算时是负数）；
+       "桶里的最终值"**不在这一侧断言**。
+     - **admin 侧**（真 Redis）：断言**同一个键布局**下"预扣 + 校正增量"的最终值等于真实用量
+       （由 Task 12 的 `QuotaPreDeductionIntegrationTest` 所在模块承担；本任务在报告里给出两侧的**对应关系**）。
+     只在一侧伪造、另一侧不写，等于把"桶里记的是真实用量"这条判据**悄悄丢掉**。
+  3. **⚠️ `TokenEstimator` 的既有签名是 `static int estimate(String content)`**（实测：只有**内容**一个参数、
+     返回 `int`）⇒ `QuotaEstimator.estimate(String bodyOrPrompt, Integer maxTokens)` **必须自己**从请求体里
+     取出 prompt 文本、再把 `maxTokens` 加上去（复用是复用它的**估算法**，不是"它已经能估算一次调用"）。别猜签名。
+  4. **过滤器只守一个端点，且命名与既有对齐**：Step 3 里 `GUARDED.matches(...) && "/v1/chat/completions".equals(...)`
+     是**冗余的双重判定**（`/v1/**` 蕴含后者），且 `GUARDED` 未在 Files/Interfaces 里定义（既有的叫
+     `RateLimitFilter.GUARDED_PATH`）。⇒ **只保留** `equals("/v1/chat/completions")` 一个判定，并写明理由
+     （A13：只有它计费；`/v1/models` 不落 `request_log`）。
+  5. **⚠️ 两个内存上限的关系必须实测并写进配置注释**：`aihub.quota.max-in-memory-bytes` **必须小于**
+     `aihub.metering.max-capture-bytes`，否则配额层先失败 ⇒ 计量根本看不到这次请求。
+     ⇒ 报告里**必须给出这两个数字的实测值与它们的来源**（属性名 + 文件:行），并在注释里写清为什么是 `<`。
+  6. **`script_error` 与 `degraded` 的分离必须**有变异体**证明**：把 `QuotaScript.parse` 的
+     `IllegalStateException` 折进那个宽泛的 `catch → degraded++` ⇒ `anUnexpectedScriptShapeCountsScriptErrorNotDegrade`
+     **必须变红**。只写不测 = 这条要求没有牙齿。
+  7. **`QuotaCorrector` 取实际用量**：用 `MeteringEvent` 的**实测**分量 `totalTokens()`（不是 `promptTokens()+completionTokens()`
+     自己加，也不是猜名字）；报告里给出该分量的定义处。
+  8. **`git add` 不许写目录**（本项目已三次判定为缺陷）：Step 5 里的
+     `aihub-gateway/src/main/java/com/aihub/gateway/quota/` 与 `.../test/java/com/aihub/gateway/quota/`
+     **必须展开成逐个文件**。
+  9. **网关测试属性默认关掉配额**（与 `metering`/`ratelimit` 同一条纪律：绝大多数测试不想撞"Redis 指向不存在的端口"的超时）：
+     `src/test/resources/application.properties` 加 `aihub.quota.enabled=false`，需要它的测试用
+     `properties`/`@DynamicPropertySource` **显式打开**（照抄 `aihub.metering.enabled` / `aihub.ratelimit.enabled` 的注释风格）。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -2010,12 +2060,24 @@ void cachedBodyStillReachesTheUpstreamByteForByte() {    // D17 + M1 铁律
 }
 
 @Test
-void theRealUsageCorrectsTheEstimateBothWays() {         // 实测 usage < 估算 → 退回差额
-    // 夹具回 usage.total_tokens = 3，而估算 = prompt + max_tokens
-    String period = QuotaPeriod.of(Instant.now().toEpochMilli());
-    long afterRequest = Long.parseLong((String) redis.opsForHash()
-            .get(QuotaKeys.bucketKey(1L, period), "tok"));
-    assertThat(afterRequest).as("校正之后桶里记的是**真实**用量，不是估算值").isEqualTo(3L);
+void theRealUsageCorrectsTheEstimateBothWays() {
+    // ⚠️ 2026-10-01 控制器改写：原写法直接读真 Redis（`redis.opsForHash().get(...)`），
+    //    与「网关测试永远不允许依赖 Docker」（CONVENTIONS §8 item 3）冲突。
+    //    网关侧只断言**调用约定**；「桶里的最终值等于真实用量」由 **admin 侧真 Redis** 用例负责（同键布局）。
+    //
+    // 夹具回 usage.total_tokens = 3，而估算 = prompt + maxTokens（> 3）⇒ 差额是**负数**（退回）。
+    // 双向都要钉住：usage < 估算（退回）与 usage > 估算（补扣）。
+    verify(quotaLimiter, times(1)).adjust(1L, PERIOD, ESTIMATE, 3L);   // ① 每请求恰一次、actual 取自 totalTokens()
+    verifyNoMoreInteractions(quotaLimiter);
+
+    // ② 差额的**符号与大小**在 Redis 调用这一层钉住（mock StringRedisTemplate，无需 Docker）。
+    //    照抄 ratelimit/RedisRateLimiterTest 的 mock 纪律（它同样用 mock 钉调用约定，
+    //    把「脚本真的在 Redis 里原子地做」交给 admin 侧的真 Redis 集成测试）。
+    new RedisQuotaLimiter(redis).adjust(1L, PERIOD, 100L, 3L);
+    verify(redis.opsForHash()).increment(QuotaKeys.bucketKey(1L, PERIOD), "tok", -97L);   // 退回差额
+    redis.clearInvocations();
+    new RedisQuotaLimiter(redis).adjust(1L, PERIOD, 3L, 100L);
+    verify(redis.opsForHash()).increment(QuotaKeys.bucketKey(1L, PERIOD), "tok", 97L);    // 补扣差额
 }
 ```
 
@@ -2093,18 +2155,48 @@ private static ServerWebExchange withCachedBody(ServerWebExchange exchange, byte
 
 Run: `mvn -B -pl aihub-gateway -am test "-Dtest=QuotaFilterTest,QuotaDegradeTest,QuotaCorrectionTest,SseStreamingTest,RelayMeteringFlowTest"`
 Expected: 全绿 + `BUILD SUCCESS`（后两个既有的类一起跑，证明字节透传与计量没被破坏）。
+Run（2026-10-01 控制器补 —— 改动了快照形状，必须一起跑）：
+`mvn -B -pl aihub-gateway -am test "-Dtest=AdminClientSnapshotContractTest,ConfigCacheTest,ConfigInvalidateContractTest"`
+与 `mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ConfigSnapshotVersionTest,ConfigSnapshotServiceTest,QuotaAdminIntegrationTest"`，
+且 `mvn -B -pl aihub-admin/aihub-common -am test` 的总数要如实报（**快照 record 加字段会动 `aihub-common` 的既有用例**）。
 
 ```bash
-git add aihub-gateway/src/main/java/com/aihub/gateway/quota/ \
+# 2026-10-01 控制器订正：原清单有两行是【目录】（本项目已三次判定为缺陷）⇒ 逐个显式路径；
+# 并把「额度接进配置快照」那条链路上的 6 个文件补齐（见上方 Files 的 Modify 段）。
+git add aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaFilter.java \
+        aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaResolver.java \
+        aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaEstimator.java \
+        aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaLimiter.java \
+        aihub-gateway/src/main/java/com/aihub/gateway/quota/RedisQuotaLimiter.java \
+        aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaCorrector.java \
+        aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaConfigProperties.java \
+        aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaConfig.java \
         aihub-gateway/src/main/java/com/aihub/gateway/relay/ChatRelayController.java \
+        aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigCache.java \
         aihub-gateway/src/main/resources/application.yml \
-        aihub-gateway/src/test/java/com/aihub/gateway/quota/ \
+        aihub-admin/aihub-common/src/main/java/com/aihub/common/config/QuotaDescriptor.java \
+        aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigSnapshot.java \
+        aihub-admin/aihub-common/src/main/java/com/aihub/common/config/ConfigSnapshotCodec.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/config/ConfigSnapshotService.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/QuotaAdminService.java \
+        aihub-gateway/src/test/java/com/aihub/gateway/quota/QuotaFilterTest.java \
+        aihub-gateway/src/test/java/com/aihub/gateway/quota/QuotaDegradeTest.java \
+        aihub-gateway/src/test/java/com/aihub/gateway/quota/QuotaCorrectionTest.java \
         aihub-gateway/src/test/resources/application.properties
+# 若你确实动了既有契约测试（AdminClientSnapshotContractTest / ConfigSnapshotVersionTest），
+# 把它们的路径也逐个加进来，并在报告里说明改了哪条断言、为什么（不许放宽）。
 git commit -m "feat(gateway): pre-deduct quota atomically, reject with insufficient_quota, correct from real usage"
 ```
 
-**验收判据：** 超额是 `insufficient_quota`（不是 `rate_limit_exceeded`）；Redis 挂了**放行**且有降级计数；缓存请求体后上游收到的字节**逐字节不变**；真实 usage 双向校正估算。
+**验收判据：** 超额是 `insufficient_quota`（不是 `rate_limit_exceeded`）；Redis 挂了**放行**且有降级计数，**脚本形状错落独立计数器 `aihub.quota.script_error`（且 `degraded` 保持 0）**；缓存请求体后上游收到的字节**逐字节不变**；真实 usage **双向**校正估算（差额的符号与大小在 Redis 调用层钉住）；**额度来自配置快照**（快照里**有** `quotas`，且 `QuotaAdminService.update` 会发布 `quota.update`）；`quota.max-in-memory-bytes < metering.max-capture-bytes`（**给出两个数字的实测值**）；**网关套件不依赖 Docker**。
 **RED 证据：** `cachedBodyStillReachesTheUpstreamByteForByte` 在「缓存把 body 消费掉」的实现下红（上游收到空体）；`anOverBudgetRequestIsRejectedWithInsufficientQuota…` 在复用 `rate_limit_exceeded` 的实现下红。
+⚠️ **（2026-10-01 控制器补）RED 必须落在被测断言上**：Task 9/10/11/12 的自然 RED **都**全红在 `404`/`cannot find symbol`（端点或类未存在）—— 那种红**不能**证明断言的判别力。⇒ 仍要求**每一条行为各配一条变异体**，尤其：
+① 缓存后**释放顺序颠倒**（先释放 buffer 再传原 exchange）⇒ `cachedBodyStillReachesTheUpstreamByteForByte` 必须红；
+② 超额响应复用 `rate_limit_exceeded` ⇒ 第一条必须红；
+③ 把 `IllegalStateException` 折进 `catch → degraded++` ⇒ `script_error` 那条必须红；
+④ **删掉快照里的 `quotas`**（或让 `ConfigSnapshotService` 不查 `quota` 表）⇒ 额度解析必须红（否则"额度来自快照"只是句空话）；
+⑤ `adjust` 每请求调两次 ⇒ "恰一次"必须红；
+⑥ `Chained`：`ChatRelayController` 的 `quotaCorrector.correct(event)` 去掉 ⇒ 校正用例必须红。
 
 ---
 
