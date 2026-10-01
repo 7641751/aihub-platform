@@ -8,6 +8,7 @@ import com.aihub.service.audit.AuditService;
 import com.aihub.service.console.ConsoleClaims;
 import com.aihub.service.quota.QuotaAdminService;
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -15,6 +16,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.time.Clock;
 
 /**
  * 配额控制面接口（{@code /api/quotas}，Task 12）：由 {@link ConsoleAuthFilter} 守门
@@ -39,9 +42,24 @@ import org.springframework.web.bind.annotation.RestController;
 public class QuotaController {
 
     private final QuotaAdminService quotaAdminService;
+    private final Clock clock;
 
+    /** Spring 注入用的构造器：时钟默认 {@code Clock.systemUTC()}（与 {@code QuotaAdminService} 同款）。 */
+    @Autowired
     public QuotaController(QuotaAdminService quotaAdminService) {
+        this(quotaAdminService, Clock.systemUTC());
+    }
+
+    /**
+     * 可注入时钟的构造器（{@code period} 缺省时用它折算当前周期）。
+     *
+     * <p><b>为什么用 {@link Clock} 而不是 {@code System.currentTimeMillis()}</b>：CONVENTIONS §7
+     * 要求时间基准**写在代码里**、可被判据替代 —— 与 {@code QuotaAdminService} / {@code AuditService}
+     * 保持同一条纪律（缺省 {@code Clock.systemUTC()} 不依赖 JVM 默认时区，也便于用例钉固定瞬时）。
+     */
+    public QuotaController(QuotaAdminService quotaAdminService, Clock clock) {
         this.quotaAdminService = quotaAdminService;
+        this.clock = clock;
     }
 
     /** PUT 请求体：{@code tenantId} 必填（平台级写）；{@code period} 缺省 = 当前 UTC 周期。 */
@@ -74,9 +92,9 @@ public class QuotaController {
                 request.tokenLimit(), request.requestLimit(), actor(http))));
     }
 
-    /** {@code period} 缺省 = 当前 UTC 周期；显式传入时由服务层校验其合法性。 */
-    private static String resolvePeriod(String period) {
-        return (period == null || period.isBlank()) ? QuotaPeriod.of(System.currentTimeMillis()) : period;
+    /** {@code period} 缺省 = 当前 UTC 周期（按注入的 {@link #clock} 折算）；显式传入时由服务层校验其合法性。 */
+    private String resolvePeriod(String period) {
+        return (period == null || period.isBlank()) ? QuotaPeriod.of(clock.millis()) : period;
     }
 
     /**

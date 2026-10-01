@@ -13,7 +13,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 钉在这里 —— 与 {@code com.aihub.common.ratelimit.RateLimitScriptTest} 完全同一纪律。
  * 任何一侧「顺手改一下脚本/键布局/参数顺序」都会先在这里变红。
  *
- * <p><b>四条用例各自对应一个可证伪的最小变异</b>（CONVENTIONS §8「不可证伪的断言不算断言」）：
+ * <p><b>五条用例各自对应一个可证伪的最小变异</b>（CONVENTIONS §8「不可证伪的断言不算断言」）：
  * <ol>
  *   <li>{@link #periodIsYyyymmInUtc()}：周期按 **UTC** 折算成 {@code YYYYMM}。把折算换成 JVM 默认时区
  *       （本机 Asia/Shanghai）即红 —— 月末最后一秒会落到下个月。</li>
@@ -24,6 +24,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *   <li>{@link #assertWithinRangeAllowsTwoPow53AndRejectsAnythingAbove()}（F4）：ARGV 走 Lua 的 double，
  *       超过 {@code 2^53} 会丢整数精度，因此上界**只在这里定义一次**；把 {@code >} 改成 {@code >=}
  *       即红（{@code 2^53} 恰好被误拒）。</li>
+ *   <li>{@link #theLuaScriptEnforcesTheRequestDimensionWhenItsLimitIsPositive()}（I-1）：请求维的
+ *       **强制判定**必须逐字在脚本里。把 {@code (requestUsed + 1) > requestLimit} 改成永不成立即红 ——
+ *       这是「请求维强制分支零覆盖」的**不依赖 Docker** 的那一层哨兵（行为层证据在集成类里）。</li>
  * </ol>
  *
  * <p>本类**不碰 Redis、不碰数据库**：它只是纯函数契约，因此不需要容器上下文。
@@ -52,6 +55,23 @@ class QuotaContractTest {
 
         // HSET（不是 HINCRBY）：Lua 先 HMGET 读、脚本内自算、再 HSET 写回。
         assertThat(QuotaScript.SCRIPT).contains("HMGET").contains("HSET").contains("PEXPIRE");
+    }
+
+    /**
+     * 请求维的**强制判定**必须逐字在脚本里（覆盖缺口 I-1）：{@code requestLimit > 0} 时，
+     * {@code (requestUsed + 1) > requestLimit} 才拒绝 —— 且被拒的那次**不写回**已用量。
+     *
+     * <p>判别力：把该条件改成永不成立（如 {@code > requestLimit + 1000000}，评审 V-7 的形状）即红。
+     * 这是**不依赖 Docker** 的一层哨兵：脚本一漂移就立刻失败，不必等到真 Redis 的集成用例。
+     * 行为层证据见 {@code com.aihub.admin.quota.QuotaPreDeductionIntegrationTest#
+     * aPositiveRequestLimitIsEnforcedOnTheRequestDimension}。
+     */
+    @Test
+    void theLuaScriptEnforcesTheRequestDimensionWhenItsLimitIsPositive() {
+        assertThat(QuotaScript.SCRIPT)
+                .as("请求维的强制判定必须逐字存在：requestLimit > 0 且 (requestUsed + 1) > requestLimit")
+                .contains("if requestLimit > 0 and (requestUsed + 1) > requestLimit then")
+                .contains("requestUsed = requestUsed + 1");
     }
 
     @Test

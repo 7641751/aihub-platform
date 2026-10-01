@@ -76,30 +76,38 @@ public class QuotaAdminService {
     /**
      * 取该 {@code (tenantId, period)} 的配额行；**不存在则惰性物化一行零额度行**（见类注释）。
      *
+     * <p><b>并发首建是幂等的（2026-10-01 定稿的做法）</b>：本方法**刻意不带 {@code @Transactional}** ——
+     * 它没有跨语句不变量，而「读 → 原子插或忽略 → 再读」三步各自成事务，才能同时满足两件事：
+     * ① 并发首建**不经过异常路径**（{@code uk_quota_tenant_period} 由
+     * {@link com.aihub.dao.mapper.QuotaMapper#insertZeroRowIfAbsent} 的
+     * {@code ON DUPLICATE KEY UPDATE id = id} 吸收，不再有 {@code DuplicateKeyException} ⇒ 不再 500）；
+     * ② 第二次读是**新事务的新一致性读视图**，因此能看见并发对手已提交的那一行
+     * （若把三步塞进同一个 REPEATABLE READ 事务里，视图在第一次 {@code SELECT} 返回 null 时就固定了，
+     * 重读仍是 null）。
+     * 早先「catch {@code DuplicateKeyException} + {@code SELECT … FOR UPDATE}「重读」的写法**在并发下死锁**
+     * （8 线程实测 {@code Deadlock found when trying to get lock}），已弃用；见
+     * {@code QuotaMapper#insertZeroRowIfAbsent} 的注释。
+     *
      * @throws BizException {@code period} 不是合法的 UTC {@code YYYYMM}（{@code INVALID_PARAM}）
      */
-    @Transactional
     public QuotaSummary getOrCreate(long tenantId, String period) {
         requirePeriod(period);
         QuotaEntity existing = find(tenantId, period);
         if (existing != null) {
             return summary(existing);
         }
-        QuotaEntity row = new QuotaEntity();
-        row.setTenantId(tenantId);
-        row.setPeriod(period);
-        // 零额度 = 不限（D15）：与「没有行」行为等价，升级是惰性的。
-        row.setTokenLimit(0L);
-        row.setTokenUsed(0L);
-        row.setRequestLimit(0L);
-        row.setRequestUsed(0L);
-        row.setVersion(0L);
         // 显式 UTC 墙上时间（不用库默认值、不用 Instant）：CONVENTIONS §7。
         LocalDateTime now = LocalDateTime.ofInstant(clock.instant(), ZoneOffset.UTC);
-        row.setCreatedAt(now);
-        row.setUpdatedAt(now);
-        quotaMapper.insert(row);
-        return summary(row);
+        // 零额度 = 不限（D15）：与「没有行」行为等价，升级是惰性的。
+        quotaMapper.insertZeroRowIfAbsent(tenantId, period, now);
+        QuotaEntity created = find(tenantId, period);
+        if (created == null) {
+            // 理论上不可达：insertZeroRowIfAbsent 之后必然存在一行（本事务刚写或并发已提交。
+            // 后者要求本次「再读」是新视图 —— 这正是本方法不带 @Transactional 的原因）。宁可响亮失败。
+            throw new IllegalStateException("quota row vanished after an atomic insert-if-absent: "
+                    + tenantId + "/" + period);
+        }
+        return summary(created);
     }
 
     /**

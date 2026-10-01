@@ -22,8 +22,10 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutionException;
@@ -77,6 +79,9 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
 
     /** 有界等待上限：脚本/线程挂死时 30 秒内带原因变红，绝不让用例永不返回。 */
     private static final long WAIT_SECONDS = 30L;
+
+    /** 并发首建用例（I-3）的线程数：≥8 才能稳定地把「读或建」的并发交错暴露出来。 */
+    private static final int FIRST_CREATE_THREADS = 8;
 
     @Autowired
     private StringRedisTemplate redis;
@@ -149,6 +154,37 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
         assertThat(denied.remainingTokens()).isEqualTo(50L);
         assertThat(reserve(tenant, period, 50L, 300L).allowed()).as("恰好用满仍然允许").isTrue();
         assertThat(reserve(tenant, period, 1L, 300L).allowed()).as("再要 1 个就超了").isFalse();
+    }
+
+    /**
+     * **请求维的强制分支**（覆盖缺口 I-1）：{@code tokenLimit = 0}（token 维不限）而 {@code requestLimit = 3}
+     * ⇒ 只考察请求维。同一独立租户连续预扣 4 次（每次估 1 token）：前 3 次放行且剩余请求数递减 2/1/0，
+     * **第 4 次必须被拒绝**。
+     *
+     * <p>判别力：把 Lua 的 {@code (requestUsed + 1) > requestLimit} 改成**永不成立**
+     * （例如 {@code > requestLimit + 1000000}，即评审 V-7 的形状）⇒ 第 4 次也被放行、剩余请求数不再是 0，
+     * 本用例精确变红。契约层的同款哨兵见 {@code QuotaContractTest#theLuaScriptEnforcesTheRequestDimensionWhenItsLimitIsPositive}。
+     */
+    @Test
+    void aPositiveRequestLimitIsEnforcedOnTheRequestDimension() {
+        long tenant = 900_107L;
+        String period = QuotaPeriod.of(Instant.now().toEpochMilli());
+
+        QuotaDecision first = reserve(tenant, period, 1L, 0L, 3L);
+        assertThat(first.allowed()).as("第 1 次预扣：requestUsed 0 → 1，不超过 3 ⇒ 放行").isTrue();
+        assertThat(first.remainingRequests()).as("剩余请求数 = 3 − 1").isEqualTo(2L);
+
+        QuotaDecision second = reserve(tenant, period, 1L, 0L, 3L);
+        assertThat(second.allowed()).as("第 2 次：1 → 2，不超过 3 ⇒ 放行").isTrue();
+        assertThat(second.remainingRequests()).as("剩余请求数 = 3 − 2").isEqualTo(1L);
+
+        QuotaDecision third = reserve(tenant, period, 1L, 0L, 3L);
+        assertThat(third.allowed()).as("第 3 次：2 → 3，恰好用满 ⇒ 放行").isTrue();
+        assertThat(third.remainingRequests()).as("剩余请求数 = 3 − 3").isEqualTo(0L);
+
+        QuotaDecision fourth = reserve(tenant, period, 1L, 0L, 3L);
+        assertThat(fourth.allowed()).as("第 4 次：requestUsed 3 + 1 > 3 ⇒ **强制**拒绝（I-1 的覆盖缺口）").isFalse();
+        assertThat(fourth.remainingRequests()).as("被拒时剩余请求数仍为 0").isEqualTo(0L);
     }
 
     /** 真 Redis 的返回值确实能被 {@link QuotaScript#parse} 折成契约里的三元素判定。 */
@@ -238,6 +274,51 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
                 .extracting(ex -> ((BizException) ex).errorCode()).isEqualTo(ErrorCode.INVALID_PARAM);
     }
 
+    // ------------------------------------------------------------------ 控制面：并发首建（I-3 生产缺陷）
+
+    /**
+     * **并发首建的幂等性**（生产缺陷 I-3）：{@value #FIRST_CREATE_THREADS} 个线程在 {@link CyclicBarrier}
+     * 上同时首次 {@link QuotaAdminService#getOrCreate} 同一个 {@code (tenantId, period)} —— 唯一的赢家
+     * insert，其余都撞 {@code uk_quota_tenant_period}（{@code DuplicateKeyException}）。修复前那些会把
+     * **读路径**上的并发交错变成 500；修复后**全部线程拿到同一行（同一 id）且不抛**。
+     *
+     * <p>判别力：把 {@code getOrCreate} 的 {@code catch (DuplicateKeyException)} 兜底去掉 ⇒ 输家线程
+     * 直接抛，{@link #await(Future)} 把执行异常折成 {@code AssertionError}，本用例立刻红。
+     *
+     * <p>所有线程在**事务之外**过栅栏（{@link #awaitBarrier}），因此不会有 8 个连接同时被占用等待；
+     * 等待一律有界（{@code getOrCreate} 的返回用 {@link #await(Future)}）。
+     */
+    @Test
+    void concurrentFirstCreatesAreIdempotentAndNeverThrow() throws Exception {
+        long tenant = 900_108L;
+        String period = QuotaPeriod.of(Instant.now().toEpochMilli());
+
+        CyclicBarrier allAtOnce = new CyclicBarrier(FIRST_CREATE_THREADS);
+        Set<Long> ids = ConcurrentHashMap.newKeySet();
+        ExecutorService pool = Executors.newFixedThreadPool(FIRST_CREATE_THREADS);
+        try {
+            List<Future<QuotaAdminService.QuotaSummary>> futures = new ArrayList<>();
+            for (int i = 0; i < FIRST_CREATE_THREADS; i++) {
+                futures.add(pool.submit(() -> {
+                    awaitBarrier(allAtOnce);
+                    return quotaAdminService.getOrCreate(tenant, period);
+                }));
+            }
+            for (Future<QuotaAdminService.QuotaSummary> future : futures) {
+                ids.add(await(future).id());
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertThat(ids).as("并发首建必须幂等：所有线程必须拿到**同一行**的 id").hasSize(1);
+        assertThat(findRow(tenant, period)).as("并发首建之后必须存在那一行").isNotNull();
+        assertThat(quotaMapper.selectCount(new LambdaQueryWrapper<QuotaEntity>()
+                .eq(QuotaEntity::getTenantId, tenant)
+                .eq(QuotaEntity::getPeriod, period)))
+                .as("并发首建绝不许留下重复行：同一 (tenantId, period) 恰好一行").isEqualTo(1L);
+    }
+
     // ------------------------------------------------------------------ 内部
 
     /** 一个「在同一快照版本上做更新」的尝试：成功返回 {@code true}，乐观锁冲突返回 {@code false}。 */
@@ -270,6 +351,18 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
         }
     }
 
+    /** 有界等待所有并发首建线程到齐（等不到、被中断都带原因变红，绝不死等）。 */
+    private static void awaitBarrier(CyclicBarrier barrier) {
+        try {
+            barrier.await(WAIT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("等待并发首建线程时被中断", e);
+        } catch (BrokenBarrierException | TimeoutException e) {
+            throw new IllegalStateException("并发首建线程没有在 " + WAIT_SECONDS + " 秒内到齐", e);
+        }
+    }
+
     /** 有界等待：等不到、抛异常、被中断都带原因变红，**绝不**裸 {@code get()}。 */
     private static <T> T await(Future<T> future) {
         try {
@@ -295,7 +388,16 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
      * 调用用的桶键逐字一致（避免跨月边界上的偶然不一致）。
      */
     private QuotaDecision reserve(long tenantId, String period, long estimatedTokens, long tokenLimit) {
-        return QuotaScript.parse(executeScript(tenantId, period, estimatedTokens, tokenLimit, 0L));
+        return reserve(tenantId, period, estimatedTokens, tokenLimit, 0L);
+    }
+
+    /**
+     * 一次预扣调用（显式给出 {@code requestLimit}；{@code 0} ⇒ 请求维不限）。
+     * {@code tokenLimit = 0} 时 token 维不限，因此用它可以把请求维**单独**隔离出来考察。
+     */
+    private QuotaDecision reserve(long tenantId, String period, long estimatedTokens, long tokenLimit,
+                                  long requestLimit) {
+        return QuotaScript.parse(executeScript(tenantId, period, estimatedTokens, tokenLimit, requestLimit));
     }
 
     private List<?> executeScript(long tenantId, String period, long estimatedTokens, long tokenLimit,

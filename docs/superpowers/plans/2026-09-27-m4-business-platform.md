@@ -1760,6 +1760,12 @@ git commit -m "feat(console): channel probe, request-log paging and daily billin
 - Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/QuotaController.java`
 - Test: `aihub-admin/aihub-common/src/test/java/com/aihub/common/quota/QuotaContractTest.java`
 - Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/quota/QuotaPreDeductionIntegrationTest.java`
+- Test（2026-10-01 修复轮补，**缺路径**缺陷类）：`aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/QuotaAdminIntegrationTest.java`
+  —— `QuotaController` 的 HTTP 契约（R2/R3.2 租户语义、400、VIEWER 403、审计）。**放在 `console` 包、
+  只声明 `aihub.console.secret`（值引用 `ConsoleLoginIntegrationTest.SECRET`）、不加 `@Import`** ⇒ 与既有集成测试共用上下文，**总数仍是 7**。
+  ⚠️ **乐观锁冲突经 HTTP 折成 400 这一项被移除并登记为残余**：确定性构造它需要轮询 `information_schema.innodb_trx`，
+  而 **Testcontainers 的 MySQL 用户没有 `PROCESS` 权限**（`Access denied`）；服务层行为与 `INVALID_PARAM`→400 的映射分别有覆盖，
+  未覆盖的只剩两者组合，属低风险残余（详见 `QuotaAdminIntegrationTest` 里的注释与 `.hb2-logs/T12F-C1-integration.log`）。
 
 **Interfaces:**
 - Consumes: `RateLimitScript` 的既有纪律（脚本 + 键布局 + ARGV 顺序只有一份实现）；`StringRedisTemplate`
@@ -1783,7 +1789,7 @@ git commit -m "feat(console): channel probe, request-log paging and daily billin
      需要注册 `MybatisPlusInterceptor` + `OptimisticLockerInnerInterceptor` —— 而 **Task 11 已经定死"本仓库不注册 `MybatisPlusInterceptor`"**
      （分页走显式 `LIMIT/OFFSET`）。⇒ **手写**：`UPDATE quota SET token_limit=?, request_limit=?, version=version+1 WHERE tenant_id=? AND period=? AND version=?`，
      **受影响行数为 0 ⇒ 并发冲突**，在该情形下抛 `BizException`（**不许静默覆盖**），并且**要有一条用例钉住它**（两个并发 `update` 各自基于同一版本 ⇒ 恰好一个成功）。
-  4. **`QuotaEntity` 的字段必须与 V1 的 9 列逐字对应**（`V1__init_schema.sql:77-90`）：`id` / `tenantId` / `period`(VARCHAR(8)) /
+  4. **`QuotaEntity` 的字段必须与 V1 的 10 列逐字对应**（`V1__init_schema.sql:77-90`；2026-10-01 订正：这里原写"9 列"，与紧随其后的 10 个字段自相矛盾）：`id` / `tenantId` / `period`(VARCHAR(8)) /
      `tokenLimit` / **`tokenUsed`** / `requestLimit` / **`requestUsed`** / `version` / `createdAt` / `updatedAt`
      （`uk_quota_tenant_period(tenant_id, period)`；`token_used`/`request_used` 控制面**不写**，但实体要能读出来）。
      `createdAt`/`updatedAt` 与其他实体同纪律（§7：`LocalDateTime` + 显式 UTC）。
@@ -1922,6 +1928,15 @@ git add aihub-admin/aihub-common/src/main/java/com/aihub/common/quota/QuotaScrip
         aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/QuotaController.java \
         aihub-admin/aihub-web/src/test/java/com/aihub/admin/quota/QuotaPreDeductionIntegrationTest.java
 git commit -m "feat(quota): add the atomic pre-deduction contract and the quota admin API"
+
+# 2026-10-01 修复轮（评审 3 Important + 2 Minor；控制器执行）——各路径已在上面列出，此处只记提交：
+git add aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/QuotaMapper.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/QuotaAdminService.java \
+        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/QuotaController.java \
+        aihub-admin/aihub-common/src/test/java/com/aihub/common/quota/QuotaContractTest.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/quota/QuotaPreDeductionIntegrationTest.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/QuotaAdminIntegrationTest.java
+git commit -m "test(quota): cover the request dimension, the HTTP contract and the concurrent first-create race"
 ```
 
 **验收判据：** 并发预扣**不超发**（真 Redis、16 线程、**有界等待**）；`0` 限额 = 不限；键布局与 ARGV 顺序被固定向量钉住；TTL 覆盖到「下个周期开始 + 1 天」；乐观锁冲突**报错而非静默覆盖**；**套件 Spring 上下文仍是 7**。
