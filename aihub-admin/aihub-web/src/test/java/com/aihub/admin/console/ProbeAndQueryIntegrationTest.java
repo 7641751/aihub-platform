@@ -35,7 +35,9 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -99,8 +101,22 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
     private static final String REQ_PREFIX = "m4-q-req-";
     private static final String AUDIT_TARGET_PREFIX = "m4-q-aud-";
 
-    /** 一个**只可能**是本类夹具的值：任何响应里出现它就说明视图把密钥材料带出来了。 */
-    private static final String PLAINTEXT_SENTINEL = "sk-query-plaintext-synthetic";
+    /**
+     * {@code RequestLogQueryService.RequestLogView} 的**期望 JSON 投影**（字段名集合，逐字）。
+     *
+     * <p>它是「响应里没有密钥材料字段」这条性质的**可证伪**形式：返回记录的字段名集合必须与它逐字相等；
+     * 给视图多加一个字段（例如 {@code keyHash} / {@code apiKeyCipher}），返回 JSON 就多一个名字，断言即红。
+     * 之所以不用 {@code doesNotContain("...")}：那类「某个字符串不可能出现」的断言**结构上不可证伪**
+     * （理由见 {@link #logsResponseCarriesNoKeyMaterial()} 的 javadoc，评审 I-3）。
+     */
+    private static final Set<String> REQUEST_LOG_VIEW_FIELDS = Set.of(
+            "id", "requestId", "tenantId", "apiKeyId", "channelId", "model", "promptTokens",
+            "completionTokens", "totalTokens", "latencyMs", "ttftMs", "status", "errorCode", "createdAt");
+
+    /** {@code AuditQueryService.AuditLogView} 的**期望 JSON 投影**（字段名集合，逐字）。理由同上。 */
+    private static final Set<String> AUDIT_LOG_VIEW_FIELDS = Set.of(
+            "id", "tenantId", "actorType", "actor", "action", "targetType", "targetId", "detail",
+            "requestId", "createdAt");
 
     private static final String MODEL = "m4-q-model";
     private static final String ACTIVE = "ACTIVE";
@@ -274,22 +290,45 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
 
     // ---------------------------------------------------------------- 4) /api/logs 视图不含密钥材料
 
-    /** 视图里**不含**本次夹具的明文、{@code key_hash} 或渠道密文；且响应**非空**（否则「不含」是空断言）。 */
+    /**
+     * 日志视图的投影必须**恰好**是这些非敏感字段 —— 既不含密钥材料字段，也不许**多出**任何字段。
+     *
+     * <p><b>为什么是「JSON 字段集等价断言」而不是 {@code doesNotContain(keyHash)}</b>（评审 I-3）：
+     * {@code request_log} 表根本没有 {@code key_hash} / {@code api_key_cipher} 列，{@code RequestLogView}
+     * 也没有这两个字段，且那些哨兵串**从未被写进任何表** —— 所以任何生产变异都不可能让一条「响应里不
+     * 出现 X」的断言变红（**结构上不可证伪**）。真正要防的是「有人给视图加了字段」（例如给
+     * {@code RequestLogView} 补一个 {@code keyHash}/{@code apiKeyCipher}）。把每条返回记录的 **JSON
+     * 字段名集合**与**期望投影**（{@link #REQUEST_LOG_VIEW_FIELDS}）逐字比对，才让「加字段」可证伪 ——
+     * 加一个字段，JSON 就多一个名字，本断言立即变红。
+     */
     @Test
     void logsResponseCarriesNoKeyMaterial() throws Exception {
         long tenantId = createTenant();
-        String keyHash = randomKeyHash();
-        long apiKeyId = insertApiKey(tenantId, uniqueKeyName(), keyHash).getId();
+        long apiKeyId = insertApiKey(tenantId, uniqueKeyName(), randomKeyHash()).getId();
         String cipher = CIPHER_PREFIX + UUID.randomUUID().toString().substring(0, 8);
         long channelId = insertChannel(cipher).getId();
-        insertRequestLog(tenantId, uniqueRequestId(), apiKeyId, channelId, MID);
+        long rowId = insertRequestLog(tenantId, uniqueRequestId(), apiKeyId, channelId, MID).getId();
 
         ResponseEntity<String> res = get("/api/logs?tenantId=" + tenantId + "&" + WINDOW + "&page=0&size=50");
         assertThat(res.getStatusCode()).as("查询必须 200（响应体=%s）", res.getBody()).isEqualTo(HttpStatus.OK);
-        assertThat(body(res).path("data").path("records").size())
-                .as("响应里必须能找到本次夹具那一行（否则下面的「不含」是无意义的空断言）").isEqualTo(1);
-        assertThat(res.getBody()).as("日志视图绝不许出现 key_hash、渠道密文或明文")
-                .doesNotContain(keyHash).doesNotContain(cipher).doesNotContain(PLAINTEXT_SENTINEL);
+        JsonNode records = body(res).path("data").path("records");
+        // 正向对照：投影必须是**活的** —— 本次夹具那一行必须真的被查回来，否则字段集断言是在空对象上比对。
+        assertThat(records.size()).as("响应必须包含本次夹具那一行（否则下面的字段集断言是空断言）").isEqualTo(1);
+
+        JsonNode row = records.get(0);
+        assertThat(fieldNames(row)).as("RequestLogView 的 JSON 字段集必须逐字等于期望投影（多一个字段，例如"
+                        + "有人给视图补 keyHash/apiKeyCipher，即失败；响应体=%s）", res.getBody())
+                .containsExactlyInAnyOrderElementsOf(REQUEST_LOG_VIEW_FIELDS);
+        // 夹具值真的通了：证明这些字段不是「恰好全是 null」的摆设。
+        assertThat(row.path("id").asLong()).isEqualTo(rowId);
+        assertThat(row.path("apiKeyId").asLong()).isEqualTo(apiKeyId);
+        assertThat(row.path("channelId").asLong()).isEqualTo(channelId);
+
+        // 记录性说明（**故意不写成断言**）：request_log 表没有 key_hash / api_key_cipher 列，视图也没有这
+        // 两个字段，keyHash / 渠道密文 / 明文哨兵在结构上**不可能**出现在响应里。对「不可能出现的字符串」
+        // 做 doesNotContain 是**无牙断言**（无论生产怎么改都不会红，评审 I-3），其可证伪形式就是上面的字段集
+        // 等价断言 —— 因此原 doesNotContain(keyHash).doesNotContain(cipher).doesNotContain(PLAINTEXT)
+        // 已被删除，而不是留着充数。
     }
 
     // ---------------------------------------------------------------- 5) /api/audit 强制 tenantId + 时间范围
@@ -342,32 +381,60 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
 
     // ---------------------------------------------------------------- 7) /api/audit 视图不含密钥材料
 
-    /** 审计视图不含本次夹具的明文、{@code key_hash} 或渠道密文；响应非空。 */
+    /**
+     * 审计视图的投影必须**恰好**是这些非敏感字段 —— 与 {@link #logsResponseCarriesNoKeyMaterial()} 同款
+     * 「JSON 字段集等价断言」（为什么不用 {@code doesNotContain(...)}：见该方法的 javadoc，评审 I-3）。
+     *
+     * <p><b>正向对照</b>：给审计行的 {@code detail} 放一条**非敏感**哨兵，并断言响应**确实回显**它 ——
+     * 证明投影是**活的**、{@code detail} 真的通了，而不是「恰好什么都没读出来」。
+     */
     @Test
     void auditResponseCarriesNoKeyMaterial() throws Exception {
         long tenantId = createTenant();
-        String keyHash = randomKeyHash();
-        insertApiKey(tenantId, uniqueKeyName(), keyHash);
-        insertAuditLog(tenantId, MID);
+        insertApiKey(tenantId, uniqueKeyName(), randomKeyHash());
+        String detailSentinel = "audit-detail-" + UUID.randomUUID().toString().substring(0, 8);
+        insertAuditLog(tenantId, MID, "{\"note\":\"" + detailSentinel + "\"}");
 
         ResponseEntity<String> res = get("/api/audit?tenantId=" + tenantId + "&" + WINDOW + "&page=0&size=50");
         assertThat(res.getStatusCode()).as("查询必须 200（响应体=%s）", res.getBody()).isEqualTo(HttpStatus.OK);
-        assertThat(body(res).path("data").path("records").size())
-                .as("响应里必须能找到本次夹具那一行（否则下面的「不含」是无意义的空断言）").isEqualTo(1);
-        assertThat(res.getBody()).as("审计视图绝不许出现 key_hash 或明文")
-                .doesNotContain(keyHash).doesNotContain(PLAINTEXT_SENTINEL);
+        JsonNode records = body(res).path("data").path("records");
+        assertThat(records.size()).as("响应必须包含本次夹具那一行（否则字段集断言与回显对照都是空断言）")
+                .isEqualTo(1);
+
+        JsonNode row = records.get(0);
+        assertThat(fieldNames(row)).as("AuditLogView 的 JSON 字段集必须逐字等于期望投影（多一个字段，例如"
+                        + "有人给视图补 keyHash/apiKeyCipher，即失败；响应体=%s）", res.getBody())
+                .containsExactlyInAnyOrderElementsOf(AUDIT_LOG_VIEW_FIELDS);
+        // 正向对照：detail 必须**原样回显**那条非敏感哨兵（证明投影是活的、detail 真的通了）。
+        assertThat(row.path("detail").asText()).as("审计 detail 必须原样回显哨兵（投影是活的；响应体=%s）",
+                res.getBody()).contains(detailSentinel);
+        assertThat(row.path("targetId").asText()).startsWith(AUDIT_TARGET_PREFIX);
+
+        // 记录性说明（**故意不写成断言**）：audit_log 表没有 key_hash 列、AuditLogView 也没有该字段，那些
+        // 哨兵串从未入库 ⇒ 对「不可能出现的字符串」做 doesNotContain 不可证伪（评审 I-3）。可证伪的形式即
+        // 上面的字段集等价断言 —— 原 doesNotContain(keyHash).doesNotContain(PLAINTEXT) 因此被删除。
     }
 
     // ---------------------------------------------------------------- 8) /api/billing/daily 强制 tenantId + 范围
 
     /**
      * R3.1 + 控制器裁定 2：{@code /api/billing/daily} 必须带 {@code tenantId}（缺省 400），并按
-     * {@code stat_date} 范围返回该租户的行。判别力由变异体 {@code M3}（缺省 tenantId 回落默认租户）提供。
+     * {@code stat_date} 范围返回该租户的行。「缺 tenantId ⇒ 400」的判别力由变异体 {@code M3}（缺省
+     * tenantId 回落默认租户）提供；{@code stat_date} 窗口过滤的判别力由本用例的夹具形状提供（见下）。
+     *
+     * <p><b>{@code stat_date} 窗口过滤必须可判别（评审 I-1 / M-h）</b>：此前只插**1 行且在窗口内**，
+     * 于是删掉整段 {@code .ge/.le(statDate)} 后仍全绿（有无窗口都返回那一行）—— 零判别力。现在同一租户
+     * 插**3 行**：{@code 2026-09-15} 在窗口内（窗口 ±10 分钟折成同一 UTC 自然日 09-15），{@code 2026-08-01}
+     * 早于、{@code 2026-12-31} 晚于窗口。删掉窗口过滤（或只删 {@code .ge}／只删 {@code .le} 其中一半）
+     * 都会让窗外行漏进响应，本用例精确变红。
      */
     @Test
     void billingDailyRequiresATenantAndReturnsFixtureRows() throws Exception {
         long tenantId = createTenant();
+        // 一行在窗口内、两行在窗口外（一早一晚，好让 .ge 与 .le 各自都有判别力）。
         insertBillingDaily(tenantId, LocalDate.of(2026, 9, 15));
+        insertBillingDaily(tenantId, LocalDate.of(2026, 8, 1));
+        insertBillingDaily(tenantId, LocalDate.of(2026, 12, 31));
 
         ResponseEntity<String> missingTenant = get("/api/billing/daily?" + WINDOW);
         assertThat(missingTenant.getStatusCode()).as("缺 tenantId 必须 400（响应体=%s）", missingTenant.getBody())
@@ -381,8 +448,13 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
         ResponseEntity<String> ok = get("/api/billing/daily?tenantId=" + tenantId + "&" + WINDOW);
         assertThat(ok.getStatusCode()).as("三者齐备必须 200（响应体=%s）", ok.getBody()).isEqualTo(HttpStatus.OK);
         JsonNode data = body(ok).path("data");
-        assertThat(data.size()).as("必须返回本次夹具的 1 条日账单行").isEqualTo(1);
-        assertThat(data.get(0).path("statDate").asText()).isEqualTo("2026-09-15");
+        // 判别力：删掉 stat_date 窗口过滤会返回全部 3 行；这里必须**恰好**只有窗口内的那 1 行。
+        List<String> statDates = new ArrayList<>();
+        data.forEach(node -> statDates.add(node.path("statDate").asText()));
+        assertThat(data.size()).as("必须恰好返回窗口内的 1 条日账单行（删掉 stat_date 窗口过滤会返回 3 行；"
+                + "响应体=%s）", ok.getBody()).isEqualTo(1);
+        assertThat(statDates).as("返回的 stat_date 必须**恰好**只有窗口内那一天 —— 窗外的 2026-08-01 / "
+                + "2026-12-31 一个都不许出现（响应体=%s）", ok.getBody()).containsExactly("2026-09-15");
         assertThat(data.get(0).path("requests").asLong()).isEqualTo(3L);
         assertThat(data.get(0).path("tokens").asLong()).isEqualTo(30L);
 
@@ -473,6 +545,14 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
     }
 
     private AuditLogEntity insertAuditLog(long tenantId, LocalDateTime createdAt) {
+        return insertAuditLog(tenantId, createdAt, "{\"status\":\"ACTIVE\"}");
+    }
+
+    /**
+     * 可变 {@code detail} 的版本：给「投影是活的」这条**正向对照**用 —— 放一条非敏感哨兵进 {@code detail}
+     * 并断言响应确实回显它（证明 {@code AuditLogView.detail} 真的通了，而不是「恰好什么都没读出来」）。
+     */
+    private AuditLogEntity insertAuditLog(long tenantId, LocalDateTime createdAt, String detail) {
         AuditLogEntity entity = new AuditLogEntity();
         entity.setTenantId(tenantId);
         entity.setActorType(USER);
@@ -480,7 +560,7 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
         entity.setAction("TENANT_UPDATE");
         entity.setTargetType(TENANT_TARGET_TYPE);
         entity.setTargetId(AUDIT_TARGET_PREFIX + UUID.randomUUID().toString().substring(0, 8));
-        entity.setDetail("{\"status\":\"ACTIVE\"}");
+        entity.setDetail(detail);
         entity.setCreatedAt(createdAt);
         auditLogMapper.insert(entity);
         assertThat(entity.getId()).as("MyBatis-Plus 必须把自增主键回填进实体").isNotNull();
@@ -527,5 +607,12 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
 
     private static JsonNode body(ResponseEntity<String> res) throws Exception {
         return MAPPER.readTree(res.getBody());
+    }
+
+    /** 取一个 JSON 对象的字段名（用于「投影字段集逐字等价」断言，让「给视图加字段」可证伪）。 */
+    private static List<String> fieldNames(JsonNode node) {
+        List<String> names = new ArrayList<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return names;
     }
 }

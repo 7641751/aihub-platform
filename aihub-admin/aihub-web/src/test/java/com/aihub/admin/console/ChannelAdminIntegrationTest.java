@@ -626,7 +626,13 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
 
     /**
      * 失败路径：上游**不回包** ⇒ 有界超时后 {@code reachable=false}，整个探测必须**有界**（超时上限
-     * 3 秒）。没有上界时这条会拿渠道的 {@code timeout_ms}（60s）去等，本用例的时延断言会红。
+     * = {@code ChannelProbeService.PROBE_TIMEOUT_CAP} = 3 秒）。没有上界时这条会拿渠道的
+     * {@code timeout_ms}（60s）去等，本用例的时延断言会红。
+     *
+     * <p><b>阈值必须与 3 秒判据一致（评审 I-2）</b>：此前写的是 {@code isLessThan(8_000L)} —— 判据文字
+     * 宣称「超时上限 3 秒」、阈值却给到 8 秒，断言比判据松。把生产上限改成 5 秒后本用例照样绿（10 秒才
+     * 红），即 3 秒上界**没有判别力**。现在收紧到 {@code isLessThan(3_500L)}（给容器/CI 抖动留 500ms
+     * 余量）：5 秒上限会精确变红，3 秒上限回绿。
      */
     @Test
     void probingAChannelWithAnUnresponsiveUpstreamIsBoundedAndUnreachable() throws Exception {
@@ -656,8 +662,9 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
                     res.getBody()).isEqualTo(HttpStatus.OK);
             assertThat(body(res).path("data").path("reachable").asBoolean())
                     .as("上游不回包 ⇒ 有界超时后 reachable=false").isFalse();
-            assertThat(elapsedMs).as("探测必须有界（超时上限 3 秒），不许无限等；实测 %d ms", elapsedMs)
-                    .isLessThan(8_000L);
+            assertThat(elapsedMs).as("探测必须有界（超时上限 = ChannelProbeService.PROBE_TIMEOUT_CAP = 3 秒），"
+                    + "不许无限等；实测 %d ms", elapsedMs)
+                    .isLessThan(3_500L);
         } finally {
             blackhole.close();
             for (Socket socket : held) {
