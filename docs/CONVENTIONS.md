@@ -396,7 +396,7 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
      因此**将来第三个同类站点没有任何「顺带被跑到」的覆盖** —— 以前至少会在非 UTC 的开发者机器上偶然
      暴露（虽然没有任何断言），现在连那个偶然性也没有了。**新增时间列的人必须显式决定**：把它加进
      `TimeBasisIsConnectionFlavourIndependentTest`，否则「连接时区不是 UTC 时的行为」无人看着。
-     **（数字订正 2026-09-30：这里原写"19 个"，复测为 **21** —— Task 8 与 Task 9 各新增一个集成类。产物 = 全仓 `Select-String 'extends AbstractIntegrationTest'` 命中 **21** 个文件，全部在 `aihub-web`；`TimeBasisIsConnectionFlavourIndependentTest` **不**继承 `AbstractIntegrationTest`（它是独立的 `@SpringBootTest` 上下文），因此不计入这 21。）**
+     **（数字订正 2026-09-30：这里原写"19 个"，复测为 **21** —— Task 8 与 Task 9 各新增一个集成类。产物 = 全仓 `Select-String 'extends AbstractIntegrationTest'` 命中 **21** 个文件，全部在 `aihub-web`；`TimeBasisIsConnectionFlavourIndependentTest` **不**继承 `AbstractIntegrationTest`（它是独立的 `@SpringBootTest` 上下文），因此不计入这 21。）**（二次订正 2026-10-01：按路径去重再计数为 **23** —— Task 10 新增 `RouteAndRateLimitAdminIntegrationTest`、Task 11 **未**新增集成类（探测用例并进既有的 `ChannelAdminIntegrationTest`）。产物 = 全仓 `Select-String 'extends AbstractIntegrationTest'` 按路径去重。）**
   5. **已知代价（2026-09-30 登记）**：那个独立上下文给**每个全量套件 JVM 增加第二个完整 Spring 上下文**
      ——第二套 Tomcat、第二套 `@RabbitListener` 消费者、第二份 `@Scheduled` 任务，共享同一组容器。
      今天全量绿（`aihub-web` 173/0；**2026-09-30 复测订正为 `aihub-common` 61 / `aihub-web` 198（0F/0E/0S）**，产物 `.hb2-logs/W05-admin-full.log` 与 `.m4t9fix-logs/R05-admin-full.log`；同一轮实测 `Tomcat started on port` = **7** ⇒ Task 9 及其修复轮**没有**新增 Spring 上下文），两个上下文写的是同一张表，也没有观测到互相干扰；但代价是真实的
@@ -424,6 +424,26 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
   之前必须**重新测量**，测不了的就只能标成「继承、未复核」，**不许**当成事实复述。数字依赖 fixture 时，
   fixture（插了哪几行、用什么绑定）要跟数字写在一起。**这条与时间无关，适用于所有「实测值」「数量级」
   「N 倍」的表述。**
+- **不可证伪的断言不算断言**（2026-10-01，Task 11 独立评审的产物）：`assertThat(body).doesNotContain("sk-…")`
+  这类断言，若那个字符串**在任何实现下都不可能出现在响应里**（列不存在、投影里没有该字段、哨兵值从未入库），
+  那它对**任何**生产变异都不会变红 —— 它给出的只是"看起来很严"的错觉。纪律：**每条断言都要能回答
+  「哪个最小变异能让它红」**；答不出来就换成可证伪的形状（例如把"不含某字段"改成**响应 JSON 的字段集
+  逐字等价**，于是"给视图加一个字段"立刻成为最小反证），否则只能降级成注释里的记录性说明。
+  Task 11 实测：字段集断言在给 `RequestLogView` 加一个字段后精确变红，而原来的三条 `doesNotContain` 无任何变异能打红。
+  同理，**边界断言的阈值必须与判据文字一致** —— 判据写"超时上限 3 秒"、断言却写 `isLessThan(8_000L)`，
+  于是 5 秒的实现照样通过（Task 11 的 I-2 就是这么来的）。
+- **子代理会话被中止可能留下未还原的变异 ⇒ 控制器必须在任何非正常结束之后复查工作树**（2026-10-01 实测）：
+  一次窄口径复评的子代理跑到一半被中止（`code=10003`），它在 `aihub-admin/aihub-web/.../BillingController.java`
+  里留下的 `// MUTANT-R1-V1`（`stat_date` 的 `.ge/.le` 已删）**没有还原**；是下一次复评的开工探测才发现并修回的。
+  纪律：**任何子代理非正常结束之后**，继续之前必须先查四处 —— `git status --porcelain`、`git diff --stat`、
+  生产文件 SHA256（对比该轮记录过的 pristine 值）、`git grep -n MUTANT -- '*.java'`；四处都干净才继续。
+  这也是「变异前必须 `Copy-Item` 字节级备份、且备份写在被变异文件之外」的另一半理由：备份是唯一能证明还原正确的凭据。
+- **数字更新（2026-10-01，Task 11 收口；覆盖上面第 5、6 条的旧计数）**：Task 10/11 之后全量为
+  `aihub-common` **61** / `aihub-web` **229**（0F/0E/0S），`Tomcat started on port` = **7**
+  （产物：控制器 `.hb2-logs/C3-admin-full.log`、修复轮 `.m4t11fix-logs/G06-*.log`、评审 `.m4t11review-logs/V06-*.log`）。
+  **Task 11 没有新增 Spring 上下文**：探测用例放进既有的 `ChannelAdminIntegrationTest`（那里才有渠道主密钥），
+  查询用例只声明 `aihub.console.secret` 且不加 `@Import` ⇒ 与 `ConsoleLoginIntegrationTest` 共用上下文。
+  上面第 4 条的集成类计数在 2026-10-01 复测为 **23**（Task 11 **未**新增集成类：探测用例并进既有的 `ChannelAdminIntegrationTest`，查询用例并进既有的属性集）。
 
 ## 9. 提交约定
 
