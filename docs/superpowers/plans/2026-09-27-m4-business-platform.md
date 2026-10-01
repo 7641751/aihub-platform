@@ -1773,6 +1773,31 @@ git commit -m "feat(console): channel probe, request-log paging and daily billin
   - `QuotaScript.SCRIPT : String`、`QuotaScript.keys(long tenantId, String period) : List<String>`、`QuotaScript.args(long estimatedTokens, long tokenLimit, long requestLimit, long ttlMillis) : List<String>`、`QuotaScript.parse(List<?> raw) : QuotaDecision`
   - `QuotaAdminService.getOrCreate(long tenantId, String period)`、`QuotaAdminService.update(long tenantId, String period, long tokenLimit, long requestLimit)`（用 `quota.version` 做乐观锁）
 
+- **（2026-10-01 控制器补 —— 7 条"照字面执行会出错 / 与既有决定冲突"）**
+  1. **⚠️ TTL 用例的期望值写错了（差一个月）**：`:1789` 断言 `now + ttl == 2026-11-02T00:00:00Z`（`now = 2026-09-15`、`period = "202609"`），
+     而 Interfaces 的文字是「**下个周期开始 + 1 天**」= `2026-10-01` + 1 天 = **`2026-10-02T00:00:00Z`**。
+     ⇒ **以 `2026-10-02T00:00:00Z` 为准**（`11-02` 是笔误）；`ttlMillis` 的实现与断言都按这条写。**别为了让 11-02 成立去改实现语义。**
+  2. **⚠️ 断言与 Lua 正文不一致**：`:1796` 断言 `QuotaScript.SCRIPT` 含 **`HINCRBY`**，但 `:1873` 的 Lua 正文用的是 **`HSET`**
+     （先 `HMGET` 读、脚本内自算、再 `HSET` 写回）。⇒ **保留 Lua 的 `HSET`，把断言改成 `contains("HSET")`**（`HMGET`/`PEXPIRE` 两条不变）。
+  3. **⚠️ 乐观锁必须手写，不能依赖 `@Version`**：`quota.version` 的乐观锁若用 MyBatis-Plus 的 `@Version`，
+     需要注册 `MybatisPlusInterceptor` + `OptimisticLockerInnerInterceptor` —— 而 **Task 11 已经定死"本仓库不注册 `MybatisPlusInterceptor`"**
+     （分页走显式 `LIMIT/OFFSET`）。⇒ **手写**：`UPDATE quota SET token_limit=?, request_limit=?, version=version+1 WHERE tenant_id=? AND period=? AND version=?`，
+     **受影响行数为 0 ⇒ 并发冲突**，在该情形下抛 `BizException`（**不许静默覆盖**），并且**要有一条用例钉住它**（两个并发 `update` 各自基于同一版本 ⇒ 恰好一个成功）。
+  4. **`QuotaEntity` 的字段必须与 V1 的 9 列逐字对应**（`V1__init_schema.sql:77-90`）：`id` / `tenantId` / `period`(VARCHAR(8)) /
+     `tokenLimit` / **`tokenUsed`** / `requestLimit` / **`requestUsed`** / `version` / `createdAt` / `updatedAt`
+     （`uk_quota_tenant_period(tenant_id, period)`；`token_used`/`request_used` 控制面**不写**，但实体要能读出来）。
+     `createdAt`/`updatedAt` 与其他实体同纪律（§7：`LocalDateTime` + 显式 UTC）。
+  5. **⚠️ 集成测试必须复用默认上下文（套件仍是 7）**：`QuotaPreDeductionIntegrationTest` **不许声明 `@TestPropertySource`、不许 `@Import`**
+     —— 它只用 Redis，不需要任何合成密钥。全仓实测有 **15 个**继承 `AbstractIntegrationTest` 且**无属性集**的类
+     （`RedisTokenBucketIntegrationTest`/`RequestLogServiceTest`/`SchemaMigrationTest`…）⇒ 它**共用同一个默认上下文**，**不新增**。
+     跑完全量必须**实测** `Tomcat started on port` 次数（基线 **7**）。包名用 `com.aihub.admin.quota`（新包，无副作用）。
+  6. **并发用例必须是有界等待，不许裸 `get()`**：`:1826` 的 `futures.stream().map(TestSupport::get)` 里 `TestSupport` **未定义**；
+     且裸 `Future.get()` 在脚本挂死时会让用例**永远不返回**（Maven 直接超时，比红更糟）。⇒ 用具名的有界等待
+     （`get(30, SECONDS)` 或项目既有的 `TestSupport` 形状），**超时即带原因变红**。50 个任务 / 16 线程 / 每次估 100 / 限额 1000 ⇒ 恰好 **10** 次成功（Lua 原子性下是确定的）。
+     断言 `redis.opsForHash().get(bucketKey, "tok")` == `"1000"` 要求用 **`StringRedisTemplate`**（序列化器为 String）。
+  7. **`git add` 不许写目录**（本项目已两次踩过）：`:1886` 的 `aihub-common/.../common/quota/` **必须展开成 4 个显式文件路径**
+     （`QuotaScript.java`、`QuotaKeys.java`、`QuotaPeriod.java`、`QuotaDecision.java`）。
+
 - [ ] **Step 1: 写失败测试**
 
 ```java
@@ -1786,14 +1811,16 @@ void periodIsYyyymmInUtc() {
 void ttlReachesTheDayAfterTheNextPeriodStarts() {
     long now = Instant.parse("2026-09-15T00:00:00Z").toEpochMilli();
     long ttl = QuotaKeys.ttlMillis("202609", now);
-    assertThat(now + ttl).isEqualTo(Instant.parse("2026-11-02T00:00:00Z").toEpochMilli());
+    // 2026-10-01T00:00:00Z 是「下个周期开始」，+1 天 = 2026-10-02T00:00:00Z（2026-10-01 控制器订正：原写 11-02 是笔误）
+    assertThat(now + ttl).isEqualTo(Instant.parse("2026-10-02T00:00:00Z").toEpochMilli());
 }
 
 @Test
 void theLuaScriptUsesThePinnedKeyLayoutAndArgOrder() {
     assertThat(QuotaScript.keys(7L, "202609")).containsExactly("aihub:quota:7:202609");
     assertThat(QuotaScript.args(1_000L, 100_000L, 0L, 60_000L)).containsExactly("1000", "100000", "0", "60000");
-    assertThat(QuotaScript.SCRIPT).contains("HMGET").contains("HINCRBY").contains("PEXPIRE");
+    // HSET（不是 HINCRBY）：Lua 先 HMGET 读、脚本内自算、再 HSET 写回（2026-10-01 控制器订正）
+    assertThat(QuotaScript.SCRIPT).contains("HMGET").contains("HSET").contains("PEXPIRE");
 }
 ```
 
@@ -1883,7 +1910,11 @@ Run: `mvn -B -pl aihub-admin/aihub-common -am test "-Dtest=QuotaContractTest"` �
 Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=QuotaPreDeductionIntegrationTest"` → 全绿
 
 ```bash
-git add aihub-admin/aihub-common/src/main/java/com/aihub/common/quota/ \
+# 2026-10-01 控制器订正：原清单第一行是【目录】，本项目已两次禁止（逐个显式路径）
+git add aihub-admin/aihub-common/src/main/java/com/aihub/common/quota/QuotaScript.java \
+        aihub-admin/aihub-common/src/main/java/com/aihub/common/quota/QuotaKeys.java \
+        aihub-admin/aihub-common/src/main/java/com/aihub/common/quota/QuotaPeriod.java \
+        aihub-admin/aihub-common/src/main/java/com/aihub/common/quota/QuotaDecision.java \
         aihub-admin/aihub-common/src/test/java/com/aihub/common/quota/QuotaContractTest.java \
         aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/QuotaEntity.java \
         aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/QuotaMapper.java \
@@ -1893,7 +1924,7 @@ git add aihub-admin/aihub-common/src/main/java/com/aihub/common/quota/ \
 git commit -m "feat(quota): add the atomic pre-deduction contract and the quota admin API"
 ```
 
-**验收判据：** 并发预扣**不超发**（真 Redis、16 线程）；`0` 限额 = 不限；键布局与 ARGV 顺序被固定向量钉住；TTL 覆盖到「下个周期 + 1 天」。
+**验收判据：** 并发预扣**不超发**（真 Redis、16 线程、**有界等待**）；`0` 限额 = 不限；键布局与 ARGV 顺序被固定向量钉住；TTL 覆盖到「下个周期开始 + 1 天」；乐观锁冲突**报错而非静默覆盖**；**套件 Spring 上下文仍是 7**。
 **RED 证据：** 把 Lua 拆成「先 HMGET 再 HSET」两次往返（非原子）时 `concurrentPreDeductionsNeverOversellTheBudget` 会红且 `allowed > 10` —— 判别性极强。
 
 ---
