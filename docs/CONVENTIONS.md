@@ -438,6 +438,19 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
   纪律：**任何子代理非正常结束之后**，继续之前必须先查四处 —— `git status --porcelain`、`git diff --stat`、
   生产文件 SHA256（对比该轮记录过的 pristine 值）、`git grep -n MUTANT -- '*.java'`；四处都干净才继续。
   这也是「变异前必须 `Copy-Item` 字节级备份、且备份写在被变异文件之外」的另一半理由：备份是唯一能证明还原正确的凭据。
+- **并发「读或建」的正确写法（2026-10-01，Task 12 付费换来）**：`INSERT … ON DUPLICATE KEY UPDATE id = id`
+  （原子、**不抛异常**、无锁等待面）+ **外层刻意不加 `@Transactional`**（这样第二次读是**新的一致性读视图**，
+  能看见并发对手已提交的那一行）。反例（实测 8 线程稳定复现）：`catch DuplicateKeyException` 之后再用
+  `SELECT … FOR UPDATE` 重读 —— 会 `Deadlock found when trying to get lock`；而且**即便不死锁**，
+  REPEATABLE READ 下同一事务的普通重读**看不见**并发提交的那一行（一致性读视图在第一次 `SELECT` 返回 `null`
+  时就已经固定），于是会「插入 → 撞唯一键 → 重读仍是 null → 再插入」循环。
+- **测试容器里的 MySQL 用户没有 `PROCESS` 权限**（2026-10-01 实测）：`SELECT … FROM information_schema.innodb_trx`
+  / `SHOW PROCESSLIST` 一律 `Access denied; you need (at least one of) the PROCESS privilege(s)`。
+  ⇒ **不要**用它们做「某事务正在等行锁」的观测；如果找不到**无特权**的可观测量，就**不要伪造确定性**
+  （禁用「睡够时间」），把该用例**移除并登记为残余**，同时说明残余风险由哪两条既有覆盖兜住。
+- **PowerShell 5.1 会把无 BOM 的 `.ps1` 按 ANSI 码页读取**（2026-10-01 实测）：脚本里出现非 ASCII
+  （尤其中文注释）会让解析器直接报「表达式或语句中包含意外的标记」，且报错位置**指向别处**、极易误判。
+  ⇒ **工具脚本一律纯 ASCII**（`<workspace>/.superpowers/sdd/*.ps1` 本来都遵守这条，是控制器新写变异工装时踩的）。
 - **数字更新（2026-10-01，Task 11 收口；覆盖上面第 5、6 条的旧计数）**：Task 10/11 之后全量为
   `aihub-common` **61** / `aihub-web` **229**（0F/0E/0S），`Tomcat started on port` = **7**
   （产物：控制器 `.hb2-logs/C3-admin-full.log`、修复轮 `.m4t11fix-logs/G06-*.log`、评审 `.m4t11review-logs/V06-*.log`）。
