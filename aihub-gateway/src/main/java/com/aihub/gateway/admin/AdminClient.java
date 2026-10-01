@@ -4,6 +4,7 @@ import com.aihub.common.apikey.ApiKeyView;
 import com.aihub.common.config.ChannelDescriptor;
 import com.aihub.common.config.ConfigSnapshot;
 import com.aihub.common.config.ModelRouteDescriptor;
+import com.aihub.common.config.QuotaDescriptor;
 import com.aihub.common.config.RatePolicy;
 import com.aihub.common.internal.InternalHmac;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -201,7 +202,20 @@ public interface AdminClient {
                             node.path("apiKeyId").isNumber() ? node.get("apiKeyId").asLong() : null,
                             node.path("qps").asInt(0), node.path("burst").asInt(0)));
                 }
-                return Optional.of(new ConfigSnapshot(version, generatedAt, channels, routes, policies, defaultModel));
+                // **Task 13（2026-10-01 修复 Critical-1）**：额度必须在这里搬运 ——
+                // `data.quotas` 是**控制面到数据面的唯一通路**（网关不连数据库）。少了这一段，
+                // admin 发得出额度、网关却把它解析成**空表**，而空表正好是 D15「所有租户都不限」的
+                // 默认值 ⇒ 缺口在生产上**静默不可观测**。独立评审用诊断变异实测证伪过：
+                // 夹具带上 `QuotaDescriptor` 后，旧实现下 `quotas=[]` 而期望非空（`AdminClientSnapshotContractTest`）。
+                // 缺 `quotas` 字段（旧 admin / 非 2xx 之外的畸形体）→ `MissingNode`/`NullNode` 迭代为空 ⇒ 空表 = 不限。
+                List<QuotaDescriptor> quotas = new ArrayList<>();
+                for (JsonNode node : data.path("quotas")) {
+                    quotas.add(new QuotaDescriptor(
+                            node.path("tenantId").asLong(), node.path("period").asText(null),
+                            node.path("tokenLimit").asLong(), node.path("requestLimit").asLong()));
+                }
+                return Optional.of(new ConfigSnapshot(version, generatedAt, channels, routes, policies, defaultModel,
+                        quotas));
             } catch (Exception e) {
                 log.error("admin 配置快照响应畸形，本次用缓存/遗留渠道继续服务: {}", e.toString());
                 return Optional.empty();

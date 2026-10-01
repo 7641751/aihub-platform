@@ -241,6 +241,10 @@ class InternalConfigSnapshotIntegrationTest extends AbstractIntegrationTest {
         jdbcTemplate.update("delete from model_route");
         jdbcTemplate.update("delete from rate_limit_policy");
         jdbcTemplate.update("delete from channel");
+        // Task 13：`quota` 表的行也要清 —— 本用例的额度断言是**定向**的（按 (tenantId, period)），
+        // 所以残留行不会让它变红；但残留会污染**将来任何对 `quota` 做计数/全量断言**的用例
+        // （独立评审 Important-1）。与 `ConfigSnapshotServiceTest.deleteEverything()` 对齐。
+        jdbcTemplate.update("delete from quota");
     }
 
     private Long insertTenant(String name) {

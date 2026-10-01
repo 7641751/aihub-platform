@@ -1971,7 +1971,17 @@ git commit -m "test(quota): cover the request dimension, the HTTP contract and t
   - `aihub-admin/aihub-service/src/main/java/com/aihub/service/config/ConfigSnapshotService.java`（**Modify**：查 `quota` 表并入快照）
   - `aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/QuotaAdminService.java`（**Modify**：`update` 成功后 `ConfigChangePublisher.publishAfterCommit("quota.update")` —— Task 12 留的显式待办）
   - `aihub-gateway/src/main/java/com/aihub/gateway/config/ConfigCache.java`（**Modify**：暴露快照里的额度查询）
-  - 既有契约测试会因此变红/需要更新：`aihub-gateway/src/test/java/com/aihub/gateway/admin/AdminClientSnapshotContractTest.java`、`aihub-admin/.../config/ConfigSnapshotVersionTest.java`（**如实报告你改了哪些断言、为什么**；**不许放宽**）、
+  - **⚠️⚠️ `aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java`（**Modify，必须**）** ——
+    **2026-10-01 独立评审的 Critical-1**：`AdminClient.Http.parseSnapshot` 是**网关唯一的外部入口**，
+    它原先用 **6 参便捷构造器**建快照 ⇒ **`data.quotas` 根本没被读取** ⇒ 生产路径上 admin 发得出额度、
+    网关解析成**空表**、`ConfigCache.quota(...)` 恒空 ⇒ 静默落回 D15「不限」。评审用**诊断变异**实测证伪
+    （夹具带额度后旧实现 `quotas=[]`，见 `.m4t13review-logs/V6-diagnostic.log`）。⇒ **必须在 `parseSnapshot` 里
+    遍历 `data.quotas` 并改用 7 参构造器**；并**把契约测试的夹具换成携带额度**（见下条），否则该边界**不可证伪**。
+    ⚠️ **控制器登记（我的疏漏）**：这条路径在我 2026-10-01 的折叠里**被漏掉了**（"Files 缺路径"缺陷类**第 6 次**，
+    其中**两次是我自己**的）。而且我在折叠里**错误预测**"`AdminClientSnapshotContractTest` 会因此变红" —— 它当时
+    **没红**（两侧都是空表 ⇒ `isEqualTo` 恒绿），**这个误判本身掩盖了缺口**。教训：**"改了共享 record 的形状"必须
+    把两端（生产 + 契约夹具）一起看**，只跑聚焦用例与只看"期望变红"都不够。
+  - 既有契约测试会因此变红/需要更新：`aihub-gateway/src/test/java/com/aihub/gateway/admin/AdminClientSnapshotContractTest.java`（**夹具必须携带额度** —— 这是 Critical-1 的判别力来源）、`aihub-admin/.../config/ConfigSnapshotVersionTest.java`（**如实报告你改了哪些断言、为什么**；**不许放宽**）、
     以及 **`aihub-admin/aihub-web/src/test/java/com/aihub/admin/config/InternalConfigSnapshotIntegrationTest.java`** ——
     它的 `theResponseBodyCarriesExactlyThePathsTheGatewayParserReads` 断言的 `data` 顶层键集合**恰好**是那六个分量，
     加了 `quotas` 就**必然**变红；这是**正确的信号**（它钉住线上形状）⇒ 必须**把 `quotas` 加进期望集合并补该段的定向断言**

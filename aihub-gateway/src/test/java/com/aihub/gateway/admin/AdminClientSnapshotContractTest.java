@@ -3,6 +3,7 @@ package com.aihub.gateway.admin;
 import com.aihub.common.config.ChannelDescriptor;
 import com.aihub.common.config.ConfigSnapshot;
 import com.aihub.common.config.ModelRouteDescriptor;
+import com.aihub.common.config.QuotaDescriptor;
 import com.aihub.common.config.RatePolicy;
 import com.aihub.common.crypto.AesGcmChannelCipher;
 import com.aihub.common.crypto.ChannelKeyRegistry;
@@ -138,7 +139,14 @@ class AdminClientSnapshotContractTest {
                 List.of(new ModelRouteDescriptor("demo-model", 11L, 120, 3,
                         ModelRouteDescriptor.STATUS_ACTIVE)),
                 List.of(new RatePolicy(7L, null, 20, 40), new RatePolicy(7L, 42L, 5, 10)),
-                "demo-model");
+                "demo-model",
+                // ⚠️ **Task 13（2026-10-01 评审 Critical-1 的修复）**：夹具**必须**携带额度。
+                // 用空 `quotas` 做夹具时，两侧都是空表 ⇒ `isEqualTo` **恒绿**，于是「网关解析器丢弃
+                // `data.quotas`」这个缺口被**静默掩盖**（评审用 V-6 诊断变异实测证伪：夹具带上额度后，
+                // 旧实现下 `quotas=[]` 而期望非空）。
+                // 同一租户放**两个不同 period**：跨周期取错额度是这条链路最危险的失效模式。
+                List.of(new QuotaDescriptor(7L, "202601", 1_000L, 4L),
+                        new QuotaDescriptor(7L, "202602", 2_000L, 8L)));
     }
 
     private static AdminClient client(String secret) {
