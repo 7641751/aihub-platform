@@ -82,3 +82,16 @@ aihub:
     replay-interval-ms: 30000
     confirm-timeout-ms: 5000
     transport-retry-backoff-ms: 5000
+  # 数据面配额预扣（仅 /v1/chat/completions 计费）。额度来自**配置快照**（控制面写、数据面读）：
+  # 网关不连数据库，也不每请求回源 admin。默认开：配额是保护付费额度的手段，不该靠部署时记得打开。
+  quota:
+    enabled: ${AIHUB_QUOTA_ENABLED:true}
+    # ⚠️ 必须**严格小于** aihub.metering.max-capture-bytes（= 1048576，见上一段）。
+    # 为什么：配额这一层为了估算会把请求体**整体**读进内存（峰值 = 整个 body），而计量只捕获响应体的
+    # **尾部滑窗**（上限即 max-capture-bytes）。若两者相等或配额更大，配额层的峰值内存就超过计量预算，
+    # 且「配额层先失败 ⇒ 计量根本看不到这次请求」这条关系会被翻转。256 KiB（262144）已远超 chat 请求体
+    # 的现实量级，同时给配额层留出明确地比计量层更紧的内存上界。
+    max-in-memory-bytes: 262144
+    # requestId → 预扣关联 的有界存储：短 TTL（一次请求的生命周期量级）+ 条目上界（防无界增长）。
+    reservation-ttl: 2m
+    max-reservations: 100000
