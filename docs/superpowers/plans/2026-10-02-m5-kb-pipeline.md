@@ -50,8 +50,8 @@
 | # | 决策 | 理由 | 影响面 / 证据 |
 |---|---|---|---|
 | **D1** | **新增唯一一条迁移 `V3__kb_pipeline.sql`，只做一件事**：建 `kb_chunk` 表。`kb_document` **不加列**（V1 已有 `status`/`chunk_count`/`error_msg`，够用）。`SchemaMigrationTest` 改成「恰好 3 条」。 | V1 里 `kb_document` **没有**分片进度列（只有 `chunk_count`），而"全成或全清"与"批次是否到齐"必须有**持久**依据（放 Redis 会在重启后卡在 `EMBEDDING` 永不完成，M4 已登记过"进度不持久"的教训）。**`kb_document` 不加列的额外理由**：它是 V1 的老表，改它要动 `V1`（禁止）或再加一次迁移；而 `kb_chunk` 顺便给了"按 doc 精确清理"的坐标。**残余（诚实登记）**：`kb_chunk` 存了一份 chunk 文本（`MEDIUMTEXT`），与原件重复占空间；换来的是**可重放、可直接查、清理只需一条 SQL**。 | `V3__kb_pipeline.sql`；`SchemaMigrationTest`（`hasSize(3)` + `containsExactly("1","2","3")` + description 列表）。**闸门**：任何人再加迁移必须再改这条断言。 |
-| **D2** | **PDF 用 Apache PDFBox**（`org.apache.pdfbox:pdfbox`，**版本显式写死**，Task 7 引入并**先验证可解析**）。**不用 Tika**（依赖面大得多、能力远超需要）。 | PDF 解析是**算法**，不许自实现（与 M4 D2 对 bcrypt 的取向一致）；Tika 会拖进一长串传递依赖，而 M5 只需要"PDF → 文本层"。PDFBox 是那份依赖里最小、最直接的。**残余**：PDFBox 的版面还原能力弱于商业方案，多栏/表格会串行——已登记为已知边界。 | `aihub-admin/aihub-service/pom.xml` +1（版本写死）；Task 7 第一步是**可解析性验证**，失败即 BLOCKED。 |
-| **D3** | **向量库 = 真 Chroma 容器**（`chromadb/chroma`，**tag 写死**，compose 服务名 `chroma`，测试用同一个 tag 的 `GenericContainer`）。**不许**用假 HTTP 上游替代 Chroma。 | "真的写进向量库且能按 `doc_id` 取回"是本里程碑**唯一**能证明写入侧做对了的判据；用假实现会让它退回成**不可证伪的承诺**（本项目已两次为此吃过亏）。Chroma 是**可容器化的真服务**（该真），而 embeddings 是**易变的外呼**（该假，见 D6）。**残余/风险**：Docker Hub 不可达时镜像可能拉不到 ⇒ **第一个 Step 就是探测镜像可获取性**，拉不到即 **BLOCKED 并报告**（**不许**静默换假实现）。 | `docker-compose.yml` + `chroma` 服务；测试基类里的**单例** `GenericContainer`（与 compose 同 tag）。 |
+| **D2** | **PDF 用 Apache PDFBox `3.0.3`**（**版本显式写死**，Task 7 引入并**先验证可解析**）。**不用 Tika**（依赖面大得多、能力远超需要）。 | PDF 解析是**算法**，不许自实现（与 M4 D2 对 bcrypt 的取向一致）；Tika 会拖进一长串传递依赖，而 M5 只需要"PDF → 文本层"。**⚠️ 2026-10-02 派发前扫描实测订正**：**PDFBox 自己也不是零传递依赖** —— `org.apache.pdfbox:pdfbox:3.0.3` 会拖进 `fontbox` + **三个 BouncyCastle**（`bcprov/bcpkix/bcutil-jdk18on:1.78.1`），合计约 **12.5 MB**（我原先写的"PDFBox 是最小那份"**不准确**；`2.0.30` 同样拖 BC，只是换成 `jdk15to18:1.76` 变体 ⇒ **换旧版并不能避开它**）。**仍然选它**：相对 Tika 仍是小得多的一份，且 BC 只用于签名/加密（M5 不用到）。 | `aihub-admin/aihub-service/pom.xml` **+1 个直接依赖 +3 个传递依赖**（都走 `aliyunmaven`，**已验证可解析**：`mvn …:get -Dartifact=org.apache.pdfbox:pdfbox:3.0.3` ⇒ `Downloaded from aliyunmaven` + `BUILD SUCCESS`）；Task 7 第一步仍做可解析性验证。 |
+| **D3** | **向量库 = 真 Chroma 容器**（compose 服务名 `chroma`，测试用同一个 tag 的 `GenericContainer`）。**不许**用假 HTTP 上游替代 Chroma。**⚠️ 2026-10-02 派发前扫描订正：镜像必须走 `docker.m.daocloud.io/chromadb/chroma:<tag>`**，因为 **Docker Hub 直连不通**（实测 `registry-1.docker.io` 超时）且**本机没有 `chromadb/*` 镜像**；而 daocloud 代理的 manifest 探测**通**（实测返回合法 OCI index）。 | "真的写进向量库且能按 `doc_id` 取回"是本里程碑**唯一**能证明写入侧做对了的判据；用假实现会让它退回成**不可证伪的承诺**（本项目已两次为此吃过亏）。Chroma 是**可容器化的真服务**（该真），embeddings 是**易变的外呼**（该假，见 D6）。**残余/风险（必须照办）**：① **manifest 通 ≠ blob 可下** —— 同一次探测里 `docker.m.daocloud.io/library/alpine` 的 **blob 下载就 `TLS handshake timeout`** 了，所以**第一个 Step 必须是真 `docker pull` 并确认镜像在本地**；② 拉不到 ⇒ **BLOCKED 并报告**（**不许**静默换假实现、也不许擅自改用别的向量库 —— 那是设计级决策）。 | `docker-compose.yml` + `chroma` 服务（**image 写 daocloud 全路径**）；测试基类里的**单例** `GenericContainer`（**与 compose 同一个镜像串**）。 |
 | **D4** | **`kb_chunk` 的列**：`id`、`doc_id`、`seq`、`text`(**MEDIUMTEXT, NOT NULL**)、`vector_id`(VARCHAR(128))、`embedded_at`(DATETIME(3) NULL)、`created_at`。**唯一键 `uk_kb_chunk_doc_seq(doc_id, seq)`**；`KEY idx_kb_chunk_doc(doc_id)`。 | **`text` 必须有**：embeddings 消费端要拿文本；用消息传文本会造大消息（RabbitMQ 不鼓励），用"重新解析原件"则让解析做两次。**`embedded_at` 必须有**：`READY` 的判据是"**所有** chunk 都已嵌入"，只靠 `chunk_count` 无法表达"本批已完成"（`chunk_count` 是**期望值**，不是**进度**）。**唯一键**让重放变成覆盖（幂等），**索引**让"按 doc 清理"走前缀。 | `V3__kb_pipeline.sql`；`KbChunkEntity`/`KbChunkMapper`。 |
 | **D5** | **重复上传（`uk_kb_document_tenant_sha` 命中）⇒ 返回已存在那一行（幂等），不是 409、更不是 500**；本次写的临时文件**删掉**。实现方式**照 M4 Task 12 的定稿**：`INSERT … ON DUPLICATE KEY UPDATE id = id` + **再读**，**不抛异常、不 catch `DuplicateKeyException`**。 | V1 的唯一键决定了"同租户同内容"天然要去重，而"重复上传"是**用户的正常动作**（点了两次、换了文件名）。M4 已经用一次死锁实测证明：`catch DuplicateKeyException` + `SELECT … FOR UPDATE` 重读会死锁，且**即便不死锁**，REPEATABLE READ 下同一事务的普通重读**看不见**并发提交的行。 | `KbDocumentMapper.insertIfAbsent` + `KbDocumentService.upload`；用例：同内容两次上传 ⇒ **同一个 `id`**、行数不增、临时文件不留。 |
 | **D6** | **embeddings 上游 = 配置化的 OpenAI 兼容 `/v1/embeddings`**；测试里用**宿主 `com.sun.net.httpserver.HttpServer`** 作假上游（本项目既有做法），并**能注入"第 N 批才失败"**。**不接真实计费 API**。 | 真 embeddings 需要密钥、网络与计费 ⇒ 验收**不可重复**；而假上游能**精确注入**"第 3 批失败""不响应（超时）"这类**只有失败路径才需要**的形态——这正是本里程碑的验收中心（全成或全清）**必须**能构造的。 | `KbEmbeddingClient`（base_url 来自 `aihub.kb.embedding.base-url`）；测试夹具 `FakeEmbeddingUpstream`（含 `failFromBatch(n)`、`neverRespond()`）。 |
@@ -59,12 +59,29 @@
 | **D8** | **`cleanup(docId)` 的顺序**：① 删 Chroma（按 metadata `doc_id`）→ ② 删 `kb_chunk` → ③ 置 `FAILED`。**清理自身失败**⇒ `error_msg` 里**如实写"清理未完成"**并**保留 `kb_chunk`**（可重入），**绝不假装干净**。 | 顺序反了会在"Chroma 删成功但 `kb_chunk` 删失败"时留下**无法定位**的残留（坐标没了）。**全局不变量（可证伪）**：不允许「`READY` 但 Chroma 缺 chunk」，也不允许「`FAILED` 但 Chroma 还留着该 doc 的 chunk」。 | 用例：让假上游第 3 批失败 ⇒ 断言 `FAILED` + **Chroma 里该 `doc_id` 一个 chunk 都没有** + `kb_chunk` 空 + 消息在 DLQ。 |
 | **D9** | **不做取消端点**（设计文档 §6.4 提过"取消"，但 §7.3 的接口表只有 `POST`/`GET /api/kb/documents`）⇒ 只做"**最终失败自动清理**"，并在 Task 8 **显式登记"取消未实现"**；但 `cleanup(docId)`/`KbDocumentService.cancel(docId)` 的形状要写成**将来能被取消复用**的样子（幂等、可重入）。 | 以**接口表为准**（它是"对外承诺"），且取消要实现"停掉在飞的消息"，在无 `docId` 级幂等锁的前提下成本远高于收益（YAGNI）。**残余**：用户上传后发现传错文件，只能等它跑完或失败后删行（手工 SQL）。 | Task 8 的"已知边界"必须含这条；README 同步。 |
 | **D10** | **分批大小 = 10 段/批**，批次用消息载荷 `{docId, seqFrom, seqTo}` 表达；**解析完成时一次性算好所有批次**（`ceil(chunkCount / batchSize)` 条消息）。参数走配置 `aihub.kb.embed.batch-size`（默认 10）。 | 设计文档 §8.2 明写"10 段/批嵌入"。用**区间**而不是"每批带文本"，让消息体积恒定且可重放（文本从 `kb_chunk` 读）。 | `KbTopology.embedBatches(docId, chunkCount, batchSize)`（纯函数，可单测）。 |
-| **D11** | **MQ 拓扑放 `aihub-mq`**（`KbTopology`/`KbMessageCodec`/消费者），**不放 `aihub-common`**。 | 计量那条之所以在 `aihub-common` 是因为 **gateway 也要发**；M5 的上传与消费**都在 admin 内部**，没必要去污染 `aihub-common` 的"零第三方依赖"面（`aihub-mq` 本来就能用 Jackson，但**编解码仍照 `MeteringEventCodec` 的文本分隔符风格**，与既有纪律一致）。 | `aihub-mq` 新增四个类；`aihub-common` **不动**。 |
+| **D11** | **MQ 拓扑放 `aihub-mq`**（`KbTopology`/`KbMessageCodec`/消费者），**不放 `aihub-common`**。**⚠️ 2026-10-02 派发前扫描订正理由**：`aihub-mq` 的依赖**只有 `aihub-common` + `spring-boot-starter-amqp`，没有 Jackson**（实测 pom）⇒ 用**文本分隔符**编解码不是"风格偏好"，而是**唯一与现有依赖面一致的选择**（引 Jackson 只为编解码是净增依赖）。 | 计量那条之所以在 `aihub-common` 是因为 **gateway 也要发**；M5 的上传与消费**都在 admin 内部**，没必要去污染 `aihub-common` 的"零第三方依赖"面。 | `aihub-mq` 新增四个类；`aihub-common` **不动**。 |
 | **D12** | **上传接口用 `multipart/form-data`**（字段名 `file`，可带可选字段 `filename` 覆盖）；`tenantId` **取请求体**（multipart 的文本字段），**不是**令牌里的（`CONVENTIONS` §10 **R2**：写操作平台级，但审计必须记**目标资源的**租户）。 | PDF 是二进制，JSON 装不下；而"写操作从请求体取租户"是 §10 已定死的控制面语义（M4 Task 8/9/10/12 一律照办）。**残余**：multipart 的 `tenantId` 若缺失 ⇒ **400 `INVALID_PARAM`**（与 M4 的 `PUT /api/quotas` 同形）。 | `KbDocumentController.upload(@RequestPart("file") MultipartFile, @RequestParam ...)`。 |
 | **D13** | **新增 `AuditAction` 常量三个**：`KB_DOCUMENT_UPLOAD`（上传，写路径）、`KB_DOCUMENT_READY`（流水线成功）、`KB_DOCUMENT_FAILED`（失败终态，**含失败原因的非敏感摘要**）。**审计绝不记**：原件内容、chunk 文本、向量、任何密钥。 | 写操作必须留审计（`CONVENTIONS` §6.6 的纪律 + M4 的 `AuditService`）。**这三个是"该加"的共享常量**（别像 M4 Task 11 那样被"不要新增常量"绊住——那条针对的是"没打算写审计"的场景）。`READY`/`FAILED` 由**系统**写（`actor_type=SYSTEM`），`UPLOAD` 由用户写。 | `AuditAction` +3；每个 Task 的用例断言"产生了对应审计行且**不含**敏感字段"。 |
 | **D14** | **0 段 = 失败**：解析后 `chunkCount == 0` ⇒ **`FAILED("无可提取文本")`**（这就是**扫描版/图片型 PDF 的 YAGNI 出口**，**不做 OCR**）。 | 设计文档没写这条，但"上传了一个没有文本层的 PDF"是完全正常的用户动作；静默 `READY` 会让检索侧永远查不到东西却显示成功——**这比失败更糟**。 | 用例：空内容 md ⇒ `FAILED` + `error_msg` 含"无可提取文本" + `chunk_count=0` + 无残留。 |
 | **D15** | **`vector_id = "{docId}:{seq}"`**（字符串，稳定可推导），Chroma 侧用**同一值**当 id（upsert）。 | 可推导 ⇒ 重放覆盖天然幂等；可 grep ⇒ 排查"哪个 chunk 没写进去"时不用查两处；且**跨语言契约**只需说清这一个规则（附录 A）。 | `KbChunk.vectorId(docId, seq)`（纯函数 + 固定向量用例）。 |
-| **D16** | **`kb.parse` 与 `kb.embed` 各一条队列 + 一个 DLQ**（`aihub.kb.parse` / `aihub.kb.embed` / `aihub.kb.dlq`，DLX `aihub.kb.dlx`），**照 `MeteringTopologyConfig` 的"死信三件套"**：业务队列声明 `x-dead-letter-exchange` + routing key，DLX 绑 DLQ。 | 两个阶段的**失败代价不同**（解析失败 = 文件问题，嵌入失败 = 上游/向量库问题），分开才能在排查时一眼区分；共用 DLQ 让运维只需盯一个地方。与既有计量链路**同构**（照着抄，别发明新形状）。 | `KbTopology` + `KbTopologyConfig`；用例断言 DLQ 深度/消息体。 |
+| **D16** | **`kb.parse` 与 `kb.embed` 各一条队列 + 一个 DLQ**，**逐字照 `MeteringTopology` 的命名形状**（2026-10-02 扫描实测基准：`aihub.metering.exchange` / `aihub.metering.usage`(routing) / `aihub.metering.queue` / `aihub.metering.dlx` / `aihub.metering.dlq` / `MESSAGE_CONTENT_TYPE="text/plain;charset=UTF-8"`）⇒ M5 定为：`EXCHANGE="aihub.kb.exchange"`、`PARSE_QUEUE="aihub.kb.parse"`、`PARSE_ROUTING_KEY="aihub.kb.parse"`、`EMBED_QUEUE="aihub.kb.embed"`、`EMBED_ROUTING_KEY="aihub.kb.embed"`、`DEAD_LETTER_EXCHANGE="aihub.kb.dlx"`、`DEAD_LETTER_ROUTING_KEY="aihub.kb.dlq"`、`DEAD_LETTER_QUEUE="aihub.kb.dlq"`、`MESSAGE_CONTENT_TYPE` 同款。**死信三件套**照抄 `MeteringTopologyConfig`：业务队列声明 `x-dead-letter-exchange` + routing key，DLX 绑 DLQ。 | 两个阶段的**失败代价不同**（解析失败 = 文件问题，嵌入失败 = 上游/向量库问题），分开才能在排查时一眼区分；共用 DLQ 让运维只需盯一个地方。**与既有计量链路同构**（照着抄，别发明新形状）。⚠️ 我原先在正文里直接写 `aihub.kb.parse` 当队列名与 routing key **混用**、也没给出 exchange 名 —— 那是**与既有风格不一致**的写法，已按上表统一。 | `KbTopology` + `KbTopologyConfig`；用例断言 DLQ 深度/消息体。 |
+
+---
+
+## 派发前缺陷扫描（2026-10-02，控制器实测；**结论已折进上表与各 Task**）
+
+| # | 抓到的坑 | 证据（原始输出） | 处置 |
+|---|---|---|---|
+| 1 | **⚠️ 曾达 BLOCKED 级：Chroma 镜像拿不到** —— `chromadb/chroma` 直连 **Docker Hub 超时**，且本机 `docker images` **没有**任何 `chromadb/*` | `manifest inspect chromadb/chroma:0.5.23` ⇒ `failed to configure transport … registry-1.docker.io … Client.Timeout`；`docker images` 只有 admin/gateway/alpine/curl/temurin/maven/mysql/python/rabbitmq/redis/ryuk | **改走 daocloud 代理**：`manifest inspect docker.m.daocloud.io/chromadb/chroma:0.5.23` **返回合法 OCI index** ⇒ 写入 **D3**（compose 与测试都用该全路径）。**但 manifest 通 ≠ blob 可下**（同一次探测里 `docker.m.daocloud.io/library/alpine` 的 blob 就 `TLS handshake timeout`）⇒ Task 5 Step 0 改成**真 `docker pull` 并确认本地镜像**，失败即 BLOCKED |
+| 2 | **PDFBox 不是零传递依赖**（我原先的理由写错了："PDFBox 最小"**不准确**） | `dependency:get pdfbox:3.0.3` ⇒ 拖进 `fontbox` + `bcprov/bcpkix/bcutil-jdk18on:1.78.1`（≈12.5 MB，`BUILD SUCCESS`）；**`2.0.30` 同样拖 BC**（`jdk15to18:1.76`）⇒ 换旧版避不开 | 订正 **D2**（含"清单 +1 直接 +3 传递"与"两版都带 BC"的事实） |
+| 3 | **MQ 命名与既有风格不一致**：正文里把 `aihub.kb.parse` 同时当队列名与 routing key，且没给 exchange 名 | 实测 `MeteringTopology`：`aihub.metering.exchange` / `aihub.metering.usage` / `aihub.metering.queue` / `aihub.metering.dlx` / `aihub.metering.dlq` + `MESSAGE_CONTENT_TYPE` | 订正 **D16** 为逐字同构的九个常量 |
+| 4 | **D11 的理由是错的**：我写"`aihub-mq` 本来就能用 Jackson" | 实测 `aihub-mq/pom.xml` 只有 `aihub-common` + `spring-boot-starter-amqp` ⇒ **没有 Jackson** | 订正 **D11**（结论不变、理由变强：文本分隔符是**唯一与现有依赖面一致**的选择） |
+| 5 | **`application.yml` 未配 multipart**（默认 1MB 会静默拒绝大 PDF） | `Select-String 'multipart' application.yml` ⇒ 0 命中 | 已在 Global Constraints 与 Task 2 写明**必须显式配 20MB**；扫描确认这条前提成立 |
+
+**扫描同时确认成立的前提**：`AuditAction` 是 `String` 常量（不是枚举，注释写明理由）⇒ 新增三个常量形状正确（D13）；
+`@EnableScheduling` 存在（M4 Task 17 的教训）；Testcontainers 在 `aihub-web/pom.xml`；进程内假上游是既有做法（`com.sun.net.httpserver.HttpServer`）。
+
+**仍未知、必须在 Task 5 Step 0 实测的**：**Chroma 的真实 REST 契约**（collection 创建 / upsert / delete / count 的路径与体）—— 计划里明确要求"**不许照记忆写代码**"，先起容器用 `curl` 探清再落实现。
 
 ---
 
@@ -410,10 +427,14 @@ git commit -m "feat(kb): parse documents into tracked chunks and fan out embed b
 - Produces: `KbEmbeddingClient.embed(List<String> texts) -> List<float[]>`（**显式超时**）；`KbVectorStoreClient.upsert(String collection, List<VectorRecord>)`、`deleteByDocId(long docId)`、`countByDocId(long docId)`（**测试直接用它证明"真的写进去了"**）；`KbEmbedConsumer` 把 `kb_chunk.embedded_at` 打上，**全部非 NULL ⇒ `READY`**。
 
 - [ ] **Step 0（**前置探测，可能 BLOCKED**）**：确认 Chroma 镜像可获取与**真实 REST 契约**
-  1. `docker -H tcp://127.0.0.1:2375 images --filter reference=chromadb/*` —— 本地是否已有；
-  2. 若没有，试 `docker -H tcp://127.0.0.1:2375 pull chromadb/chroma:<tag>`；
-  3. 拿到镜像后**起一个临时容器**，用 `curl` 探清 `POST /api/v1/collections`、`upsert`、`delete`、`count` 的**真实路径与请求体**（**不许照记忆写代码**）。
-  **拉不到镜像 ⇒ 报 BLOCKED 并附原始输出**（D3：不许换假实现）。
+  1. `docker -H tcp://127.0.0.1:2375 images --filter reference=*/chroma*` —— 本地是否已有（**扫描时本机没有任何 `chromadb/*` 镜像**）；
+  2. 拉镜像**必须走 daocloud 代理**（直连 Docker Hub 已实测超时）：
+     `docker -H tcp://127.0.0.1:2375 pull docker.m.daocloud.io/chromadb/chroma:<tag>`
+     ⚠️ **manifest 通 ≠ blob 可下**：同一次探测里 `docker.m.daocloud.io/library/alpine` 的 blob 就 `TLS handshake timeout` 了
+     ⇒ 这一步的判据是 **`docker images` 里真的出现了该镜像**，不是"命令没报错"；
+  3. 拿到镜像后**起一个临时容器**，用 `curl` 探清 `POST /api/v1/collections`、`upsert`、`delete`、`count` 的**真实路径与请求体**
+     （**不许照记忆写代码**；探到的原文要贴进报告），探完 `docker rm -f` 掉。
+  **拉不到镜像 ⇒ 报 BLOCKED 并附原始输出**（D3：**不许**换假实现、**不许**擅自改用别的向量库 —— 那要用户拍板）。
 
 - [ ] **Step 1: 写失败测试**（**这就是"可检索"的可证伪形式**）
 
@@ -532,7 +553,11 @@ git commit -m "feat(kb): roll back written chunks on terminal failure and route 
 - Consumes: `KbTextExtractor` 的扩展点。
 - Produces: `pdf` 走 PDFBox `PDFTextStripper`；**无文本层 ⇒ 返回空串 ⇒ Task 4 的 `chunkCount==0` 出口给 `FAILED("无可提取文本")`**（D14）。
 
-- [ ] **Step 0：可解析性验证（可能 BLOCKED）**：`mvn -B org.apache.maven.plugins:maven-dependency-plugin:3.8.1:get -Dartifact=org.apache.pdfbox:pdfbox:<版本>` ⇒ 必须看到 `Downloaded from aliyunmaven` + `BUILD SUCCESS`。失败 ⇒ **报 BLOCKED**，**绝不**自己写解析器。
+- [ ] **Step 0：可解析性验证（不再可能 BLOCKED —— 扫描已实测通过，但仍要复跑留证）**：
+  `mvn -B org.apache.maven.plugins:maven-dependency-plugin:3.8.1:get -Dartifact=org.apache.pdfbox:pdfbox:3.0.3`
+  ⇒ 必须看到 `Downloaded from aliyunmaven` + `BUILD SUCCESS`（**2026-10-02 扫描实测已通过**）。
+  ⚠️ **已知会一起进来 4 个 artifact**：`pdfbox` + `fontbox` + **`bcprov/bcpkix/bcutil-jdk18on:1.78.1`**（合计 ≈12.5 MB）。
+  报告里要**显式列出这 4 个**（这是我原先"PDFBox 最小依赖"设想的订正，见 D2）。失败 ⇒ **报 BLOCKED**，**绝不**自己写解析器。
 - [ ] **Step 1: 写失败测试**：`pdf` 夹具（几 KB、有文本层）⇒ `READY` 且 chunk 数 > 0；把同一夹具的文本流删掉造"无文本层"⇒ `FAILED("无可提取文本")`。
 - [ ] **Step 2～4**：红 → 实现 → 绿。
 - [ ] **Step 5: 提交**
