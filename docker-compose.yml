@@ -71,6 +71,9 @@ services:
       SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
       AIHUB_INTERNAL_SECRET: ${AIHUB_INTERNAL_SECRET:?set AIHUB_INTERNAL_SECRET in .env}
       AIHUB_CHANNEL_MASTER_KEY: ${AIHUB_CHANNEL_MASTER_KEY:?set AIHUB_CHANNEL_MASTER_KEY in .env}
+      # M4：控制台会话密钥（签发 / 校验控制台令牌）。缺省会让 /api/** 一律 401（fail-closed，见 ConsoleAuthFilter）。
+      # 轮换它会让**已签发的令牌立刻失效**（没有宽限期）。
+      AIHUB_CONSOLE_SECRET: ${AIHUB_CONSOLE_SECRET:?set AIHUB_CONSOLE_SECRET in .env}
       # 开发演示数据 seeder：默认关闭。打开前必须先配主密钥与两条渠道的明文密钥（否则启动即失败）。
       AIHUB_DEMO_SEED_ENABLED: ${AIHUB_DEMO_SEED_ENABLED:-false}
       AIHUB_DEMO_SEED_PRIMARY_API_KEY: ${AIHUB_DEMO_SEED_PRIMARY_API_KEY:-}
@@ -93,6 +96,9 @@ services:
       AIHUB_ADMIN_BASE_URL: http://admin:8081
       AIHUB_INTERNAL_SECRET: ${AIHUB_INTERNAL_SECRET:?set AIHUB_INTERNAL_SECRET in .env}
       AIHUB_CHANNEL_MASTER_KEY: ${AIHUB_CHANNEL_MASTER_KEY:?set AIHUB_CHANNEL_MASTER_KEY in .env}
+      # M4：是否订阅 admin 的「配置失效」广播（Pub/Sub）。true = 控制面改配置后数据面**秒级**可见；
+      # false = 退回「等本地 Caffeine TTL 过期」的旧行为（M3 实测 101 秒）。默认 true。
+      AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION: ${AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION:-true}
       AIHUB_UPSTREAM_API_KEY: ${AIHUB_UPSTREAM_API_KEY:-}
       AIHUB_UPSTREAM_DEFAULT_MODEL: ${AIHUB_UPSTREAM_DEFAULT_MODEL:-default}
       SPRING_RABBITMQ_HOST: rabbitmq

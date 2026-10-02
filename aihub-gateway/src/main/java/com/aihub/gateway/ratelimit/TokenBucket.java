@@ -32,7 +32,9 @@ import com.aihub.common.ratelimit.RateLimitScript;
  */
 public final class TokenBucket {
 
-    /** 一个令牌的千分之一表示。 */
+    /**
+     * 一个令牌的千分之一表示。
+     */
     public static final long MILLI = 1000L;
 
     private TokenBucket() {

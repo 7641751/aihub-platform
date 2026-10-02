@@ -13,7 +13,23 @@
 - [x] **M1 网关直通**：API Key 鉴权（Caffeine → Redis → admin 三级回源）+ 单渠道字节级透传（流式与非流式同一段代码）+ 上游状态码 / 响应体 / `Content-Type` 原样透传 + `GET /v1/models`
 - [x] **M2 流式与计量**：SSE 转发 + usage 捕获 + 计量落库
 - [x] **M3 流量治理**：Lua 令牌桶限流 + 多渠道路由 + 故障转移 + 熔断 + 渠道密钥本地解密 + 配置快照
-- [ ] **M4 业务平台**：租户 / API Key / 渠道管理 / 配额 / 审计
+- [x] **M4 业务平台**：租户 / API Key / 渠道管理 / 配额 / 审计 + **零构建管理台**（`GET /console/index.html`）
+
+### M4 到底做了什么
+
+控制面（`admin`，`/api/**`，由 `ConsoleAuthFilter` 守门）：**登录签发令牌**（`POST /api/auth/login`，`ADMIN` / `VIEWER` 两级角色，
+`VIEWER` 只读）→ **租户、API Key（签发/列表/停用/删除，明文只在创建那一次出现）、渠道（含真实连通性探测）、
+路由与限流策略、配额（`GET`/`PUT /api/quotas`）** 的增删改查，外加 **审计日志**（每次写操作留一行，
+`tenant_id` 记**目标资源的**租户）与 **运营查询**（`/api/logs`、`/api/audit`、`/api/billing/daily`，三者都**必须显式 `tenantId` + 时间范围**）。
+
+数据面（`gateway`）：**配额预扣**（`QuotaFilter` + Redis Lua 原子脚本，超限回 OpenAI 形状的 `429 insufficient_quota`，
+与限流的 `rate_limit_exceeded` 语义不同）→ **实际校正**（拿到上游真实 `usage` 后把差额还回去）；
+以及 **控制面改配置 → 数据面秒级生效**（admin 发 Pub/Sub 失效广播，网关订阅后清本地缓存与共享快照条目 —— M3 实测是 **101 秒**，M4 是**秒级**）。
+
+**管理台怎么用（零构建，无 npm、无打包）**：容器起来后浏览器打开 `http://localhost:8081/console/index.html`
+（admin 端口，见「快速开始」）→ 用 `sys_user` 的账号登录 → 令牌存在 **`sessionStorage`**（关标签页即失效）。三个视图：
+**渠道**（列表 + 新建 + 探测）、**API Key**（列表 + 新建，明文**只显示一次**）、**请求日志**（按 `tenantId` + 时间范围查询）。
+页面不引任何第三方脚本、不用 `innerHTML`（所有服务端文本走 `textContent`）。
 - [ ] **M5 异步流水线**：文档上传 → 解析 → 嵌入 → 向量库
 - [ ] **M6 压测与打磨**：压测报告、故障注入报告、上线
 
@@ -42,7 +58,30 @@
 **复现口径（诚实说明）**：上面的数字与「`mvn -B test` 在本机全绿」都产自这台开发机：除了 Docker 守护进程，它还依赖两项**不在仓库里**的环境配置 —— 用户级 `~/.testcontainers.properties`（把 Testcontainers 指向 TCP 上的 Docker）以及本机 `.mvn/maven.config` 里的 JVM 参数。因此在一台干净机器上，需自行保证：Docker 可达，且 JDK 21+ 上允许 Mockito 的动态 agent 挂载（例如 `mvn -B test -DargLine="-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading"`）；这些**环境作用域**的 JVM 开关有意不进 `pom.xml`。`aihub-web` 的集成测试要真起容器，必须让 Testcontainers 找到 Docker（本机是 `DOCKER_HOST=tcp://127.0.0.1:2375`）；`aihub-gateway` 的测试**不需要** Docker，也不需要有 broker 在跑。
 
 
-## M0/M1/M2/M3 已知边界
+## M0/M1/M2/M3/M4 已知边界
+
+**M4 新增（每一条都有对应的代码 / 测试，不是"以后再说"）**
+
+1. **配额在 Redis 不可用时放行（D7，fail-open）**：限流是「降级**仍拒绝**」，配额是「降级**放行**」——
+   放行只可能造成超额，不会造成雪崩。想在 Redis 故障期间仍如实拒绝超预算租户，要开 `QuotaFallback`（admin 兜底权威判余额）。
+2. **吊销不是全链路立即生效**：共享层（Redis）由 admin 显式 `DEL` **立即失效**，但**网关本机 Caffeine 仍 ≤30s**。
+3. **02:00 UTC 对账只报告、不改账（D12）**：它按 `request_log` 幂等重算 `billing_daily` 并计数偏差，
+   **绝不写** `quota.token_used` / `request_used`；偏差如何处置是**人的决定**。
+   实际校正 `adjust` 是**非幂等**的（重复调用会重复加减），靠对账兜底。
+4. **`billing_daily.cost` 恒为 0**：本里程碑没有单价表，成本口径未接。
+5. **管理台的令牌存在浏览器的 `sessionStorage` 里**：页面自身不引第三方脚本、所有服务端文本走 `textContent`、
+   无 `innerHTML`；但**任何**能注入脚本的入口都能读到那个令牌 —— 这是"零构建管理台"的已知 XSS 代价（D9），不是缺陷。
+6. **网关缓存请求体（D17）**：为了能多次读取 body，请求体会进内存，超大 body 有内存代价。
+7. **网关自己连 Redis 的超时仍是 2 秒（A3，本里程碑不改）**：Redis 停机时**顺序**发请求会看到每个请求赔多次超时
+   （实测 16 个顺序请求 ≈110 秒，≈7 秒/请求）⇒ 要观察降级后的行为**必须并发压测**，否则会误判成"卡住"。
+8. **未鉴权路径不限流（A6）**：限流发生在鉴权之后。
+9. **`/v1/**` 下没有处理器的 404/405 仍是 Spring 默认体（A7）**，不是 OpenAI 形状（同 M3，未改动）。
+10. **`last_used_at` 目前没有写入方（恒 NULL）**；`billing_daily` 的唯一写入方是 02:00 对账任务
+    （M4 没有独立的计费流水来源）⇒ 账单端点在真实环境的数据**只在对账跑过之后才有**。
+
+**测试规模**：M4 各任务收口时实测为 `aihub-common` **68** / `aihub-web` **263** / `aihub-gateway` **391**
+（见各任务报告与 `.m4t*-logs/` 证据目录）；**整反应堆 `mvn -B clean test` 的权威数字与逐模块明细**，
+见 `.superpowers/sdd/m4-acceptance.md`（**git-ignored**，只存原始输出，token 只留前缀）。
 
 以下是有意划出的范围边界与**尚未被验证的东西**，以及真实验收量到的**已知缺口**（凡属缺口的都会明说「已知缺口 / 没有任何缓解措施」）。带「未验证 / 未做」字样的条目请当作事实陈述读：它们没有被任何测试或真实环境证明过。
 

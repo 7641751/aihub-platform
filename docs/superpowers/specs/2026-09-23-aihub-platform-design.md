@@ -196,7 +196,10 @@ aihub-platform/
 
 ### 6.2 配额扣减：预扣估算 → 实际校正 → 异步对账
 
-1. **请求前预扣**：按 `估算 prompt token + max_tokens` 在 Redis 上用 Lua 原子预扣；余额不足直接返回 429 `QUOTA_EXCEEDED`。
+1. **请求前预扣**：按 `估算 prompt token + max_tokens` 在 Redis 上用 Lua 原子预扣；余额不足直接返回 429
+   ~~`QUOTA_EXCEEDED`~~ **`insufficient_quota`**（**2026-10-02 更正**：实现落地时定的是 `insufficient_quota`，
+   且 `code` 与 `type` **同为** `insufficient_quota`，见 `docs/CONVENTIONS.md` §4 的错误表与 §6.7）。
+   ⚠️ 别把它和 **admin 信封里的 `ErrorCode.QUOTA_EXCEEDED`** 混为一谈：那个是 `/api/**` 的控制面错误码，仍然存在。
 2. **请求后校正**：拿到上游真实 `usage` 后补扣或退回差额。
 3. **落库与对账**：计量事件经 MQ 异步写入 MySQL（真相源，`request_id` 唯一键幂等），每日 02:00 对账任务按 `request_log` 聚合重算 `billing_daily`，并与 Redis 计数比对、修正并告警偏差。
 
@@ -269,8 +272,12 @@ PENDING → PARSING → EMBEDDING → READY
 | POST | `/api/api-keys` | 创建 Key，仅此一次返回明文 |
 | POST | `/api/kb/documents` | 上传文档，触发异步流水线 |
 | GET | `/api/kb/documents` | 列表 + 状态轮询 |
-| GET | `/api/billing/daily?from=&to=` | 账单查询 |
-| GET | `/api/logs` | 请求日志分页查询 |
+| GET | `/api/billing/daily?tenantId=&from=&to=` | 账单查询（**必须显式 `tenantId`**：运营查询，缺省 400，见 `CONVENTIONS.md` §10 R3.1） |
+| GET | `/api/logs` | 请求日志分页查询（**必须 `tenantId` + 时间范围**：同上，禁止无界扫描） |
+
+> **（2026-10-02 实现状态标注）** 上表除 **`/api/kb/**`（文档入库，属 **M5**，本期未实现）** 之外，
+> 其余接口均已在 **M4** 落地并受 `ConsoleAuthFilter` 守门（D3 令牌 + D10 两级角色）。
+> 完整的错误码、租户模型与配额语义以 `docs/CONVENTIONS.md`（§4 / §6.7 / §10）为准 —— **它与本文档冲突时以 CONVENTIONS 为准**。
 
 ---
 

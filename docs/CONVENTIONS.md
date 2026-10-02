@@ -60,6 +60,7 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 | `rate_limit_exceeded` | `429` | `rate_limit_error` | 租户 / API Key 超过限流策略（`rate_limit_policy` 的 qps/burst）。**降级到本机令牌桶时同样回 429**（降级 ≠ 放行） | `RateLimitFilter` |
 | `model_not_found` | `404` | `invalid_request_error` | 请求的 `model` 在配置快照的 `model_route` 里没有任何可用候选（且没有遗留单渠道可回落） | `ChatRelayController` |
 | `upstream_unreachable` | `502` | `api_error` | 连不上上游（`WebClientRequestException`）；上游的**业务**错误状态码不走这里 | `ChatRelayController` |
+| `insufficient_quota` | `429` | `insufficient_quota` | 周期配额用尽：`QuotaFilter` 按估算值在 Redis 上**预扣**时被 Lua 判为余额不足（`code` 与 `type` **同为** `insufficient_quota`，与限流那行的 `type=rate_limit_error` 不同）。**限流（`rate_limit_exceeded`）是"太快"，配额（`insufficient_quota`）是"这个周期的量用完了"** —— 两者都是 429，但**语义、判据、可否靠等待自动恢复都不同**：限流等一个窗口就好，配额要等下个周期（或控制面调额）。**Redis 不可用时配额**放行**（D7 fail-open），只有兜底路径（`QuotaFallback`）能在 Redis 故障期间如实拒绝超预算租户 | `QuotaFilter` |
 | ~~`internal_error`~~ | ~~`500`~~ | — | **这一行在当前实现里不可达，保留仅为说明设计意图。** `GatewayErrors.serialize` 的 catch 分支确实会吐出这个码，但 `GatewayErrors.write` 是先 `response.setStatusCode(status)`、再 `serialize(...)`，所以那条兜底体**只会以调用方原本要写出去的状态码**（`401` / `404` / `429` / `502` / `503`）出现，永远不会是 `500`。见下面「容易踩的规则」。 | `GatewayErrors` |
 
 几条容易踩的规则：
@@ -247,7 +248,10 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - **限流与配额是两件事**：`RateLimitFilter` 管 QPS/burst（丢弃是暂时的、下个窗口自动恢复）；
   配额（§6.2）管余额（扣减是持久的）。**不要把 429 `rate_limit_exceeded` 与未来的 `QUOTA_EXCEEDED`
   混为一谈**；配额整体属 M4，M3 不碰 `quota` 表。
-- **API Key 的吊销 / 停用延迟是显式接受的**：本机 Caffeine ≤30s、集群 Redis ≤5m。M3 **不加**
+- **API Key 的吊销 / 停用延迟（M4 后已收窄，2026-10-02 实测改写）**：控制台吊销 / 停用 / 删除后**共享层立即失效**
+  —— admin 在**事务体内**显式 `DEL` 掉 `aihub:apikey:<sha256(secret)>`（`ApiKeyAdminService.evictSharedCache`；
+  `DEL` 失败只 WARN、不影响主流程，见该方法的注释）。⇒ **唯一残留的延迟是网关本机 Caffeine ≤30s**（每个实例各自过期一次），
+  **不再**是「集群 Redis ≤5m」—— 本文下面/上面若有「≤5m」的旧说法，以本条为准。M3 **不加**
   吊销广播，也**不写** Pub/Sub 监听器：§6.3 的 Pub/Sub 失效只针对**配置快照**，而 M3 没有配置写入方
   （发布端不存在），为一个不存在的发布端写监听器只会得到一条永远不触发的代码路径。真正的收敛手段是
   M4 的吊销接口 + 显式 `DEL`。
@@ -262,10 +266,41 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
   按维度各告警一次。因此 6.6 节登记的版本回退缺口今天**没有任何缓解措施**（既无高水位、也无告警），
   关掉它是 **M4** 的条目。看到上面那条 WARN 时先查是不是有人直接改了库。
 
+## 6.7 配额：预扣 → 校正 → 对账（2026-10-02，M4 Task 12/13/15）
+
+三段各司其职，**互相不越界**：
+
+1. **预扣（数据面，gateway `QuotaFilter`）**：按「估算 prompt token + `max_tokens`」在 Redis 上用 **Lua 原子**预扣
+   （`QuotaScript`：一次往返内 `HMGET` → 判定 → `HSET` 写回 → `PEXPIRE`）。余额不足 ⇒ 数据面
+   **429 `insufficient_quota`**（见 §4 的表；`code` 与 `type` **同为** `insufficient_quota`，与限流的
+   `type=rate_limit_error` 不同）。**估算值只是估算**，所以预扣量与真实用量必然有偏差，靠第 2 段校正。
+2. **校正（数据面，gateway `QuotaCorrector`）**：拿到上游真实 `usage` 后把差额**还回去**。
+   ⚠️ **`adjust` 是非幂等的**：重复调用会重复加减 —— 它只能靠「一次请求一次校正」与下面第 3 段的对账兜底，
+   **不要**把它当成可重放的补偿事务。
+3. **对账（控制面，admin 02:00 UTC `QuotaReconciliationJob`）**：按 `request_log` **幂等重算** `billing_daily`，
+   并**只报告**偏差（偏差超过 `toleranceRatio` 才计一次 Micrometer 计数 + 一条审计）。
+   ⚠️ **对账绝不改账（D12）**：它**不写** `quota.token_used` / `quota.request_used`；偏差如何处置是**人的决定**。
+
+两条必记的边界：
+
+- **`0` 限额 = 不限（D15）**：`token_limit = 0`（或 `request_limit = 0`）表示**该维度不限制**，不是"额度为零"。
+  升级是惰性的：没有配额行 ⇔ 零额度 ⇔ 不限。
+- **Redis 不可用时配额**放行**（D7，fail-open）**：这与限流「降级**仍拒绝**」是**相反**的取向 ——
+  配额判的是"这个周期用了多少"，放行只可能造成超额；限流判的是"现在多快"，放行会直接压垮上游。
+  想在 Redis 故障期间仍如实拒绝超预算租户，靠 `QuotaFallback`（admin 兜底权威判余额）；关掉它 = 回到纯 fail-open。
+
+> **设计文档 §6.2 写的 `429 QUOTA_EXCEEDED` 已被本节的 `insufficient_quota` 取代**（数据面契约以 §4 的表为准）。
+> 注意 **admin 信封**里的 `ErrorCode.QUOTA_EXCEEDED` **仍然存在**，那是 **admin 侧的码**（`/api/**` 的 `code`），
+> **不要**与 `/v1/**` 上发给 OpenAI SDK 的 `error.code` 混为一谈。
+
 ## 7. 数据库约定
 
 - 字符集 `utf8mb4`，时间字段 `datetime(3)` 且按 UTC 存储。
 - 表结构变更一律新增 `V{n}__{描述}.sql`，禁止修改已执行过的迁移脚本。
+  **迁移的数量由 `SchemaMigrationTest` 显式钉住**（`flywayAppliesExactlyTwoMigrations`：断言
+  `hasSize(2)` 且 `version` 恰好是 `["1","2"]`）：M4 加入第二条（`V2__m4_console.sql`）是**有意的**，
+  并**已同步改过那条断言**。⇒ **任何人再加一条迁移，必须同时改 `SchemaMigrationTest` 的期望值**，否则该用例会红 ——
+  这是**不让人偷偷加表**的闸门，**不要**为了使它变绿去放宽那条断言。
 - `request_log` 按月分区；由于 MySQL 要求分区列出现在每个唯一索引中，其主键为 `(id, created_at)`，`request_id` 唯一键同样是 `(request_id, created_at)`。
 - `request_log` 的月分区由运行时维护（`RequestLogPartitionMaintainer`）：启动补齐 + 每日 03:10 前推
   `aihub.metering.partition-months-ahead`（默认 2）个月。补建必须用
