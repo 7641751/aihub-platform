@@ -113,7 +113,11 @@
 - Create: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/entity/KbChunkEntity.java`
 - Create: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/KbDocumentMapper.java`
 - Create: `aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/KbChunkMapper.java`
-- Modify: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/dao/SchemaMigrationTest.java`（`hasSize(2)` → `hasSize(3)`、version 列表加 `"3"`、用例改名 `flywayAppliesExactlyThreeMigrations`）
+- Modify: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/dao/SchemaMigrationTest.java`（`hasSize(2)` → `hasSize(3)`、version 列表加 `"3"`、description 列表加 `"kb pipeline"`、用例改名 `flywayAppliesExactlyThreeMigrations`）
+  **⚠️ 2026-10-02 补（控制器读文件时发现，计划原文漏了这条）**：同文件还有 **`allTwelveTablesExist`**，它用
+  `containsExactlyInAnyOrder` **精确列出 12 张表** ⇒ 加了 `kb_chunk` 之后**它也会红**，而且**用例名本身就错了**。
+  ⇒ 必须同时：把 `"kb_chunk"` 加进清单、把用例名改成 `allThirteenTablesExist`、并在注释里说明"表数量由本用例显式钉住"。
+  （这就是 CONVENTIONS §7 那条闸门的第二半 —— 我原先只写了迁移数量那一半。）
 
 **Interfaces:**
 - Consumes: 既有 `MybatisMapperConfig`（`@MapperScan`）、`AbstractIntegrationTest`。
