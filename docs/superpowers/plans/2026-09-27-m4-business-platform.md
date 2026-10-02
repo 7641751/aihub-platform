@@ -2261,6 +2261,35 @@ git commit -m "feat(gateway): pre-deduct quota atomically, reject with insuffici
   - `POST /internal/quota/reserve` 请求体 `{"tenantId":1,"estimatedTokens":123}` → admin 信封，`data = {"allowed":true,"remainingTokens":…,"remainingRequests":…}`
   - `AdminClient.reserveQuota(long tenantId, long estimatedTokens) : Mono<QuotaDecision>`（**default 实现返回 `Mono.empty()`**，与 `configSnapshot` 同一纪律）
 
+- **（2026-10-02 控制器补 —— 9 条：Files 缺路径 + 兜底的挂点/边界）**
+  1. **⚠️ Files 缺路径（本项目第 7 次）**：兜底**必须挂在 `QuotaFilter` 的「Redis 不可用」分支上**，而本任务的 Files 里
+     **没有** `QuotaFilter`/`QuotaConfig`。⇒ 必须 Modify：
+     `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaFilter.java`（降级分支改为「先试兜底」）、
+     `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaConfig.java`（把兜底注入过滤器）、
+     `aihub-gateway/src/main/resources/application.yml`（新增开关与说明）；
+     并 **Create** `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaFallback.java`
+     （一个**窄接口**：`Optional<QuotaDecision> reserveFallback(long tenantId, long estimatedTokens)`，实现里调 `AdminClient.reserveQuota(...).blockOptional(...)`。
+     理由：过滤器**不该**直接依赖 `AdminClient` 的 HTTP 细节，否则网关单测得为兜底拉一个假 HTTP 服务；
+     但**E2E** 仍要走 `FakeAdminServer` 证明「真 HTTP + 真 HMAC 签名」这一层 —— 两侧都要有。）
+  2. **⚠️ 兜底只在「Redis 不可用」时试，另两种情况**不试**：① **本周期不限**（没有预扣，不需要兜底）；
+     ② **`script_error`（脚本形状异常）** —— admin 侧跑的是**同一份 Lua** ⇒ 兜底必然也失败，试它只会把「脚本写错了」
+     这个**缺陷**藏进「Redis 挂了」这个**降级**里（正是 `SCRIPT_ERROR_METRIC` 那条纪律要防的）。
+     ③ `AdminClient.reserveQuota` 的 default 返回 `Mono.empty()` ⇒ **空 = 没配兜底** ⇒ 按 D7 fail-open + `degraded` 计数。
+  3. **兜底**共享同一个桶**（不是第二套账）**：admin 端点必须用**同一份 `QuotaScript`**、**同一个键布局**
+     （`QuotaKeys.bucketKey(tenantId, QuotaPeriod.of(now))`）跑预扣；**admin 侧真 Redis 用例**必须证明：
+     超预算 ⇒ `allowed=false` 且桶值不再增长；且键**逐字等于** `aihub:quota:<tenantId>:<YYYYMM>`。
+  4. **兜底调用必须有界**：`AdminClient` 的调用要有超时；**不许**把请求无限挂住（工具：`FakeAdminServer.enqueueStalledJsonForPath(path, status, body, delayMillis)`）。
+     超时 ⇒ 与「兜底失败」同路径：fail-open + `degraded`。
+  5. **开关** `aihub.quota.fallback-enabled`（**默认 true**，并在 `application.yml` 注释里写明理由：Redis 挂掉时若不回源，
+     配额**完全失效** ⇒ 可能超发；回源由 admin 侧的真 Redis 承担同一份账）。**必须有用例钉住 on/off 两侧**。
+  6. **兜底失败仍放行 + 计数 `degraded`**（本任务验收判据）：既不许把它升级成业务故障（拒绝请求），也不许**重复计数**。
+  7. **内部鉴权不需要登记新路径**：实测 `InternalAuthFilter` 按**前缀** `/internal/` 守卫（`INTERNAL_PREFIX`，无白名单），
+     且用 `getPathWithinApplication()` 判定 ⇒ `/internal/quota/reserve` **自动受保护**。用例只需钉住「无签名 ⇒ 401（admin 信封）；
+     带签名 ⇒ 200」，并**照抄 `InternalKeyController`/`InternalConfigController` 的注解形状**（含 `POST + 应用内路径` 的签名口径）。
+  8. **网关测试不许依赖 Docker**：兜底 E2E 用 `FakeAdminServer`（它已支持 `enqueueJsonForPath` 与 `enqueueStalledJsonForPath`）；
+     「桶真的被扣」由**admin 侧真 Redis** 用例负责（与 Task 12/13 同一条分工）。
+  9. **`git add` 逐个显式路径**（原清单只有 4 条，**缺上面第 1 条列出的 4 个**）。
+
 - [ ] **Step 1: 写失败测试**
 
 ```java
@@ -2283,14 +2312,21 @@ Run: `mvn -B -pl aihub-gateway -am test "-Dtest=QuotaReserveFallbackTest"`
 - [ ] **Step 5: 提交**
 
 ```bash
+# 2026-10-02 控制器订正：原清单缺「兜底挂在哪」的 4 个路径（见上方 Interfaces 的裁定 1）
 git add aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/internal/InternalQuotaController.java \
         aihub-admin/aihub-web/src/test/java/com/aihub/admin/quota/InternalQuotaReserveTest.java \
         aihub-gateway/src/main/java/com/aihub/gateway/admin/AdminClient.java \
+        aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaFallback.java \
+        aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaFilter.java \
+        aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaConfig.java \
+        aihub-gateway/src/main/resources/application.yml \
         aihub-gateway/src/test/java/com/aihub/gateway/quota/QuotaReserveFallbackTest.java
 git commit -m "feat(quota): add the HMAC-signed internal reserve fallback"
 ```
 
-**验收判据：** 内部接口受签名保护（无签名 401）；网关在 Redis 不可用时可选择回源预扣；**兜底本身失败时仍然放行**（与 D7 一致）。
+**验收判据：** 内部接口受签名保护（无签名 401、带签名 200）；**兜底只在「Redis 不可用」时试**（不限 / `script_error` 两条路径**不试**）；
+兜底**共享同一个桶与同一份 Lua**（admin 侧真 Redis 证明）；**兜底本身失败/超时时仍然放行**（与 D7 一致）+ `degraded` 计数；
+开关 `aihub.quota.fallback-enabled` 默认 true 且两侧都有用例；**网关测试不依赖 Docker**。
 **RED 证据：** `whenTheReserveCallItselfFailsTheGatewayStillAllowsTheRequest` 在「兜底失败就拒绝」的实现下红（那是把记账故障升级成业务故障）。
 
 ---
