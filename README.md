@@ -79,9 +79,11 @@
 10. **`last_used_at` 目前没有写入方（恒 NULL）**；`billing_daily` 的唯一写入方是 02:00 对账任务
     （M4 没有独立的计费流水来源）⇒ 账单端点在真实环境的数据**只在对账跑过之后才有**。
 
-**测试规模**：M4 各任务收口时实测为 `aihub-common` **68** / `aihub-web` **263** / `aihub-gateway` **391**
-（见各任务报告与 `.m4t*-logs/` 证据目录）；**整反应堆 `mvn -B clean test` 的权威数字与逐模块明细**，
-见 `.superpowers/sdd/m4-acceptance.md`（**git-ignored**，只存原始输出，token 只留前缀）。
+**测试规模（2026-10-02 整反应堆 `mvn -B clean test` 实测）**：`aihub-common` **68** / `aihub-web` **264** /
+`aihub-gateway` **391** ＝ **723 项，0 失败 / 0 错误 / 0 跳过**，8 个模块全 `SUCCESS`
+（产物 `.hb2-logs/T17-S2-full.log`；`Tomcat started on port` = **7**，即套件的 Spring 上下文仍是 7 个）。
+（`aihub-web` 的 264 = Task 16 之前的 260 + 静态页用例 4；**别再沿用 M3 的 491/497 与 M4 中途的 263** —— 每轮里程碑收口都要重测。）
+**真实 Docker Compose 全栈验收的结论**见 `.superpowers/sdd/m4-acceptance.md`（**git-ignored**，只存原始输出，token 只留前缀）。
 
 以下是有意划出的范围边界与**尚未被验证的东西**，以及真实验收量到的**已知缺口**（凡属缺口的都会明说「已知缺口 / 没有任何缓解措施」）。带「未验证 / 未做」字样的条目请当作事实陈述读：它们没有被任何测试或真实环境证明过。
 
