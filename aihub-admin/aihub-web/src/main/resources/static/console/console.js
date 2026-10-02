@@ -268,17 +268,26 @@
     renderRows(byId("logs-body"), page.records || [], ["requestId", "status", "model", "createdAt"]);
   }
 
+  // 服务端的 from/to 是**必填**且必须是可被 Instant.parse 解析的**带 Z 的 UTC** 字面量
+  // （缺省或解析失败一律 400，见 docs/CONVENTIONS.md §10 R3.1 与 Task 11 的裁定 3）。
+  // 而 <input type="datetime-local"> 的值形如 "2026-10-02T15:30"（**无秒、无时区**）：
+  // 直接透传必然 400；输入为空时原样省略也必然 400。所以在这里统一补齐秒与 Z，并在
+  // 为空时给一个「最近 24 小时」的窗口 —— 否则点一次「查询」永远查不出东西。
+  function utcInstant(value, fallbackMillis) {
+    if (!value) {
+      return new Date(fallbackMillis).toISOString().replace(/\.[0-9]{3}Z$/, "Z");
+    }
+    return (value.length === 16 ? value + ":00" : value) + "Z";
+  }
+
   function submitLogs(event) {
     event.preventDefault();
     setMessage(byId("logs-message"), "", false);
     var tenantId = byId("logs-tenant-id").value || state.tenantId;
-    var query = "tenantId=" + encodeURIComponent(tenantId);
-    if (byId("logs-from").value) {
-      query += "&from=" + encodeURIComponent(byId("logs-from").value);
-    }
-    if (byId("logs-to").value) {
-      query += "&to=" + encodeURIComponent(byId("logs-to").value);
-    }
+    var now = Date.now();
+    var query = "tenantId=" + encodeURIComponent(tenantId)
+        + "&from=" + encodeURIComponent(utcInstant(byId("logs-from").value, now - 24 * 60 * 60 * 1000))
+        + "&to=" + encodeURIComponent(utcInstant(byId("logs-to").value, now));
     api("/api/logs?" + query)
       .then(renderLogs)
       .catch(function (error) {

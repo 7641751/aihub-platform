@@ -2598,6 +2598,20 @@ git commit -m "feat(console): add the zero-build static admin console"
 **判别力必须由变异体提供**：① 给 `.js` 加 `innerHTML` ⇒ 该用例红；② 删掉 `/api/ping` 引用 ⇒ 结构断言红；③ 加一行 `localStorage.setItem(...)` ⇒ 该用例红；
 ④ 把 `<script src=...>` 改成内联 `<script>…</script>` ⇒ hygiene 用例红；⑤ 引入一个 `https://cdn…` ⇒ hygiene 用例红。**至少做 4 条。**
 
+
+**（2026-10-02 控制器修复轮 —— 独立评审抓出的 1 条 Important 已修）**
+- **B-1（Important，本任务交付物里的真实缺陷）**：`console.js` 的 `submitLogs` **只在输入非空时**才带 `from`/`to`，
+  而服务端 `LogQueryController` 对 `from`/`to` **缺省即 400**（Task 11 裁定 3：必须能解析成带 `Z` 的 `Instant`，解析失败 400）；
+  更重的是 `<input type="datetime-local">` 的值形如 `2026-10-02T15:30`（**无秒、无时区**）⇒ **填了也 400**。
+  ⇒ 修法：新增 `utcInstant(value, fallbackMillis)`（补秒 + 补 `Z`；为空时用「最近 24 小时」窗口），**无条件**带 `from`/`to`。
+- **同时加强测试**（评审 C-1/C-2/D）：协议相对 URL `//cdn` 也禁；`<script` 的**计数不变量**（大小写/空白变体与额外内联脚本都躲不过）；
+  两文件 `read()` 加 `isNotEmpty()` **正向对照**；并给 B-1 加**回归钉** `theLogsQueryAlwaysCarriesAWellFormedFromAndTo`
+  （断言 `utcInstant(` 存在 + 旧的「按需省略」形状不许回来）。
+- **判别力**：控制器变异 R2（把旧的条件式形状放回去）⇒ 该钉**精确红在 `:105`**；还原后 `clean` 回绿 **4/0**。
+  （原先的 R1：给 `console.js` 加 `innerHTML` ⇒ 红在 `:73`。）
+- **提交**（2 个显式路径）：`git add .../static/console/console.js .../test/.../ConsoleStaticResourceTest.java`
+  → `git commit -m "fix(console): always send a well-formed from/to in the log query"`
+
 ---
 
 ## Task 17: 文档收口 + M4 全栈验收

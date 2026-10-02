@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Locale;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -58,18 +59,28 @@ class ConsoleStaticResourceTest extends AbstractIntegrationTest {
     void theConsoleIsSelfContainedAndCarriesNoInlineCode() {
         String html = get("/console/index.html").getBody();
         assertThat(html).as("不引第三方脚本、不用内联脚本（CSP 友好，也少一个 XSS 面）")
-                .contains("src=\"/console/console.js\"")
+                .contains("src=\"/console/console.js\"")   // 正向锚：这一读路径必须先真的读到东西
                 .doesNotContain("<script>")            // 裸标签（无 src）＝内联脚本
-                .doesNotContain("onclick=").doesNotContain("onload=")   // 内联事件处理器同样是内联脚本
+                .doesNotContain("onclick=").doesNotContain("onload=")
+                .doesNotContain("onerror=").doesNotContain("onfocus=")  // 内联事件处理器同样是内联脚本
                 .doesNotContain("javascript:")
+                .doesNotContain("//cdn")                                // 协议相对 URL 也是外部 CDN（裁定 4）
                 .doesNotContain("http://").doesNotContain("https://");  // 无外部 URL / CDN
+
+        // 大小写/空白绕过（评审 C-2）：`<script >`、`<SCRIPT>`、多出来的内联 `<script>` 全都躲不过
+        // 「`<script` 的出现次数必须等于唯一那个带 src 的标签的出现次数」这条**计数**不变量。
+        String lower = html.toLowerCase(Locale.ROOT);
+        assertThat(count(lower, "<script"))
+                .as("除唯一的 <script src=\"/console/console.js\"> 之外不许有第二个 <script（含大小写/空白变体）")
+                .isEqualTo(count(lower, "<script src=\"/console/console.js\""));
     }
 
     @Test
     void theConsoleNeverRendersUntrustedHtmlAndKeepsTheTokenInSessionStorage() {
-        // innerHTML 两个文件都要查（裁定 4）
+        // innerHTML 两个文件都要查（裁定 4）；`isNotEmpty()` 是**正向对照**：读空了不许算通过（评审 D）
         for (String asset : new String[] {"index.html", "console.js"}) {
             assertThat(read(asset)).as("%s：所有服务端文本都必须走 textContent，不许 innerHTML", asset)
+                    .isNotEmpty()
                     .doesNotContain("innerHTML")
                     .doesNotContain("outerHTML")
                     .doesNotContain("eval(")
@@ -81,6 +92,18 @@ class ConsoleStaticResourceTest extends AbstractIntegrationTest {
                 .contains("/api/auth/login").contains("/api/channels").contains("/api/api-keys")
                 .contains("/api/logs").contains("/api/ping")
                 .contains("sessionStorage").contains("textContent").contains("plaintextKey");
+    }
+
+    @Test
+    void theLogsQueryAlwaysCarriesAWellFormedFromAndTo() {
+        // 评审 B-1 的回归钉：服务端的 from/to **必填**且必须是可被 Instant.parse 解析的**带 Z 的 UTC**
+        // 字面量（缺省或解析失败 ⇒ 400），而 <input type="datetime-local"> 的值没有秒、没有时区。
+        String js = read("console.js");
+        assertThat(js).as("必须把 datetime-local 的值规范化成带 Z 的 UTC 字面量")
+                .contains("utcInstant(");
+        assertThat(js).as("原缺陷形状：只在输入非空时才带 from/to（空输入 ⇒ 必然 400）—— 不许回来")
+                .doesNotContain("if (byId(\"logs-from\").value)")
+                .doesNotContain("if (byId(\"logs-to\").value)");
     }
 
     // --- 助手（裁定 1：项目同款形状 + 自建的 read）----------------------------
@@ -97,5 +120,16 @@ class ConsoleStaticResourceTest extends AbstractIntegrationTest {
         } catch (IOException e) {
             throw new UncheckedIOException("classpath:static/console/" + name + " 不存在", e);
         }
+    }
+
+    /** 不重叠地数 {@code needle} 的出现次数（评审 C-2 的计数不变量用它）。 */
+    private static int count(String haystack, String needle) {
+        int hits = 0;
+        int at = haystack.indexOf(needle);
+        while (at >= 0) {
+            hits++;
+            at = haystack.indexOf(needle, at + needle.length());
+        }
+        return hits;
     }
 }
