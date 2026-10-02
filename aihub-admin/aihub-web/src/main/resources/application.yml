@@ -93,3 +93,10 @@ aihub:
     partition-months-ahead: 2
     # 每天 03:10（与 M4 的 02:00 对账错开，避免同时动表）。
     partition-cron: "0 10 3 * * *"
+  quota:
+    # 每日对账任务（Task 15 / D12）：02:00（**UTC**，zone 在 @Scheduled 上显式钉死）按 request_log
+    # 重算当天的 billing_daily，并把「周期至今的重算用量」与 Redis 预扣桶比对，只会**报告**偏差、绝不改账。
+    # 时刻与 M3 的分区维护 03:10 错开。
+    reconcile-cron: "0 0 2 * * *"
+    # 偏差判据：|周期至今重算值 − 桶值| / max(周期至今重算值, 1) > 本值才计（默认 1%，等于不算）。
+    reconcile-tolerance-ratio: 0.01
