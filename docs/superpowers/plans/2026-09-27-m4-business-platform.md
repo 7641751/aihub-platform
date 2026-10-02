@@ -2618,6 +2618,10 @@ git commit -m "feat(console): add the zero-build static admin console"
 
 **Files:**
 - Modify: `docs/CONVENTIONS.md`、`README.md`、`.env.example`、`docker-compose.yml`（**admin 加 `AIHUB_CONSOLE_SECRET`、gateway 加 `AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION`** —— 不改它，第 2–7 步在容器里全是 500/401，见 C5）、`docs/superpowers/specs/2026-09-23-aihub-platform-design.md`
+- Modify（**2026-10-02 用户裁定**：原先悬在工作树里的那处改动**跟本任务一起提交**）：
+  `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/TokenBucket.java` —— **纯 javadoc 格式**（单行 → 多行，无语义变化），
+  2026-10-02 16:22:57 出现，疑似 IDE 自动格式化，与 M4 任何任务无关。⇒ 让它随本任务的提交一起落到 master（见 Step 4 的 `git add`），
+  **不要**单开一个提交、也**不要** `git checkout` 还原它（`core.autocrlf` 会把 LF 换成 CRLF）。
 - Create: `.superpowers/sdd/m4-acceptance.md`（**git-ignored**，原始输出，token 只留前缀）
 
 **Interfaces:**（本任务**没有代码接口**；下面是它必须逐条写清的**文档契约**，以及验收时必须能观察到的现象）
@@ -2637,9 +2641,11 @@ git commit -m "feat(console): add the zero-build static admin console"
   2. **本任务是 M4 里唯一被授权修改 `docker-compose.yml` 与 `.env.example` 的任务**（其它任务一律禁止改它）⇒ **不算越界**；
      但**只许加这两个变量**：admin 的 `AIHUB_CONSOLE_SECRET`、gateway 的 `AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION`（第 4 步反向对照的开关）。
      **不许**把真实密钥写进任何被提交的文件（`.env.example` 只放占位写法）。
-  3. **⚠️ 工作树里有一处不属于本任务的未提交改动**：`aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/TokenBucket.java`
-     （**纯 javadoc 单行→多行**，2026-10-02 16:22:57，疑似 **IDE 自动格式化**）⇒ **不要 `git add` 它**（Step 4 的 5 个显式路径里没有它）、
-     **不要 `git checkout` 还原它**（本机 `core.autocrlf` 会改行尾）；若它仍在工作树，**在报告里登记**（**已知**、非子代理残留）。
+  3. ~~**⚠️ 工作树里有一处不属于本任务的未提交改动**~~ **（已被 2026-10-02 用户裁定取代：跟本任务一起提交，见 Files 第 2 条）**：
+     `aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/TokenBucket.java` 是**纯 javadoc 单行→多行**的改动
+     （2026-10-02 16:22:57 出现，疑似 **IDE 自动格式化**）。它不是子代理残留变异、也没有语义变化；
+     ⇒ **随本任务一起提交**（Step 4 的 `git add` 已含它），**不要**单开提交、**不要** `git checkout` 还原
+     （本机 `core.autocrlf` 会把 LF 换成 CRLF）。**它是已知且无害的** —— §8「中止后查工作树四处」命中它时**不要**当成事故处理。
   4. **章节号先核对再写**：`§4`（数据面错误契约）、`§6.6`（渠道密钥与配置快照）都已存在；**`§6.7` 是本次新增**，要**接在 §6.6 之后、`§7` 之前**。
      ⇒ 动笔前用 `Select-String -Pattern '^#{2,3} '` 列出真实章节号 —— 本项目已发生过"引用了一个不存在的 §12"。
   5. **Step 1 的硬规矩**：对每一条新写的边界问「它有没有对应的代码/测试？」；**没有对应证据的句子不许写**，
@@ -2679,8 +2685,10 @@ Expected: `BUILD SUCCESS`，报告**每个模块**的 `Tests run`（基线 commo
 - [ ] **Step 4: 提交**
 
 ```bash
+# 2026-10-02 用户裁定补一条：那处悬着的纯 javadoc 格式改动（TokenBucket）随本任务一起提交
 git add docs/CONVENTIONS.md README.md .env.example docker-compose.yml \
-        docs/superpowers/specs/2026-09-23-aihub-platform-design.md
+        docs/superpowers/specs/2026-09-23-aihub-platform-design.md \
+        aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/TokenBucket.java
 git commit -m "docs(m4): record the console, quota and invalidation contracts plus the M4 acceptance"
 ```
 
