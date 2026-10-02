@@ -1953,6 +1953,14 @@ git commit -m "test(quota): cover the request dimension, the HTTP contract and t
 - Create: `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaLimiter.java`、`RedisQuotaLimiter.java`
 - Create: `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaCorrector.java`（校正钩子；`ChatRelayController` 在 `doFinally` 里拿到的那个 `MeteringEvent` 直接喂给它）
 - Create: `aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaConfigProperties.java`、`QuotaConfig.java`
+- Create: **`aihub-gateway/src/main/java/com/aihub/gateway/quota/QuotaReservationRegistry.java`**
+  （**2026-10-01 控制器补**：`requestId → {tenantId, period, estimatedTokens, degraded}` 的**有界**关联 ——
+  `QuotaCorrector.correct(MeteringEvent)` 靠它才能算出 `actual − estimate`；用 Caffeine + 短 TTL，**禁止无界 Map**。
+  过滤器写入、校正器**消费并移除**；缺失 ⇒ 跳过 + 计数。见 Interfaces 的 13b 第 2 条。）
+- **Modify（2026-10-01 控制器补）**：`aihub-gateway/src/test/java/com/aihub/gateway/relay/ChatRelayControllerTest.java`、
+  `.../relay/SseStreamingTest.java`、`.../relay/RelayMeteringFlowTest.java` —— **给 `ChatRelayController` 的构造器加参数
+  （`QuotaCorrector`/`QuotaReservationRegistry`）会破坏直接构造它的既有测试**（`ChatRelayControllerTest` 就是直接 new 的）。
+  这些改动**必须逐个列出并说明改了哪条断言**（**不许放宽**）；**若你选择把新依赖做成可选（`@Nullable`/默认空实现）以避免改既有测试，必须说明理由**。
 - Modify: `aihub-gateway/src/main/java/com/aihub/gateway/relay/ChatRelayController.java`（**在 `doFinally` 里、`meteringPublisher.publish(event)` 之后调用 `quotaCorrector.correct(event)`** —— controller 自己看不到 `usage`，别写成「拿到 usage 后校正」，见本节 Step 3 的说明）
 - Modify: `aihub-gateway/src/main/resources/application.yml`、`aihub-gateway/src/test/resources/application.properties`
 - Test: `aihub-gateway/src/test/java/com/aihub/gateway/quota/QuotaFilterTest.java`
@@ -2035,6 +2043,29 @@ git commit -m "test(quota): cover the request dimension, the HTTP contract and t
   9. **网关测试属性默认关掉配额**（与 `metering`/`ratelimit` 同一条纪律：绝大多数测试不想撞"Redis 指向不存在的端口"的超时）：
      `src/test/resources/application.properties` 加 `aihub.quota.enabled=false`，需要它的测试用
      `properties`/`@DynamicPropertySource` **显式打开**（照抄 `aihub.metering.enabled` / `aihub.ratelimit.enabled` 的注释风格）。
+
+- **（2026-10-01 控制器补，13b 专用 —— 4 条"照计划字面做会漏/做不出"）**
+  1. **⚠️ 校正必须在**两处**终端发布点都生效，不能只改 `:203`**：实测 `ChatRelayController` 有**两个** `meteringPublisher.publish`
+     终端点 —— `:163`（**「一个候选都没有」的提前终止**：`model_not_found`，**在 `doFinally` 之前就 return 了**）
+     与 `:203`（`doFinally`，正常/取消/异常收尾）；`:411` 的 `doFinally` **不发布**（只 `onClientDisconnected`）。
+     因为 `QuotaFilter`（order +175）**在路由之前**就已预扣，`:163` 这条失败路径**不会**经过 `:203` ⇒ 只挂 `:203` 会让
+     **每个 `model_not_found` 请求永久吃掉一份估算配额**（漏，且静默）。⇒ **把两处都改成调用同一个私有助手**
+     （如 `publishAndCorrect(event)`，内部先 `meteringPublisher.publish(event)` 再 `quotaCorrector.correct(event)`），
+     **并且必须有一条用例钉住"提前终止路径也退回了估算"**（变异：去掉 `:163` 的校正 ⇒ 必须红）。
+  2. **⚠️ `correct(MeteringEvent)` 拿不到 estimate —— 必须有**有界**的相关性存储**：`MeteringEvent` 的实测分量是
+     `requestId/tenantId/apiKeyId/channelId/model/promptTokens/completionTokens/totalTokens/latencyMs/status/errorCode/createdAtEpochMilli`
+     —— **没有**预扣时的估算值。而 `QuotaReservation(tenantId, period, estimatedTokens, degraded)` 是**过滤器**写进 exchange 属性的，
+     校正时**拿不到**（那时只有事件）。⇒ 必须显式引入一个 **requestId → (tenantId, period, estimate, degraded) 的关联**：
+     过滤器写入、校正器**消费并移除**；**必须有界**（Caffeine + 短 TTL，禁止无界 `Map`）—— 否则这是一处内存泄漏，
+     且**跨实例重复调 `adjust` 会双重扣账**（`adjust` 非幂等）。缺失条目 ⇒ **跳过校正 + 计数**（绝不抛到请求路径上）。
+     用例必须钉住：**用了注册的 estimate**、**消费后条目被移除**、**缺失条目只计数不崩**。
+  3. **两个内存上限的实测值（写进配置注释）**：`aihub.metering.max-capture-bytes` 实测 = **`1048576`**
+     （`aihub-gateway/src/main/resources/application.yml:78`，且 `MeteringProperties` 的 `@DefaultValue("1048576")` 一致）；
+     `aihub.quota.max-in-memory-bytes` **必须严格小于它**（计划 E.3 caveat 4），并在 `application.yml` 的注释里写明**为什么**。
+     报告里给出两个数字与各自来源。
+  4. **429 的形状（用既有助手，别手搓 JSON）**：`GatewayErrors.write(ServerHttpResponse, HttpStatus, String type, String code, String message)`
+     实测签名；`insufficient_quota` 的 `type` 与 `code` **都是** `"insufficient_quota"`（D6），状态 `TOO_MANY_REQUESTS`（429）；
+     **必须**有一条断言证明它**不含** `rate_limit_exceeded`（与限流区分开）。
 
 - [ ] **Step 1: 写失败测试**
 
