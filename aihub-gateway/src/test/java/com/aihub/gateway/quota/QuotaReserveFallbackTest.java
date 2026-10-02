@@ -79,7 +79,18 @@ class QuotaReserveFallbackTest {
     /** 跨过网关给内部跳的 {@code responseTimeout(3s)}：这一跳必然以传输故障收场。 */
     private static final long BEYOND_GATEWAY_INTERNAL_HOP_BUDGET_MILLIS = 3_500L;
 
-    /** 「有界」的观测上界：假 admin 迟到 3.5 秒，整个客户端请求仍必须在这个预算内返回。 */
+    /**
+     * 「有界」的观测上界：假 admin 迟到 3.5 秒，整个客户端请求仍必须在这个预算内返回。
+     *
+     * <p><b>⚠️ 已知覆盖缺口（2026-10-02 独立评审 I-1 + 控制器的根因分析）</b>：本断言只能排除
+     * "&gt;7s 的挂死"，**钉不住真实的 3 秒界限** —— 把 {@code AdminClientConfig} 的
+     * {@code responseTimeout} 与窄接口预算都放宽到 60s 后本用例**仍然 GREEN**（评审实测 M8）。
+     * **为什么不能简单地"把迟到时长加长"**：{@code FakeAdminServer} 的处理线程是**同步
+     * `Thread.sleep(delay)`** ⇒ 迟到时长一旦超过**下一个用例**的内部跳预算（3s），下一个用例的回源请求
+     * 会被堵住而超时（控制器实测：迟到 9s ⇒ 紧随其后的 `aFallbackDenialIsHonouredAsInsufficientQuota`
+     * 变成 `expected: 429 but was: 200`，耗时 5.587s）。⇒ 修法必须**先**让假 admin 的处理**异步**
+     * （或把该用例隔离到自己的端口/路径），**再**把迟到抬到上界之上。已登记为 M4 收口残余。
+     */
     private static final long BOUNDED_RESPONSE_MILLIS = 7_000L;
 
     private static final long TENANT = 0L;
