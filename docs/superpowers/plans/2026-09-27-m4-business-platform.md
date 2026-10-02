@@ -2496,26 +2496,81 @@ git commit -m "feat(quota): add the 02:00 reconciliation job that recomputes bil
 
 **Interfaces:**
 - Consumes: `/api/auth/login`、`/api/channels`、`/api/api-keys`、`/api/logs`（Task 6/8/9/11）
-- Produces: `GET /console/` 可访问的三个静态文件；页面用 `sessionStorage` 存令牌（D9）
+  **＋ `GET /api/ping`（2026-10-02 控制器补，原来是**致命遗漏**）**：`/api/logs`（以及 `/api/audit`、`/api/billing/daily`）
+  在 `docs/CONVENTIONS.md` §10 **R3.1** 下**必须显式 `tenantId`**，而 **`LoginResponse` 只回 `{token, role, expiresAtEpochSecond}`——没有 `tenantId`**
+  （`ConsoleAuthController:53`）⇒ 照字面实现的话日志视图**必然 400**。`tenantId` 只能来自 **`/api/ping` 的 `PingResponse(userId, tenantId, role)`**（`:57`）。
+  ⇒ 页面登录后必须再调一次 `/api/ping` 取 `tenantId`（它也是 Task 6 就为"带令牌的正向探针"而存在的）。
+- Produces: ~~`GET /console/`~~ **`GET /console/index.html`** 可访问的三个静态文件（**2026-10-02 控制器订正**：Spring Boot
+  **不为子目录提供 welcome page**，`/console/` 很可能 404 —— **不要**把它写成必须 200 的验收；若实测为 200 就**额外记录**，
+  否则页面入口就是 `/console/index.html`）；页面用 `sessionStorage` 存令牌（D9）
+
+- **（2026-10-02 控制器补 —— 8 条"照字面执行会出错 / 会让你交出假证据"）**
+  1. **⚠️ 计划给的测试代码在本项目里编译不过（照抄必红在编译）**：`get(String)` **不是**基类提供的，而是**每个测试类各自 `private` 定义**
+     （`ChannelAdminIntegrationTest:854`、`ProbeAndQueryIntegrationTest:602`…），返回 `ResponseEntity<String>` ⇒ 它有 `getStatusCode()`
+     与 `getBody()`，**没有** `.statusCode()` / `.body()`；`read(String)` **全仓不存在**。⇒ 你的新测试类必须**自己定义**这两个助手：
+     `get(String)`（项目同款）+ `read(String name)`（用 `new ClassPathResource("static/console/" + name)` 读 **classpath 上的真实产物**，
+     而不是去读源码目录），并一律用 `getStatusCode()` / `getBody()`。
+  2. **RED 形态如实登记**：文件不存在 ⇒ 三条 200 与 `read(...)` 都红在"**资源不存在 / 404**"，
+     **没有判别力**（与 Task 9/10/11 的 404 同源）。判别力**必须**由变异体提供（见第 5 条），**不许**把 404 式的红当成"断言有效"。
+  3. **⚠️ 验收判据里的"登录后能完成三件事"本任务**无法**由 JUnit 覆盖**（没有 JS 引擎，页面逻辑是客户端代码）。
+     ⇒ **不许**把它写成"已验证"。可测的部分**必须**折成**可证伪的结构断言**（第 5 条），不可测的部分**在报告里明写"未由测试覆盖、只能人工核对"**。
+  4. **Hygiene 断言只查了 js、漏了 html**：`innerHTML` 的检查**必须覆盖 `index.html` 与 `console.js` 两个文件**；
+     `<script>` 的检查**必须**能同时抓住**裸 `<script>`**（无 `src`）与**内联事件处理器**（`onclick=`/`onload=`）与 `javascript:` 伪协议
+     （原断言只抓 `<script>` 这一种，给它加个空格就能溜过去）；并断言**不出现任何外部 URL**（`http://`/`https://`/`//cdn`）。
+  5. **必须有判别力的结构断言（`.js` 内容级，删掉任一视图即变红）**：`console.js` **必须包含**四个端点字面量
+     `/api/auth/login`、`/api/channels`、`/api/api-keys`、`/api/logs`**加 `/api/ping`**，**必须包含** `sessionStorage` 与 `textContent`，
+     **必须不包含** `innerHTML`、`eval(`、`document.write`、`localStorage`、`outerHTML`。
+     （`localStorage` 是 D9 的反面：令牌只许在 `sessionStorage`。）
+  6. **明文只出现一次**：`POST /api/api-keys` 的 `data.plaintextKey` 是**唯一**一次明文（Task 8）⇒ 页面必须**一次性展示**并提示，
+     **不许**把它写进 `sessionStorage`/URL/日志。断言：`.js` 里 `plaintextKey` 出现，且**不出现** `localStorage`（与第 5 条合并）。
+  7. **上下文预算（必须仍是 7）**：`ConsoleStaticResourceTest` **必须继承 `AbstractIntegrationTest`**（`.../support/AbstractIntegrationTest.java`，
+     `@SpringBootTest(RANDOM_PORT)`）、**不许**声明 `@TestPropertySource`/`@Import`、**不许**用 `@WebMvcTest`（那会 fork 新上下文）。
+     ⇒ 它与既有集成测试**共用默认上下文**，套件总数**仍是 7**。跑完全量必须**实测** `Tomcat started on port` 次数（基线 **7**）。
+  8. **`git add` 不许写目录**（本项目已**三次**踩过）：`:2530` 的 `.../static/console/` **必须展开成 3 个显式文件路径**。
 
 - [ ] **Step 1: 写失败测试**
 
 ```java
+// 2026-10-02 控制器订正：原稿用了本项目不存在的形状（`.statusCode()`/`.body()`/`read(...)` 编译不过）。
+// 本类**自己**定义 get(String)（项目同款，返回 ResponseEntity<String>）与 read(String)（读 classpath 上的真实产物）。
 @Test
-void theConsoleAssetsAreServedAndContainNoInlineScript() {
-    assertThat(get("/console/index.html").statusCode()).isEqualTo(200);
-    assertThat(get("/console/console.js").statusCode()).isEqualTo(200);
-    assertThat(get("/console/console.css").statusCode()).isEqualTo(200);
-    String html = get("/console/index.html").body();
-    assertThat(html).as("不引第三方脚本、不用内联脚本（CSP 友好，也少一个 XSS 面）")
-            .doesNotContain("<script>").contains("src=\"/console/console.js\"");
+void theConsoleAssetsAreServed() {
+    assertThat(get("/console/index.html").getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(get("/console/console.js").getStatusCode()).isEqualTo(HttpStatus.OK);
+    assertThat(get("/console/console.css").getStatusCode()).isEqualTo(HttpStatus.OK);
+    // ⚠️ 不要断言 `/console/`（Spring Boot 不为子目录做 welcome page）—— 若实测为 200，额外记录，不进验收。
 }
 
 @Test
-void theConsoleNeverRendersUntrustedHtml() {
-    assertThat(read("console.js")).as("所有服务端文本都必须走 textContent，不许 innerHTML")
-            .doesNotContain("innerHTML");
+void theConsoleIsSelfContainedAndCarriesNoInlineCode() {
+    String html = get("/console/index.html").getBody();
+    assertThat(html).as("不引第三方脚本、不用内联脚本（CSP 友好，也少一个 XSS 面）")
+            .contains("src=\"/console/console.js\"")
+            .doesNotContain("<script>")          // 裸标签（无 src）＝内联脚本
+            .doesNotContain("onclick=").doesNotContain("onload=")   // 内联事件处理器同样是内联脚本
+            .doesNotContain("javascript:")
+            .doesNotContain("http://").doesNotContain("https://");  // 无外部 URL / CDN
 }
+
+@Test
+void theConsoleNeverRendersUntrustedHtmlAndKeepsTheTokenInSessionStorage() {
+    // ⚠️ innerHTML 两个文件都要查（原稿只查了 js）
+    for (String asset : new String[] {"index.html", "console.js"}) {
+        assertThat(read(asset)).as("%s：所有服务端文本都必须走 textContent，不许 innerHTML", asset)
+                .doesNotContain("innerHTML")
+                .doesNotContain("outerHTML")
+                .doesNotContain("eval(")
+                .doesNotContain("document.write")
+                .doesNotContain("localStorage");          // D9：令牌只许在 sessionStorage
+    }
+    // 结构引用（删掉任一视图即红 —— 这是本任务唯一有判别力的部分，见裁定 2/5）
+    assertThat(read("console.js")).as("五个端点必须都在（含 /api/ping：日志视图要靠它拿 tenantId）")
+            .contains("/api/auth/login").contains("/api/channels").contains("/api/api-keys")
+            .contains("/api/logs").contains("/api/ping")
+            .contains("sessionStorage").contains("textContent").contains("plaintextKey");
+}
+// ⚠️ RED 形态：文件不存在 ⇒ 上面三条都红在 404/资源不存在，**没有判别力**；判别力由变异体提供。
+// ⚠️ 「登录后能完成建渠道 / 建 Key / 查日志」**没有 JS 引擎就测不了** ⇒ 报告里必须写"未由测试覆盖"。
 ```
 
 - [ ] **Step 2: 跑它确认失败** → 404（文件还不存在）
@@ -2527,13 +2582,21 @@ void theConsoleNeverRendersUntrustedHtml() {
 Run: `mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=ConsoleStaticResourceTest"`
 
 ```bash
-git add aihub-admin/aihub-web/src/main/resources/static/console/ \
+# 2026-10-02 控制器订正：原清单第一行是【目录】，本项目已三次禁止（逐个显式路径）
+git add aihub-admin/aihub-web/src/main/resources/static/console/index.html \
+        aihub-admin/aihub-web/src/main/resources/static/console/console.js \
+        aihub-admin/aihub-web/src/main/resources/static/console/console.css \
         aihub-admin/aihub-web/src/test/java/com/aihub/admin/console/ConsoleStaticResourceTest.java
 git commit -m "feat(console): add the zero-build static admin console"
 ```
 
-**验收判据：** 三个静态文件可访问；无内联脚本、无第三方脚本、无 `innerHTML`；登录后能完成「建渠道 / 建 Key / 查日志」三件事。
-**RED 证据：** `theConsoleNeverRendersUntrustedHtml` 在任何一次用 `innerHTML` 渲染服务端文本时红（这是本页面唯一的 XSS 入口，D9 已把代价登记为已知边界）。
+**验收判据：** 三个静态文件可访问（**入口是 `/console/index.html`**）；无内联脚本/内联事件处理器、无第三方 URL、无 `innerHTML`/`eval(`/`document.write`、无 `localStorage`（令牌只进 `sessionStorage`）；`.js` 里五个端点与 `plaintextKey` 都在；**套件 Spring 上下文仍是 7**。
+⚠️ **本任务唯一无法由测试覆盖的验收**：`登录后能完成「建渠道 / 建 Key / 查日志」三件事` —— 页面逻辑是**客户端 JS**，套件里**没有 JS 引擎**
+⇒ 报告里**必须明写"未由测试覆盖、只能人工核对"**，**不许**写成"已验证"（可覆盖的部分已折成结构断言与变异体）。
+**RED 证据：** 任何一次用 `innerHTML` 渲染服务端文本、或把令牌放进 `localStorage` 时，`theConsoleNeverRendersUntrustedHtmlAndKeepsTheTokenInSessionStorage` 红
+（这是本页面唯一的 XSS 入口，D9 已把代价登记为已知边界）。**但注意 RED 的自然形态是"文件不存在"（404）**—— 没有判别力，
+**判别力必须由变异体提供**：① 给 `.js` 加 `innerHTML` ⇒ 该用例红；② 删掉 `/api/ping` 引用 ⇒ 结构断言红；③ 加一行 `localStorage.setItem(...)` ⇒ 该用例红；
+④ 把 `<script src=...>` 改成内联 `<script>…</script>` ⇒ hygiene 用例红；⑤ 引入一个 `https://cdn…` ⇒ hygiene 用例红。**至少做 4 条。**
 
 ---
 
