@@ -29,21 +29,24 @@ class SchemaMigrationTest extends AbstractIntegrationTest {
     private ConfigVersionMapper configVersionMapper;
 
     @Test
-    void flywayAppliesExactlyTwoMigrations() {
-        // D1：M4 有意引入第二条迁移（审计表 / request_log 索引 / config_version）。
-        // 断言语义从「恰好 1 条」升级为「恰好这 2 条」：护栏要保的是「没人能悄悄加迁移」，
-        // 而不是「永远只有 1 条」—— 现在任何人再加迁移都必须**显式**改这里。
+    void flywayAppliesExactlyThreeMigrations() {
+        // D1（M4）：M4 有意引入第二条迁移（审计表 / request_log 索引 / config_version）。
+        // D1（M5）：M5 有意引入第三条迁移（kb_chunk 逐段进度表）。
+        // 护栏要保的是「**没人能悄悄加迁移**」—— 每次新增迁移都必须**显式**改这里，
+        // 而不是让「迁移数量」随迁移目录里的文件数自动漂移。description 取迁移文件名
+        // 双下划线之后那段（Flyway 把下划线解析成空格）。
         List<Map<String, Object>> applied = jdbcTemplate.queryForList(
                 "SELECT version, description FROM flyway_schema_history WHERE success = 1 ORDER BY installed_rank");
 
-        assertThat(applied).hasSize(2);
-        assertThat(applied).extracting(r -> String.valueOf(r.get("version"))).containsExactly("1", "2");
+        assertThat(applied).hasSize(3);
+        assertThat(applied).extracting(r -> String.valueOf(r.get("version"))).containsExactly("1", "2", "3");
         assertThat(applied).extracting(r -> String.valueOf(r.get("description")))
-                .containsExactly("init schema", "m4 console");
+                .containsExactly("init schema", "m4 console", "kb pipeline");
     }
 
     @Test
-    void allTwelveTablesExist() {
+    void allThirteenTablesExist() {
+        // 表数量由本用例**显式钉住**：新增表必须同时改这份清单，别指望它自动跟随。
         List<String> tables = jdbcTemplate.queryForList(
                 "select table_name from information_schema.tables "
                         + "where table_schema = database() and table_name <> 'flyway_schema_history'",
@@ -53,7 +56,21 @@ class SchemaMigrationTest extends AbstractIntegrationTest {
                 "tenant", "sys_user", "api_key", "channel", "model_route", "quota",
                 "rate_limit_policy", "request_log", "kb_document", "billing_daily",
                 // V2 新增（决策 D1）：审计表与水位表。
-                "audit_log", "config_version");
+                "audit_log", "config_version",
+                // V3 新增（M5 决策 D1/D4）：文档入库流水线的逐段进度表。
+                "kb_chunk");
+    }
+
+    @Test
+    void kbChunkHasTheCoordinatesWeCleanUpBy() {
+        // 定向断言：只看 kb_chunk 的列与两个键，**不数全库**（表清单由 allThirteenTablesExist 钉住）。
+        List<Map<String, Object>> cols = jdbcTemplate.queryForList(
+                "select column_name from information_schema.columns where table_name = 'kb_chunk'");
+        assertThat(cols).extracting(r -> String.valueOf(r.get("column_name")))
+                .containsExactlyInAnyOrder("id", "doc_id", "seq", "text", "vector_id", "embedded_at", "created_at");
+        assertThat(jdbcTemplate.queryForObject(
+                "select count(*) from information_schema.statistics where table_name = 'kb_chunk' and index_name = 'uk_kb_chunk_doc_seq'",
+                Integer.class)).as("(doc_id, seq) 唯一 ⇒ 重放即覆盖").isGreaterThan(0);
     }
 
     @Test
