@@ -2349,25 +2349,88 @@ git commit -m "feat(quota): add the HMAC-signed internal reserve fallback"
   - `QuotaReconciliationJob.reconcileYesterday()`（`@Scheduled`，**02:00**，与 M3 的分区维护 **03:10** 错开）
   - 配置 `aihub.quota.reconcile-cron`（默认 `0 0 2 * * *`）、`aihub.quota.reconcile-tolerance-ratio`（默认 `0.01`）
 
+- **（2026-10-02 控制器补 —— 9 条"照字面做会算错/漏掉"）**
+  1. **⚠️ 语义缺陷：日记账与「月」桶**不可直接比**（先定死口径）**：`reconcile(LocalDate statDate)` 只重算**一天**，
+     而 Redis 桶 `aihub:quota:<tenant>:<YYYYMM>` 装的是**当月累计**。把「这一天的 tokens」直接与桶比，
+     **每月除最后一天外都会误报偏差**。⇒ **定死**：偏差比较的对象是**周期累计** ——
+     `period = QuotaPeriod.of(statDate)`，用 `SUM(billing_daily.tokens WHERE stat_date ∈ [周期第一天, statDate])`
+     与桶里的 `tok` 比（对「昨天」而言这就是"周期至今"）。**`ReconciliationReport.tokens` 是那**一天**的重算值，
+     `mismatches` 是**周期至今**的口径** —— 两个不同 scope，必须写进 record 的 javadoc。
+     **必须有一条用例钉住它**：造一个「当天的量与桶不同、但周期至今的量与桶一致」的夹具 ⇒ **不许报偏差**；
+     再一个「周期至今不同」的夹具 ⇒ **必须报**。这是本条唯一有判别力的形式。
+  2. **⚠️ `cron` 必须显式 `zone = "UTC"`**：`@Scheduled(cron = ...)` **默认用 JVM 默认时区** —— 本机是 UTC+8，
+     "02:00" 会漂到 UTC 18:00。既有 `RequestLogPartitionMaintainer` 的 `@Scheduled(..., zone = "UTC")` 就是这条纪律的先例。
+     ⇒ 对账的 `@Scheduled` **必须**写 `zone = "UTC"`（与它错开 03:10 才有意义）。
+  3. **⚠️ `statDate` 必须按 UTC 折算，且必须可注入 `Clock`**：用 `LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC)`
+     （**不许** `LocalDate.now()`，那是 JVM 默认时区 —— CONVENTIONS §7 的原陷阱）。`QuotaReconciliationJob` 的
+     "昨天"必须能被用例用固定 `Clock` 钉住；`quota` 的 `period` 同样按 UTC。
+  4. **⚠️ 时间参数不许绑 `Instant`**：计划给的 Mapper 签名是 `recomputeDaily(Instant from, Instant to)`，
+     而 `request_log.created_at` 是**无时区**的 `DATETIME(3)`、存 UTC 墙上时间。绑 `Instant` 会由驱动按**连接时区**折算，
+     在**非 UTC 连接**上把窗口整体推走（Task 11 已为此付过代价，且本套件跑 UTC 方言 ⇒ **测试里静默通过**）。
+     ⇒ 签名改 **`LocalDateTime from, LocalDateTime to`**，由调用方 `LocalDateTime.ofInstant(instant, ZoneOffset.UTC)` 显式折算。
+  5. **⚠️ 偏差的判据必须钉死（含除零）**：`ratio` 的口径写成 `|周期至今的重算值 − 桶值| / max(周期至今的重算值, 1)`；
+     **当重算值为 0 而桶值 > 0 时必须仍能报出**（那是"预扣了但没落账"，最严重的一类），**不许把它当除零静默跳过**。
+     `ratio > tolerance` 才算 mismatch（**等于不算**，边界只定义一次）。`mismatches : Map<Long, Double>` = 租户 → ratio。
+  6. **⚠️ `git add` 里有**目录**（`.../service/quota/`）**：本项目已四次判定为缺陷 ⇒ 展开成 2 个文件
+     （`QuotaReconciliationService.java`、`QuotaReconciliationJob.java`）。注意同一清单里 Mapper 那行**已经**是显式路径 —— 不一致。
+  7. **⚠️ 夹具必须**定向**，不许全表计数**：计划 Step 1 的 `billingDailyMapper.selectList(null)` +
+     `containsExactlyInAnyOrder(30L, 300L)` 是**全表断言**，而 `billing_daily` 与 `request_log` 都是 **JVM 级共享表**
+     （Testcontainers 单例）⇒ 别的用例写过行就会红。⇒ 只按**本用例的 (tenantId, stat_date)** 定向查并断言行数/值。
+     （`request_log` 的夹具照抄 `RequestLogPartitionMaintainerTest:118` 的列清单；`2026-09-26` 落在 V1 建的 `p202609` 里，
+     分区是存在的 —— 但**别改成没有分区的日期**。）
+  8. **⚠️ `runningTwiceIsIdempotentBecauseOfTheUniqueKey` 现在是**空占位**（`{ /* … */ }`）** ——
+     本项目已**四次**抓到这种假绿（Task 10/11/12 各一次）。⇒ 必须落地：同一 `stat_date` 连跑两次 ⇒
+     ① 定向查到的**行数不变**（恰好 1 行/(tenant,date)）、② `requests`/`tokens` **值不变**。
+  9. **`cost` 固定 0** 与 **"已知近似值不区分"**（`error_code = usage_missing` / `client_disconnected`）两条要在代码注释与
+     README 边界里写明（计划已提，这里强调：**注释里必须点出它使偏差计数器天然包含近似数据**）。
+
 - [ ] **Step 1: 写失败测试**
 
 ```java
 @Test
 void recomputesBillingDailyForYesterdayFromRequestLog() {
-    // 真 MySQL：造 3 天、两个租户的 request_log
+    // 真 MySQL：造该日的 request_log（两个租户、值不同）。
+    // ⚠️ 2026-10-02 订正：**不许 `selectList(null)` 全表断言** —— billing_daily/request_log 都是
+    //    JVM 级共享表（Testcontainers 单例），别的用例写过行就会红。只按本用例的 tenant/stat_date 定向查。
+    long t1 = 880_001L, t2 = 880_002L;
+    insertRequestLog(t1, LocalDateTime.of(2026, 9, 26, 10, 0), 30);   // 列清单照抄 RequestLogPartitionMaintainerTest:118
+    insertRequestLog(t2, LocalDateTime.of(2026, 9, 26, 11, 0), 300);
     service.reconcile(LocalDate.of(2026, 9, 26));
-    List<BillingDailyEntity> rows = billingDailyMapper.selectList(null);
-    assertThat(rows).extracting(BillingDailyEntity::getTokens).containsExactlyInAnyOrder(30L, 300L);
+
+    assertThat(billingDailyFor(t1, LocalDate.of(2026, 9, 26)).getTokens()).isEqualTo(30L);
+    assertThat(billingDailyFor(t2, LocalDate.of(2026, 9, 26)).getTokens()).isEqualTo(300L);
+    assertThat(billingDailyFor(t1, LocalDate.of(2026, 9, 26)).getRequests()).isEqualTo(1L);
 }
 
 @Test
-void runningTwiceIsIdempotentBecauseOfTheUniqueKey() { /* 同一个 stat_date 重跑不新增行 */ }
+void runningTwiceIsIdempotentBecauseOfTheUniqueKey() {
+    // ⚠️ 2026-10-02 订正：原计划这里是【空占位】（本项目已四次抓到这类假绿）⇒ 必须落地：
+    //    同一 stat_date 连跑两次 ⇒ ① 该租户在该日的行数**恰好 1**（uk_billing_daily 是幂等的锚点）
+    //    ② requests/tokens 的值与第一次相同。
+    long t = 880_003L;
+    insertRequestLog(t, LocalDateTime.of(2026, 9, 26, 12, 0), 42);
+    service.reconcile(LocalDate.of(2026, 9, 26));
+    BillingDailyEntity first = billingDailyFor(t, LocalDate.of(2026, 9, 26));
+    service.reconcile(LocalDate.of(2026, 9, 26));
+    List<BillingDailyEntity> rows = billingDailyRows(t, LocalDate.of(2026, 9, 26));
+    assertThat(rows).as("幂等：不许新增行（unique key 是锚点）").hasSize(1);
+    assertThat(rows.get(0).getTokens()).isEqualTo(first.getTokens()).isEqualTo(42L);
+    assertThat(rows.get(0).getRequests()).isEqualTo(1L);
+}
 
 @Test
 void aDeviationBeyondTheToleranceIsCountedAndAuditedButDoesNotChangeTheQuota() {
-    // Redis 里塞一个明显不同的计数 → 计数器 +1、审计行 +1、quota.token_used **不变**（D12）
+    // 租户的 period 累计（billing_daily）与 Redis 桶的 tok 明显不同 → 计数器 +1、审计行 +1、
+    // quota.token_used **不变**（D12：对账只**检测**，不改账）。
     assertThat(meterRegistry.counter("aihub.quota.reconcile.mismatch").count()).isEqualTo(1.0);
-    assertThat(quotaMapper.selectById(quotaId).getTokenUsed()).isEqualTo(before);
+    assertThat(quotaMapper.selectById(quotaId).getTokenUsed()).as("D12：对账绝不改账").isEqualTo(before);
+}
+
+@Test
+void aMatchingPeriodToDateIsNotReportedEvenWhenTheDayItselfDiffers() {
+    // ⚠️ 2026-10-02 新增（裁定 1 的唯一有判别力形式）：
+    //    当天的量与桶不同，但**周期至今**的量与桶一致 ⇒ **不许报偏差**（否则每月除最后一天外全误报）。
+    //    反向：周期至今不同 ⇒ 必须报（上一条用例覆盖）。
 }
 ```
 
@@ -2377,6 +2440,9 @@ void aDeviationBeyondTheToleranceIsCountedAndAuditedButDoesNotChangeTheQuota() {
 
 ```java
 // BillingDailyMapper（Task 11 建的那个）新增这一个方法。
+// 2026-10-02 控制器订正：from/to **必须是 LocalDateTime(UTC 墙钟)**，不是 Instant ——
+// request_log.created_at 是无时区 DATETIME(3)，绑 Instant 会按**连接时区**折算（Task 11 已为此付过代价，
+// 且本套件跑 UTC 方言 ⇒ 这种错在测试里**静默通过**）。由调用方 LocalDateTime.ofInstant(i, ZoneOffset.UTC) 折算。
 @Insert("""
         INSERT INTO billing_daily (tenant_id, stat_date, requests, tokens, cost)
         SELECT tenant_id, DATE(created_at), COUNT(*), SUM(total_tokens), 0
@@ -2385,7 +2451,7 @@ void aDeviationBeyondTheToleranceIsCountedAndAuditedButDoesNotChangeTheQuota() {
         GROUP BY tenant_id, DATE(created_at)
         ON DUPLICATE KEY UPDATE requests = VALUES(requests), tokens = VALUES(tokens), cost = VALUES(cost)
         """)
-int recomputeDaily(@Param("from") Instant from, @Param("to") Instant to);
+int recomputeDaily(@Param("from") LocalDateTime from, @Param("to") LocalDateTime to);
 ```
 
 - **`VALUES()` 在 MySQL 8.4 上是 deprecated**（会有 deprecation warning，功能正常）。8.0.19+ 推荐的替代是**行别名**，但它对 `INSERT ... SELECT` 有语法限制：先在真库上试 `... SELECT ... AS new ON DUPLICATE KEY UPDATE requests = new.requests, ...`，**能过就用它**；过不了就保留上面的 `VALUES()` 形式，并在报告里**登记实际采用哪一种**（不要在这里猜语法，以真库为准 —— Task 1 已经证明这个环境有真 MySQL）。
@@ -2397,7 +2463,9 @@ int recomputeDaily(@Param("from") Instant from, @Param("to") Instant to);
 Run: `DOCKER_HOST=tcp://127.0.0.1:2375; mvn -B -pl aihub-admin/aihub-web -am test "-Dtest=QuotaReconciliationTest"`
 
 ```bash
-git add aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/ \
+# 2026-10-02 控制器订正：原清单第一行是【目录】（本项目已四次判定为缺陷）⇒ 展开成显式文件
+git add aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/QuotaReconciliationService.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/QuotaReconciliationJob.java \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/metering/MeteringSchedulingConfig.java \
         aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/BillingDailyMapper.java \
         aihub-admin/aihub-web/src/main/resources/application.yml \
@@ -2405,8 +2473,16 @@ git add aihub-admin/aihub-service/src/main/java/com/aihub/service/quota/ \
 git commit -m "feat(quota): add the 02:00 reconciliation job that recomputes billing_daily and reports deviations"
 ```
 
-**验收判据：** `billing_daily` 按 `request_log` 被**幂等**重算；偏差被计数 + 审计；**不改** `quota.token_used`；cron 与分区维护错开。
-**RED 证据：** `runningTwiceIsIdempotentBecauseOfTheUniqueKey` 在「先 DELETE 再 INSERT」之外的错误实现（例如累加）下红；`aDeviationBeyondTheToleranceIsCountedAndAuditedButDoesNotChangeTheQuota` 在「自动改账」的实现下红。
+**验收判据：** `billing_daily` 按 `request_log` 被**幂等**重算（同一 `stat_date` 连跑两次行数与值不变）；偏差按 **`ratio = |周期至今重算值 − 桶值| / max(周期至今重算值, 1)`** 判定、`> tolerance` 才计（**等于不算**）、**重算值为 0 而桶值 > 0 也必须报**；**检测**≠**改账**（`quota.token_used` 不变，D12）；**cron 显式 `zone = "UTC"`** 且与分区维护 03:10 错开；`statDate`/`period`/`from`/`to` 全部按 **UTC** 折算（`LocalDateTime` 绑定）；**夹具定向、无全表计数**。
+**RED 证据：** `runningTwiceIsIdempotentBecauseOfTheUniqueKey` 在「累加」这类实现下红；`aDeviationBeyondTheToleranceIsCountedAndAuditedButDoesNotChangeTheQuota` 在「自动改账」的实现下红。
+⚠️ **（2026-10-02 控制器补）变异体要求（每条行为各配一条，否则"绿"没有判别力）**：
+① **累加**（把 UPSERT 改成 `requests = requests + VALUES(requests)`）⇒ 幂等用例必须红；
+② **比较对象改成"当天"而不是"周期至今"** ⇒ 可比性用例必须红（裁定 1）；
+③ **`statDate` 改成 `LocalDate.now()`（JVM 默认时区）** ⇒ 用固定 `Clock` 的用例必须红（裁定 3，§7 的时区陷阱）；
+④ **`from`/`to` 改成绑 `Instant`** ⇒ 在**非 UTC 方言**下必须红 —— 本套件是 UTC 方言 ⇒ 这条**大概率打不红**：**打不红就如实登记**（这正是 §7 已登记的既有覆盖边界，别伪造确定性）；
+⑤ **去掉 `zone = "UTC"`** ⇒ 有没有用例钉住？（若没有 ⇒ 至少要在报告里说明它靠什么保证）；
+⑥ **自动改 `quota.token_used`** ⇒ D12 用例必须红；
+⑦ **重算值为 0 而桶值 > 0 时静默跳过** ⇒ 必须有用例红。
 
 ---
 
