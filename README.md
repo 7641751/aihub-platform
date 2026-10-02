@@ -26,6 +26,25 @@
 与限流的 `rate_limit_exceeded` 语义不同）→ **实际校正**（拿到上游真实 `usage` 后把差额还回去）；
 以及 **控制面改配置 → 数据面秒级生效**（admin 发 Pub/Sub 失效广播，网关订阅后清本地缓存与共享快照条目 —— M3 实测是 **101 秒**，M4 是**秒级**）。
 
+**M4 真实验收结论（2026-10-02，Docker Compose 全栈实测；原始输出见 `.superpowers/sdd/m4-acceptance.md`）**：
+
+- **★ 控制面改配置 → 数据面生效：0.03 秒 / 0.1 秒**（两次实测），**对照 M3 的 101 秒**；
+  网关日志同步出现 `ConfigSubscriber: 收到配置失效消息（reason=route.create），清理本地与共享缓存`，且时间戳**在**数据面可见之前。
+  **反向对照**：把 `AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION=false` 重建网关后，同样的变更 **150 秒内仍不可见**，
+  且关订阅期间建的模型**5 分钟后仍未收敛**（复现 M3 附录 A1 的旧现象）⇒ 判据与反证成对成立。
+- 登录与角色：带令牌 `GET /api/channels` **200** / 不带令牌 **401**（`ConsoleAuthFilter` 在容器里 fail-closed）/ `VIEWER` 写 **403**。
+- 配额超限：**429** + `code` 与 `type` 同为 **`insufficient_quota`**，形状是 OpenAI 体；同一响应里 `ratelimit-remaining: 39`
+  证明**拦住它的不是限流**（这正是两个 429 不可混淆的机器证据）。
+- 审计：`audit_log` 里**没有**明文密钥 / 密文 / 口令 / 令牌；`API_KEY_CREATE` 只留 `keyId`；
+  `tokenLimit` 的值被写入侧脱敏成 `"[REDACTED]"`（过度脱敏，安全侧）。
+- 对账：按 `request_log` 幂等重算出的 `billing_daily` 与源数据**一致**（1234 tokens / 1 request，`cost=0`）；
+  造出偏差后它报 `{1=1.0}` 并写一条 `RECONCILE_REPORT` 审计，**`quota` 行逐字未变**（D12 只报告不改账）。
+- 回归对照：`GET /v1/models` **200**；`POST /v1/models` **405** 与 `GET /v1/nope` **404** 仍是 **Spring 默认体**（A7，未改动）；
+  中继失败形状仍是 OpenAI 体 **502 `upstream_unreachable`**；80 次并发请求实测 **429 × 32**。
+- ⚠️ **未由本轮验证的**：429 的**响应体与头**（`code=rate_limit_exceeded`、`Retry-After` 系列）没抓到原文；
+  流式 `data: [DONE]` 与真实 `request_log` 行（`channel_id`/`api_key_id`）需要**真实可用上游**，本轮演示渠指向空端口。
+  **这三项不算通过**（详见验收记录的 §8）。
+
 **管理台怎么用（零构建，无 npm、无打包）**：容器起来后浏览器打开 `http://localhost:8081/console/index.html`
 （admin 端口，见「快速开始」）→ 用 `sys_user` 的账号登录 → 令牌存在 **`sessionStorage`**（关标签页即失效）。三个视图：
 **渠道**（列表 + 新建 + 探测）、**API Key**（列表 + 新建，明文**只显示一次**）、**请求日志**（按 `tenantId` + 时间范围查询）。
