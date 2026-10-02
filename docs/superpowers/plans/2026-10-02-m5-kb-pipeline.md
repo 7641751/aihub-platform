@@ -218,7 +218,11 @@ git commit -m "feat(kb): add the V3 kb_chunk table and the KB persistence layer"
 - Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbDocumentService.java`
 - Create: `aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/KbDocumentController.java`
 - Modify: `aihub-admin/aihub-web/src/main/resources/application.yml`（multipart 上限 20MB；`aihub.kb.storage.root`）
-- Modify: `aihub-admin/aihub-common/src/main/java/com/aihub/common/audit/AuditAction.java`（+`KB_DOCUMENT_UPLOAD`，D13）
+- Modify: **`aihub-admin/aihub-service/src/main/java/com/aihub/service/audit/AuditAction.java`**（+`KB_DOCUMENT_UPLOAD`，D13）
+  **⚠️ 2026-10-02 派发前扫描订正**：我原先写的路径 `aihub-common/.../common/audit/AuditAction.java` **是错的** ——
+  实测它在 **`aihub-service`**（包 `com.aihub.service.audit`，与 `AuditService` 同包；`AuditService` 也在那儿）。
+  `AuditService.record` 的签名前五参是 **`(Long tenantId, Actor actor, String action, String targetType, String targetId, …)`**，
+  `Actor` 是 `record Actor(String type, String id)` —— 写审计前**读全**第 6 个参数。
 - Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbUploadIntegrationTest.java`
 
 **Interfaces:**
@@ -230,6 +234,15 @@ git commit -m "feat(kb): add the V3 kb_chunk table and the KB persistence layer"
   - `GET /api/kb/documents?tenantId=&status=&page=&size=`（**R3.1/R3.2 口径**：这是**资源列表**⇒ `tenantId` 缺省 = 令牌里的租户；`page/size` 按 M4 Task 11 的边界纪律：`size` 缺省 20 / 钳 200 / `<1` 400，`page` 缺省 0 / `<0` 400）。
 
 - [ ] **Step 1: 写失败测试**
+
+**⚠️ 三条会直接出错的实现约束（2026-10-02 扫描补，逐条都要照办）**：
+1. **存储根目录绝不许用 `@TestPropertySource` / `@DynamicPropertySource` 改** —— 两者都会改变 Spring 上下文缓存键 ⇒ **fork 出第 8 个上下文**，直接违反"上下文仍是 7"的硬约束。
+   ⇒ 用 `application.yml` 里的**默认**值（`aihub.kb.storage.root` 指向 `target/` 下的可丢弃目录），测试在 `@BeforeEach` 里**按租户**清自己的子目录。
+2. **"无残留文件"的断言必须定向**：检查的是 `{root}/{tenantId}/` 这个子目录，**不是**整个根目录（共享上下文 + 共享根目录 ⇒ 全根断言会变成顺序依赖）。
+3. **本项目没有 multipart 测试先例**（实测 `MULTIPART_FORM_DATA|MultiValueMap|ByteArrayResource` 在 test 树 0 命中）⇒ 自己搭：
+   `MultiValueMap<String,Object>` + `ByteArrayResource`（**覆写 `getFilename()`**）+ `HttpHeaders.setContentType(MediaType.MULTIPART_FORM_DATA)`，用 `restTemplate.exchange(url, POST, new HttpEntity<>(parts, headers), String.class)`。
+   `tenantId` 作为**文本 part** 一起发（`ByteArrayResource` 或 `HttpEntity<String>`）。
+   （好消息：实测 `ConsoleAuthFilter` **不读 body** ⇒ 过滤器不会吃掉 multipart 流。）
 
 ```java
 @Test
