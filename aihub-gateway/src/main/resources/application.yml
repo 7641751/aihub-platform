@@ -95,3 +95,9 @@ aihub:
     # requestId → 预扣关联 的有界存储：短 TTL（一次请求的生命周期量级）+ 条目上界（防无界增长）。
     reservation-ttl: 2m
     max-reservations: 100000
+    # Redis 不可用时的兜底：回源 admin 的 POST /internal/quota/reserve（HMAC 内部跳）预扣。
+    # 默认 **true**，理由与限流的「降级仍拒绝」正好相反 —— 配额是**记账**：Redis 挂了必须放行（D7），
+    # 而兜底是「在放行之外还能在 Redis 故障期间**如实拒绝**超预算的租户」的唯一手段；它绝不改变拒绝语义
+    # （兜底说余额不足仍然是 429 insufficient_quota），自己失败时也仍然放行。关掉它 = 回到纯 fail-open，
+    # 并且每次判定都不再有任何内部往返（这是唯一需要它的理由：内部跳会把延迟绑到 admin 上）。
+    fallback-enabled: ${AIHUB_QUOTA_FALLBACK_ENABLED:true}

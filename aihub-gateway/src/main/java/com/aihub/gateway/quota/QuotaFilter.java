@@ -10,6 +10,7 @@ import com.aihub.gateway.trace.RequestIdFilter;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.core.io.buffer.DataBuffer;
@@ -44,6 +45,12 @@ import java.util.concurrent.atomic.AtomicLong;
  *       合成一个计数器，等于让「Lua 写错了」永远藏在「Redis 挂了」后面 —— 两者的处置完全不同。</li>
  * </ul>
  * 另有 {@link #DENIED_METRIC}（超限拒绝）与 {@link #FAIL_OPEN_METRIC}（本过滤器自身故障放行）。
+ *
+ * <p><b>Redis 不可用时可选择回源 admin 预扣</b>（{@link QuotaFallback}，由 {@code aihub.quota.fallback-enabled}
+ * 决定开与关）。兜底**只在「Redis 不可用」这一条分支**上尝试 —— 「本周期不限」「脚本形状异常」「自身故障」
+ * 都在到达这里之前就返回了，绝不试兜底。而它只可能把「放行」升级成「拒绝」：兜底自己失败 / 拿不到判定 /
+ * 说还有额度，一律回到 D7 的「放行 + {@code degraded} 计数 + 跳过校正」。这样兜底既不会成为新的可用性单点，
+ * 也不会成为绕过配额的手段。
  *
  * <p><b>请求体是一次性流，必须缓存且不得改变转发字节（D17 + M1 铁律）</b>：本过滤器为了估算要读
  * 请求体，而下游（路由与转发）也必须能读到**同一份字节**。因此：join 出整段 body → 复制进
@@ -94,19 +101,35 @@ public class QuotaFilter implements WebFilter {
     private final QuotaReservationRegistry reservations;
     private final QuotaConfigProperties properties;
     private final MeterRegistry registry;
+    private final QuotaFallback fallback;
     private final AtomicLong lastDegradeLogMillis = new AtomicLong(Long.MIN_VALUE / 2);
 
     /**
-     * 唯一的构造器：Spring 用它装配（{@code enabled} 来自 {@code aihub.quota.enabled}），
-     * 测试也直接用它 —— 测试不该为了注一个开关而拉起 Spring（照抄 {@code RateLimitFilter}）。
+     * Spring 用的构造器：{@code fallback} 由 {@link QuotaConfig} 注入（{@code aihub.quota.fallback-enabled}
+     * 决定它是「回源 admin」还是「什么都不做」）。
+     *
+     * <p>{@code @Autowired} **是承重的**：本类有两个公开构造器（另一个是给测试直接用的「无兜底」版本），
+     * 少了它就等于没有「唯一的构造器」，Spring 只会报
+     * {@code Failed to instantiate [...QuotaFilter]: No default constructor found} 而整条链起不来。
      */
+    @Autowired
     public QuotaFilter(QuotaResolver resolver, QuotaLimiter limiter, QuotaReservationRegistry reservations,
-                       QuotaConfigProperties properties, MeterRegistry registry) {
+                       QuotaConfigProperties properties, MeterRegistry registry, QuotaFallback fallback) {
         this.resolver = resolver;
         this.limiter = limiter;
         this.reservations = reservations;
         this.properties = properties;
         this.registry = registry;
+        this.fallback = fallback;
+    }
+
+    /**
+     * 不带兜底的构造器：等价于「兜底关闭」。保留它是为了让既有的直接构造用法（{@code QuotaFilterTest}）一行不改
+     * —— 那批用例钉的是**正常路径与降级计数**，不是兜底；兜底另由 {@code QuotaReserveFallbackTest} 端到端证明。
+     */
+    public QuotaFilter(QuotaResolver resolver, QuotaLimiter limiter, QuotaReservationRegistry reservations,
+                       QuotaConfigProperties properties, MeterRegistry registry) {
+        this(resolver, limiter, reservations, properties, registry, QuotaFallback.disabled());
     }
 
     @Override
@@ -163,6 +186,8 @@ public class QuotaFilter implements WebFilter {
             decision.decision = limiter.reserve(decision.limits, decision.estimatedTokens);
         } catch (IllegalStateException e) {
             // 脚本形状异常 = 缺陷（不是降级）：单独落 script_error。
+            // **不试兜底**：admin 跑的是同一份 Lua（QuotaScript.SCRIPT 是共享常量），必然也失败；
+            // 试它只会把「脚本写错了」这个缺陷藏进「Redis 挂了」这个降级里。
             decision.scriptError = e;
             return;
         } catch (RuntimeException e) {
@@ -170,7 +195,21 @@ public class QuotaFilter implements WebFilter {
             return;
         }
         if (decision.decision == null) {
-            decision.verdict = Verdict.DEGRADED;
+            // **只有这里**（Redis 这一级不可用）才试兜底：
+            //   * 「本周期不限」在 limits.isEmpty() 处已提前返回（没有预扣可言，没有可兜底的东西）；
+            //   * 「脚本形状异常」「自身故障」在上面两个 catch 处已提前返回。
+            // 兜底只能把「放行」升级成「拒绝」：它说还有额度、或拿不到判定，都与 fail-open 同效，
+            // 且都必须按「本次没有发生可校正的预扣」处理 ⇒ DEGRADED（计数 + 跳过校正）。
+            QuotaDecision fallbackDecision =
+                    fallback.reserveFallback(decision.tenantId, decision.estimatedTokens).orElse(null);
+            if (fallbackDecision != null && !fallbackDecision.allowed()) {
+                // 降级是为了「不因为组件坏了而拒绝」，**不是**为了「绕过配额」：
+                // 兜底权威地说余额不足 ⇒ 仍然是拒绝（网关据此回 429 insufficient_quota）。
+                decision.decision = fallbackDecision;
+                decision.verdict = Verdict.DENIED;
+            } else {
+                decision.verdict = Verdict.DEGRADED;
+            }
         } else if (decision.decision.allowed()) {
             decision.verdict = Verdict.ALLOWED;
         } else {

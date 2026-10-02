@@ -7,6 +7,7 @@ import com.aihub.common.config.ModelRouteDescriptor;
 import com.aihub.common.config.QuotaDescriptor;
 import com.aihub.common.config.RatePolicy;
 import com.aihub.common.internal.InternalHmac;
+import com.aihub.common.quota.QuotaDecision;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -51,6 +52,14 @@ public interface AdminClient {
      */
     String CONFIG_SNAPSHOT_PATH = "/internal/config/snapshot";
 
+    /**
+     * 配额兜底预扣路径。与另外两个一样**必须是应用内路径**（不含 context path），METHOD 是 {@code POST}。
+     *
+     * <p>它只在「Redis 不可用 **且** 部署显式打开了兜底」时被调用（{@code aihub.quota.fallback-enabled}，
+     * 默认开启），正常路径上一次都不会打（那会把每个请求的延迟绑到 admin 上）。
+     */
+    String QUOTA_RESERVE_PATH = "/internal/quota/reserve";
+
     Mono<Optional<ApiKeyView>> resolve(String keyHash);
 
     /**
@@ -77,6 +86,20 @@ public interface AdminClient {
      */
     default Mono<Optional<ConfigSnapshot>> configSnapshot() {
         return Mono.just(Optional.empty());
+    }
+
+    /**
+     * 配额兜底预扣（Redis 不可用时的回源）。返回的判定与正常路径**语义逐字相同**：admin 侧跑的是
+     * 同一段 {@code QuotaScript.RESERVE}、读的是同一张 {@code quota} 表、写的是同一个桶键。
+     *
+     * <p>**默认实现返回空 Mono**（与 {@link #configSnapshot()} 同款理由）：这样所有既有的函数式替身
+     * （测试里的 {@code keyHash -> Mono.just(...)}）不必改一行就仍然编译通过。
+     *
+     * <p>空 {@link Mono} 的语义是「**兜底拿不到判定**」（未配兜底 / 非 2xx / 响应畸形 / 传输故障），
+     * 调用方据此走 D7 的放行 —— **绝不允许**把它当成拒绝。真实实现见 {@link Http}。
+     */
+    default Mono<QuotaDecision> reserveQuota(long tenantId, long estimatedTokens) {
+        return Mono.empty();
     }
 
     /** 真实实现：相对路径 + HMAC 签名 + 响应解析。 */
@@ -159,6 +182,63 @@ public interface AdminClient {
                 log.error("admin 配置快照拉取失败（传输层异常），本次用缓存/遗留渠道继续服务: {}", ex.toString());
                 return Mono.just(Optional.empty());
             });
+        }
+
+        @Override
+        public Mono<QuotaDecision> reserveQuota(long tenantId, long estimatedTokens) {
+            // 与 resolve / configSnapshot 同一套 fail-open 纪律：签名 / 网络 / 非 2xx / 畸形响应一律折算成
+            // **空 Mono**（=「拿不到判定」），由 QuotaFilter 按 D7 放行。绝不抛到请求路径上。
+            //
+            // 请求体只有两个字段：**额度上限不在里面** —— 它只能由 admin 从 MySQL 读（否则一把被攻破的
+            // 网关就能给任何租户开出无限额度）。这里用字面量拼 JSON（没有共享 DTO），因此键名是契约的一部分，
+            // admin 侧的 record 组件名必须逐字相同。
+            return Mono.defer(() -> {
+                String timestamp = String.valueOf(Instant.now().getEpochSecond());
+                String signature = InternalHmac.sign(internalSecret, timestamp, "POST", QUOTA_RESERVE_PATH);
+
+                return webClient.post()
+                        .uri(QUOTA_RESERVE_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Internal-Timestamp", timestamp)
+                        .header("X-Internal-Signature", signature)
+                        .bodyValue("{\"tenantId\":" + tenantId + ",\"estimatedTokens\":" + estimatedTokens + "}")
+                        .exchangeToMono(response -> response.bodyToMono(String.class).defaultIfEmpty("")
+                                .flatMap(body -> parseReserveDecision(response.statusCode().value(), body)
+                                        .map(Mono::just).orElseGet(Mono::empty)));
+            }).onErrorResume(ex -> {
+                log.error("配额兜底回源失败（传输层异常，非「余额不足」），本次放行（D7）: {}", ex.toString());
+                return Mono.empty();
+            });
+        }
+
+        /**
+         * 把兜底响应折成判定。**只有两种结果是「判定」**：2xx + 带布尔 {@code allowed} 的 {@code data}
+         * （{@code allowed=true} 放行 / {@code false} 拒绝）；其余一律 {@link Optional#empty()}（拿不到 ⇒ 放行）。
+         *
+         * <p><b>为什么缺 {@code allowed} 字段必须 fail-open</b>：{@code asBoolean} 的默认值语义太容易写反 ——
+         * 一个 {@code path("allowed").asBoolean(false)} 会把「admin 返回了畸形体」静默变成「拒绝」，
+         * 于是**平台故障被伪装成配额用尽**（与 D16 同一类错误的镜像）。这里显式要求该字段是布尔，
+         * 缺失/非布尔即视为「判不了」。
+         */
+        static Optional<QuotaDecision> parseReserveDecision(int status, String body) {
+            if (status < 200 || status >= 300) {
+                log.error("配额兜底回源失败（HTTP {}），本次放行（D7）。响应体: {}", status, body);
+                return Optional.empty();
+            }
+            try {
+                JsonNode data = MAPPER.readTree(body).path("data");
+                JsonNode allowed = data.path("allowed");
+                if (data.isMissingNode() || data.isNull() || !allowed.isBoolean()) {
+                    log.error("配额兜底回源响应缺少布尔 data.allowed，本次放行（D7）。响应体: {}", body);
+                    return Optional.empty();
+                }
+                return Optional.of(new QuotaDecision(allowed.asBoolean(),
+                        data.path("remainingTokens").asLong(-1L),
+                        data.path("remainingRequests").asLong(-1L)));
+            } catch (Exception e) {
+                log.error("配额兜底回源响应畸形，本次放行（D7）: {}", e.toString());
+                return Optional.empty();
+            }
         }
 
         /** 非 2xx / 缺 {@code data} / 字段畸形都折算成「没有快照」。 */
