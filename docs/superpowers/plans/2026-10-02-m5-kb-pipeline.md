@@ -51,7 +51,7 @@
 |---|---|---|---|
 | **D1** | **新增唯一一条迁移 `V3__kb_pipeline.sql`，只做一件事**：建 `kb_chunk` 表。`kb_document` **不加列**（V1 已有 `status`/`chunk_count`/`error_msg`，够用）。`SchemaMigrationTest` 改成「恰好 3 条」。 | V1 里 `kb_document` **没有**分片进度列（只有 `chunk_count`），而"全成或全清"与"批次是否到齐"必须有**持久**依据（放 Redis 会在重启后卡在 `EMBEDDING` 永不完成，M4 已登记过"进度不持久"的教训）。**`kb_document` 不加列的额外理由**：它是 V1 的老表，改它要动 `V1`（禁止）或再加一次迁移；而 `kb_chunk` 顺便给了"按 doc 精确清理"的坐标。**残余（诚实登记）**：`kb_chunk` 存了一份 chunk 文本（`MEDIUMTEXT`），与原件重复占空间；换来的是**可重放、可直接查、清理只需一条 SQL**。 | `V3__kb_pipeline.sql`；`SchemaMigrationTest`（`hasSize(3)` + `containsExactly("1","2","3")` + description 列表）。**闸门**：任何人再加迁移必须再改这条断言。 |
 | **D2** | **PDF 用 Apache PDFBox `3.0.3`**（**版本显式写死**，Task 7 引入并**先验证可解析**）。**不用 Tika**（依赖面大得多、能力远超需要）。 | PDF 解析是**算法**，不许自实现（与 M4 D2 对 bcrypt 的取向一致）；Tika 会拖进一长串传递依赖，而 M5 只需要"PDF → 文本层"。**⚠️ 2026-10-02 派发前扫描实测订正**：**PDFBox 自己也不是零传递依赖** —— `org.apache.pdfbox:pdfbox:3.0.3` 会拖进 `fontbox` + **三个 BouncyCastle**（`bcprov/bcpkix/bcutil-jdk18on:1.78.1`），合计约 **12.5 MB**（我原先写的"PDFBox 是最小那份"**不准确**；`2.0.30` 同样拖 BC，只是换成 `jdk15to18:1.76` 变体 ⇒ **换旧版并不能避开它**）。**仍然选它**：相对 Tika 仍是小得多的一份，且 BC 只用于签名/加密（M5 不用到）。 | `aihub-admin/aihub-service/pom.xml` **+1 个直接依赖 +3 个传递依赖**（都走 `aliyunmaven`，**已验证可解析**：`mvn …:get -Dartifact=org.apache.pdfbox:pdfbox:3.0.3` ⇒ `Downloaded from aliyunmaven` + `BUILD SUCCESS`）；Task 7 第一步仍做可解析性验证。 |
-| **D3** | **向量库 = 真 Chroma 容器**（compose 服务名 `chroma`，测试用同一个 tag 的 `GenericContainer`）。**不许**用假 HTTP 上游替代 Chroma。**⚠️ 2026-10-02 派发前扫描订正：镜像必须走 `docker.m.daocloud.io/chromadb/chroma:<tag>`**，因为 **Docker Hub 直连不通**（实测 `registry-1.docker.io` 超时）且**本机没有 `chromadb/*` 镜像**；而 daocloud 代理的 manifest 探测**通**（实测返回合法 OCI index）。 | "真的写进向量库且能按 `doc_id` 取回"是本里程碑**唯一**能证明写入侧做对了的判据；用假实现会让它退回成**不可证伪的承诺**（本项目已两次为此吃过亏）。Chroma 是**可容器化的真服务**（该真），embeddings 是**易变的外呼**（该假，见 D6）。**残余/风险（必须照办）**：① **manifest 通 ≠ blob 可下** —— 同一次探测里 `docker.m.daocloud.io/library/alpine` 的 **blob 下载就 `TLS handshake timeout`** 了，所以**第一个 Step 必须是真 `docker pull` 并确认镜像在本地**；② 拉不到 ⇒ **BLOCKED 并报告**（**不许**静默换假实现、也不许擅自改用别的向量库 —— 那是设计级决策）。 | `docker-compose.yml` + `chroma` 服务（**image 写 daocloud 全路径**）；测试基类里的**单例** `GenericContainer`（**与 compose 同一个镜像串**）。 |
+| **D3** | **向量库 = 真 Chroma 容器**（compose 服务名 `chroma`，测试用同一个 tag 的 `GenericContainer`）。**不许**用假 HTTP 上游替代 Chroma。**⚠️ 2026-10-02 派发前扫描订正：镜像必须走 `docker.m.daocloud.io/chromadb/chroma:<tag>`**，因为 **Docker Hub 直连不通**（实测 `registry-1.docker.io` 超时）且**本机没有 `chromadb/*` 镜像**；而 daocloud 代理的 manifest 探测**通**（实测返回合法 OCI index）。 | "真的写进向量库且能按 `doc_id` 取回"是本里程碑**唯一**能证明写入侧做对了的判据；用假实现会让它退回成**不可证伪的承诺**（本项目已两次为此吃过亏）。Chroma 是**可容器化的真服务**（该真），embeddings 是**易变的外呼**（该假，见 D6）。**残余/风险（必须照办）**：① **manifest 通 ≠ blob 可下** —— 同一次探测里 `docker.m.daocloud.io/library/alpine` 的 **blob 下载就 `TLS handshake timeout`** 了，所以**第一个 Step 必须是真 `docker pull` 并确认镜像在本地**；② 拉不到 ⇒ **BLOCKED 并报告**（**不许**静默换假实现、也不许擅自改用别的向量库 —— 那是设计级决策）。 | `docker-compose.yml` + `chroma` 服务（**image 写 daocloud 全路径 `docker.m.daocloud.io/chromadb/chroma:0.5.23`**）；测试基类里的**单例** `GenericContainer`（**与 compose 同一个镜像串**）。**2026-10-02 补充实测**：该镜像**已拉进本机**（`18e67eecc172`，668MB）；**首次 pull 会在一层上 `TLS handshake timeout`、重试即成功**（层缓存续传）⇒ Task 5 Step 0 的判据是"**重试 3 次仍失败**"，不是"一次失败"。契约已探明见上文表格。 |
 | **D4** | **`kb_chunk` 的列**：`id`、`doc_id`、`seq`、`text`(**MEDIUMTEXT, NOT NULL**)、`vector_id`(VARCHAR(128))、`embedded_at`(DATETIME(3) NULL)、`created_at`。**唯一键 `uk_kb_chunk_doc_seq(doc_id, seq)`**；`KEY idx_kb_chunk_doc(doc_id)`。 | **`text` 必须有**：embeddings 消费端要拿文本；用消息传文本会造大消息（RabbitMQ 不鼓励），用"重新解析原件"则让解析做两次。**`embedded_at` 必须有**：`READY` 的判据是"**所有** chunk 都已嵌入"，只靠 `chunk_count` 无法表达"本批已完成"（`chunk_count` 是**期望值**，不是**进度**）。**唯一键**让重放变成覆盖（幂等），**索引**让"按 doc 清理"走前缀。 | `V3__kb_pipeline.sql`；`KbChunkEntity`/`KbChunkMapper`。 |
 | **D5** | **重复上传（`uk_kb_document_tenant_sha` 命中）⇒ 返回已存在那一行（幂等），不是 409、更不是 500**；本次写的临时文件**删掉**。实现方式**照 M4 Task 12 的定稿**：`INSERT … ON DUPLICATE KEY UPDATE id = id` + **再读**，**不抛异常、不 catch `DuplicateKeyException`**。 | V1 的唯一键决定了"同租户同内容"天然要去重，而"重复上传"是**用户的正常动作**（点了两次、换了文件名）。M4 已经用一次死锁实测证明：`catch DuplicateKeyException` + `SELECT … FOR UPDATE` 重读会死锁，且**即便不死锁**，REPEATABLE READ 下同一事务的普通重读**看不见**并发提交的行。 | `KbDocumentMapper.insertIfAbsent` + `KbDocumentService.upload`；用例：同内容两次上传 ⇒ **同一个 `id`**、行数不增、临时文件不留。 |
 | **D6** | **embeddings 上游 = 配置化的 OpenAI 兼容 `/v1/embeddings`**；测试里用**宿主 `com.sun.net.httpserver.HttpServer`** 作假上游（本项目既有做法），并**能注入"第 N 批才失败"**。**不接真实计费 API**。 | 真 embeddings 需要密钥、网络与计费 ⇒ 验收**不可重复**；而假上游能**精确注入**"第 3 批失败""不响应（超时）"这类**只有失败路径才需要**的形态——这正是本里程碑的验收中心（全成或全清）**必须**能构造的。 | `KbEmbeddingClient`（base_url 来自 `aihub.kb.embedding.base-url`）；测试夹具 `FakeEmbeddingUpstream`（含 `failFromBatch(n)`、`neverRespond()`）。 |
@@ -81,7 +81,27 @@
 **扫描同时确认成立的前提**：`AuditAction` 是 `String` 常量（不是枚举，注释写明理由）⇒ 新增三个常量形状正确（D13）；
 `@EnableScheduling` 存在（M4 Task 17 的教训）；Testcontainers 在 `aihub-web/pom.xml`；进程内假上游是既有做法（`com.sun.net.httpserver.HttpServer`）。
 
-**仍未知、必须在 Task 5 Step 0 实测的**：**Chroma 的真实 REST 契约**（collection 创建 / upsert / delete / count 的路径与体）—— 计划里明确要求"**不许照记忆写代码**"，先起容器用 `curl` 探清再落实现。
+**仍未知、必须在 Task 5 Step 0 实测的**：~~Chroma 的真实 REST 契约~~ → **已于 2026-10-02 实测钉死，见下**。
+
+### Chroma 契约（2026-10-02 实测钉死，**Task 5 照此写，不要再猜**）
+
+镜像：**`docker.m.daocloud.io/chromadb/chroma:0.5.23`**，digest `sha256:18e67eecc172abbcd9413d751bde64983b3d167fe497c98f979083eb24c0c942`，**668 MB**，**已在本地**。
+⚠️ **但拉取必须允许重试**：第一次 pull 在某一层 `TLS handshake timeout` 失败（`image-mirror.r2.daocloud.vip`），
+**第二次成功**（已下完的层被缓存、实现续传）⇒ **"一次拉取失败"不等于 BLOCKED**，Task 5 Step 0 要写成"**至少重试 3 次、每次留原始输出**；
+连续失败才 BLOCKED"。（我原先写的"拉不到即 BLOCKED"**过于武断**，已订正。）
+
+| 操作 | 方法 + 路径 | 实测 |
+|---|---|---|
+| 心跳/版本 | `GET /api/v1/heartbeat`、`GET /api/v1/version` | `{"nanosecond heartbeat":…}`；`0.5.23`（**v2 也存在** ⇒ 代码里**显式钉 v1**，别依赖默认） |
+| 建/取集合 | `POST /api/v1/collections`，体 `{"name":"kb_chunks","get_or_create":true}` | 200，返回 `{id,name,…}`（`id` 是 UUID） |
+| 写 | `POST /api/v1/collections/{collection_id}/upsert`，体 `{ids,embeddings,metadatas,documents}` | 200；**重放同一批 ids ⇒ `count` 不变**（★ 幂等，D15 的前提成立） |
+| 计数 | **`GET`** `/api/v1/collections/{collection_id}/count` | 返回整数。⚠️ **我实测用 POST 调它得到 `405`** —— 别踩 |
+| 按 doc 取回 | `POST /api/v1/collections/{collection_id}/get`，体 `{"where":{"doc_id":1},"include":["metadatas","documents"]}` | 200，`ids`/`metadatas` 与写入**逐字一致** |
+| 按 doc 删除 | `POST /api/v1/collections/{collection_id}/delete`，体 `{"where":{"doc_id":1}}` | 200；**count 3→1**（只删该 doc 的两条，别的 doc 不动）⇒ ★ **D8 的清理可用** |
+| 集合按名操作 | `GET` / `DELETE` `/api/v1/collections/{collection_name}`（**这个路由吃名字**，其它路由吃 `collection_id`） | 见路由表 |
+| 检索 | `POST /api/v1/collections/{collection_id}/query` | **未探通（400）**；**M5 不依赖它**（检索属 Python 侧）。检索侧要用时由那边实测，不要在 M5 里实现 |
+
+原始输出：`.hb2-logs/m5-scan/chroma-routes.txt`（路由表）、`chroma-contract-probe.txt` / `chroma-contract-probe2.txt`（生命周期实测）。
 
 ---
 
@@ -426,15 +446,17 @@ git commit -m "feat(kb): parse documents into tracked chunks and fan out embed b
 - Consumes: Task 4 的 chunk 行、`aihub.kb.embedding.base-url`、`aihub.kb.chroma.base-url`。
 - Produces: `KbEmbeddingClient.embed(List<String> texts) -> List<float[]>`（**显式超时**）；`KbVectorStoreClient.upsert(String collection, List<VectorRecord>)`、`deleteByDocId(long docId)`、`countByDocId(long docId)`（**测试直接用它证明"真的写进去了"**）；`KbEmbedConsumer` 把 `kb_chunk.embedded_at` 打上，**全部非 NULL ⇒ `READY`**。
 
-- [ ] **Step 0（**前置探测，可能 BLOCKED**）**：确认 Chroma 镜像可获取与**真实 REST 契约**
-  1. `docker -H tcp://127.0.0.1:2375 images --filter reference=*/chroma*` —— 本地是否已有（**扫描时本机没有任何 `chromadb/*` 镜像**）；
-  2. 拉镜像**必须走 daocloud 代理**（直连 Docker Hub 已实测超时）：
-     `docker -H tcp://127.0.0.1:2375 pull docker.m.daocloud.io/chromadb/chroma:<tag>`
-     ⚠️ **manifest 通 ≠ blob 可下**：同一次探测里 `docker.m.daocloud.io/library/alpine` 的 blob 就 `TLS handshake timeout` 了
-     ⇒ 这一步的判据是 **`docker images` 里真的出现了该镜像**，不是"命令没报错"；
-  3. 拿到镜像后**起一个临时容器**，用 `curl` 探清 `POST /api/v1/collections`、`upsert`、`delete`、`count` 的**真实路径与请求体**
-     （**不许照记忆写代码**；探到的原文要贴进报告），探完 `docker rm -f` 掉。
-  **拉不到镜像 ⇒ 报 BLOCKED 并附原始输出**（D3：**不许**换假实现、**不许**擅自改用别的向量库 —— 那要用户拍板）。
+- [ ] **Step 0：镜像与容器的"现场核对"**（契约**已在派发前探明**，见上文「Chroma 契约」表 —— **照它写，不要再猜**）
+  1. `docker -H tcp://127.0.0.1:2375 images docker.m.daocloud.io/chromadb/chroma --format '{{.Repository}}:{{.Tag}} {{.ID}} {{.Size}}'`
+     —— 期望看到 **`…:0.5.23` / `18e67eecc172` / 668MB**（**扫描时已拉好**）；
+  2. 若不在：`docker -H tcp://127.0.0.1:2375 pull docker.m.daocloud.io/chromadb/chroma:0.5.23`
+     **并允许重试最多 3 次**（实测：第一次会在某层 `TLS handshake timeout`，第二次靠层缓存续传成功）——
+     **每次的原始输出都要留证**；**连续 3 次失败才 BLOCKED**；
+  3. 起一次性容器复核契约（**这一步是"别信文档信现场"**，不通过就不要往下写）：
+     `docker run -d --name kb-chroma-probe -p 18000:8000 <镜像>` → 轮询 `GET :18000/api/v1/heartbeat` →
+     **按契约表**走一遍 `collections(get_or_create)` → `upsert` → `GET count` → **重放 upsert（count 不变）** →
+     `get(where=doc_id)` → `delete(where=doc_id)` → **count 归零** → `docker rm -f kb-chroma-probe`。
+  **探不通 ⇒ 报 BLOCKED 并附原始输出**（D3：**不许**换假实现、**不许**擅自改用别的向量库 —— 那要用户拍板）。
 
 - [ ] **Step 1: 写失败测试**（**这就是"可检索"的可证伪形式**）
 
