@@ -10,6 +10,7 @@ import com.aihub.gateway.meter.MeteringProperties;
 import com.aihub.gateway.meter.MeteringPublisher;
 import com.aihub.gateway.meter.RelayMetering;
 import com.aihub.gateway.meter.RelayRequestBody;
+import com.aihub.gateway.quota.QuotaCorrector;
 import com.aihub.gateway.route.ChannelCircuitBreaker;
 import com.aihub.gateway.route.RouteResolver;
 import com.aihub.gateway.route.RouteSelectionException;
@@ -117,11 +118,12 @@ public class ChatRelayController {
     private final ChannelKeyDecryptor keyDecryptor;
     private final MeteringPublisher meteringPublisher;
     private final MeteringProperties meteringProperties;
+    private final QuotaCorrector quotaCorrector;
 
     public ChatRelayController(UpstreamClientFactory clientFactory, ConfigClient configClient,
                                RouteResolver routeResolver, ChannelCircuitBreaker circuitBreaker,
                                ChannelKeyDecryptor keyDecryptor, MeteringPublisher meteringPublisher,
-                               MeteringProperties meteringProperties) {
+                               MeteringProperties meteringProperties, QuotaCorrector quotaCorrector) {
         this.clientFactory = clientFactory;
         this.configClient = configClient;
         this.routeResolver = routeResolver;
@@ -129,6 +131,23 @@ public class ChatRelayController {
         this.keyDecryptor = keyDecryptor;
         this.meteringPublisher = meteringPublisher;
         this.meteringProperties = meteringProperties;
+        this.quotaCorrector = quotaCorrector;
+    }
+
+    /**
+     * **终端收尾的唯一出口**：先发布计量事件（既有行为一字不变），再用**同一个事件**里的真实用量
+     * 校正本请求的配额预扣（{@link QuotaCorrector#correct}）。
+     *
+     * <p><b>两个终端发布点必须都走这里（13b 裁定 1）</b>：本类有两个
+     * {@code meteringPublisher.publish} 终点 —— 「一个候选都没有」的**提前终止**（404
+     * {@code model_not_found}，在 {@code doFinally} 之前就 return）与正常收尾的 {@code doFinally}
+     * （正常 / 取消 / 异常）。{@code QuotaFilter}（order {@code +175}）**在路由之前**已经预扣，
+     * 因此只改 {@code doFinally} 会让每个 {@code model_not_found} 请求**永久吃掉一份估算配额**（静默漏）。
+     * 收尾时的 {@code doFinally}（{@code relay} 内、上游 body 上）只记客户端断连、**不发布**，故不涉及。
+     */
+    private void publishAndCorrect(MeteringEvent event) {
+        meteringPublisher.publish(event);
+        quotaCorrector.correct(event);
     }
 
     /**
@@ -160,7 +179,8 @@ public class ChatRelayController {
             // 两者对客户端都是同一件事：我们不提供这个模型。响应体必须是 /v1 的 OpenAI 形状
             // （客户端 SDK 只认 error.message），绝不是 admin 的 {code,message,data} 信封。
             metering.onUnexpectedError();
-            meteringPublisher.publish(metering.toEvent(SignalType.ON_COMPLETE));
+            // 提前终止也必须校正：QuotaFilter 已在路由之前预扣，这条路径不经过 doFinally（裁定 1）。
+            publishAndCorrect(metering.toEvent(SignalType.ON_COMPLETE));
             log.debug("模型没有可用渠道: {}", e.model());
             return GatewayErrors.write(response, HttpStatus.NOT_FOUND,
                     "invalid_request_error", "model_not_found", "不提供该模型: " + e.model());
@@ -199,8 +219,9 @@ public class ChatRelayController {
                             ex.getClass().getName(), ex.getMessage());
                     return response.setComplete();
                 })
-                // 收尾即计量：CANCEL 表示订阅被取消（客户端断连的另一种表现）；此处**不阻塞**。
-                .doFinally(signal -> meteringPublisher.publish(metering.toEvent(signal)));
+                // 收尾即计量 + 校正：CANCEL 表示订阅被取消（客户端断连的另一种表现）；此处**不阻塞**。
+                // 先 publish、再 correct（同一个事件里的真实用量），见 publishAndCorrect（裁定 1）。
+                .doFinally(signal -> publishAndCorrect(metering.toEvent(signal)));
     }
 
     /**

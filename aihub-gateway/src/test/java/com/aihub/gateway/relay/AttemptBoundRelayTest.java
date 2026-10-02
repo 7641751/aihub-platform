@@ -8,6 +8,7 @@ import com.aihub.common.meter.MeteringEvent;
 import com.aihub.gateway.config.ConfigClient;
 import com.aihub.gateway.meter.MeteringProperties;
 import com.aihub.gateway.meter.MeteringPublisher;
+import com.aihub.gateway.quota.QuotaCorrector;
 import com.aihub.gateway.route.ChannelCircuitBreaker;
 import com.aihub.gateway.route.RouteResolver;
 import com.aihub.gateway.testsupport.FakeUpstream;
@@ -92,7 +93,8 @@ class AttemptBoundRelayTest {
         controller = new ChatRelayController(clientFactory, configClient, routeResolver, circuitBreaker,
                 new ChannelKeyDecryptor(CIPHER, new UpstreamProperties(DEAD_BASE_URL, null, MODEL)),
                 meteringPublisher,
-                new MeteringProperties(false, 65536, 100, 10, 30_000L, 5_000L, 5_000L, "unused-spool-dir"));
+                new MeteringProperties(false, 65536, 100, 10, 30_000L, 5_000L, 5_000L, "unused-spool-dir"),
+                mock(QuotaCorrector.class));
     }
 
     @AfterEach

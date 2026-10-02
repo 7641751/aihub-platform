@@ -1,6 +1,7 @@
 package com.aihub.gateway.quota;
 
 import com.aihub.gateway.config.ConfigClient;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -43,5 +44,12 @@ public class QuotaConfig {
     @Bean
     public QuotaReservationRegistry quotaReservationRegistry(QuotaConfigProperties properties) {
         return new QuotaReservationRegistry(properties);
+    }
+
+    /** 收尾侧的校正钩子（{@code ChatRelayController} 的终端发布点调用它）。 */
+    @Bean
+    public QuotaCorrector quotaCorrector(QuotaReservationRegistry reservations, QuotaLimiter limiter,
+                                         QuotaConfigProperties properties, MeterRegistry registry) {
+        return new QuotaCorrector(reservations, limiter, properties, registry);
     }
 }

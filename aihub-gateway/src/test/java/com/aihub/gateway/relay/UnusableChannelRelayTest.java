@@ -8,6 +8,7 @@ import com.aihub.gateway.config.ConfigClient;
 import com.aihub.gateway.config.LegacyChannel;
 import com.aihub.gateway.meter.MeteringProperties;
 import com.aihub.gateway.meter.MeteringPublisher;
+import com.aihub.gateway.quota.QuotaCorrector;
 import com.aihub.gateway.route.ChannelCircuitBreaker;
 import com.aihub.gateway.route.RouteResolver;
 import com.aihub.gateway.testsupport.FakeUpstream;
@@ -79,7 +80,8 @@ class UnusableChannelRelayTest {
         controller = new ChatRelayController(clientFactory, configClient, routeResolver, circuitBreaker,
                 new ChannelKeyDecryptor(CIPHER, new UpstreamProperties("http://127.0.0.1:1", null, MODEL)),
                 mock(MeteringPublisher.class),
-                new MeteringProperties(false, 65536, 100, 10, 30_000L, 5_000L, 5_000L, "unused-spool-dir"));
+                new MeteringProperties(false, 65536, 100, 10, 30_000L, 5_000L, 5_000L, "unused-spool-dir"),
+                mock(QuotaCorrector.class));
     }
 
     @AfterEach

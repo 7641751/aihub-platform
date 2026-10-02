@@ -11,6 +11,7 @@ import com.aihub.gateway.meter.MeteringDispatcher;
 import com.aihub.gateway.meter.MeteringProperties;
 import com.aihub.gateway.meter.MeteringPublisher;
 import com.aihub.gateway.meter.MeteringSpool;
+import com.aihub.gateway.quota.QuotaCorrector;
 import com.aihub.gateway.route.ChannelCircuitBreaker;
 import com.aihub.gateway.route.RouteResolver;
 import com.aihub.gateway.testsupport.FakeUpstream;
@@ -109,7 +110,7 @@ class RelayCommittedWriteFailureTest {
         controller = new ChatRelayController(
                 new UpstreamClientFactory(upstreamProperties), configClient, routeResolver, circuitBreaker,
                 new ChannelKeyDecryptor(new AesGcmChannelCipher(ChannelKeyRegistry.parse("")), upstreamProperties),
-                new MeteringPublisher(properties, dispatcher), properties);
+                new MeteringPublisher(properties, dispatcher), properties, mock(QuotaCorrector.class));
     }
 
     @Test
