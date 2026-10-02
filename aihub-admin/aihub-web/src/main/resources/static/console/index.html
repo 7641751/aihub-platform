@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>aihub 管理台</title>
+  <link rel="stylesheet" href="/console/console.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>aihub 管理台</h1>
+    <button id="logout-btn" type="button" hidden>退出</button>
+  </header>
+
+  <main>
+    <!-- 登录视图 -->
+    <section id="login-view" class="card">
+      <h2>登录</h2>
+      <form id="login-form" autocomplete="off">
+        <label for="username">用户名</label>
+        <input id="username" name="username" type="text" autocomplete="username" required>
+        <label for="password">口令</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <button type="submit">登录</button>
+      </form>
+      <p id="login-error" class="message error" role="alert"></p>
+    </section>
+
+    <!-- 应用视图 -->
+    <div id="app-view" hidden>
+      <nav class="tabs">
+        <button id="tab-channels" type="button">渠道</button>
+        <button id="tab-keys" type="button">API Key</button>
+        <button id="tab-logs" type="button">请求日志</button>
+        <span id="session-info" class="muted"></span>
+      </nav>
+
+      <!-- 渠道视图：列表 + 新建 -->
+      <section id="channels-panel" class="card">
+        <h2>渠道</h2>
+        <form id="channel-form" autocomplete="off">
+          <input id="channel-name" placeholder="名称" required>
+          <input id="channel-provider" placeholder="provider" required>
+          <input id="channel-base-url" placeholder="baseUrl" required>
+          <input id="channel-api-key" placeholder="apiKey" type="password" required>
+          <input id="channel-models" placeholder="modelsJson（可选）">
+          <button type="submit">新建渠道</button>
+        </form>
+        <table>
+          <thead>
+            <tr><th>ID</th><th>名称</th><th>provider</th><th>baseUrl</th><th>状态</th></tr>
+          </thead>
+          <tbody id="channels-body"></tbody>
+        </table>
+        <p id="channels-message" class="message" role="status"></p>
+      </section>
+
+      <!-- Key 视图：列表 + 新建并一次性展示明文 -->
+      <section id="keys-panel" class="card" hidden>
+        <h2>API Key</h2>
+        <form id="key-form" autocomplete="off">
+          <input id="key-name" placeholder="名称" required>
+          <input id="key-valid-days" placeholder="有效天数（可选，留空=不过期）" type="number" min="1">
+          <button type="submit">新建 Key</button>
+        </form>
+        <div id="plaintext-box" class="plaintext" hidden>
+          <p>明文只显示这一次，请立即复制保存，关闭后无法再次获取。</p>
+          <code id="plaintext-key"></code>
+        </div>
+        <table>
+          <thead>
+            <tr><th>ID</th><th>名称</th><th>状态</th><th>到期</th></tr>
+          </thead>
+          <tbody id="keys-body"></tbody>
+        </table>
+        <p id="keys-message" class="message" role="status"></p>
+      </section>
+
+      <!-- 日志视图：租户 + 时间范围查询 -->
+      <section id="logs-panel" class="card" hidden>
+        <h2>请求日志</h2>
+        <form id="logs-form" autocomplete="off">
+          <label for="logs-tenant-id">tenantId</label>
+          <input id="logs-tenant-id" placeholder="tenantId" required>
+          <label for="logs-from">从</label>
+          <input id="logs-from" type="datetime-local">
+          <label for="logs-to">到</label>
+          <input id="logs-to" type="datetime-local">
+          <button type="submit">查询</button>
+        </form>
+        <table>
+          <thead>
+            <tr><th>requestId</th><th>状态</th><th>模型</th><th>created_at</th></tr>
+          </thead>
+          <tbody id="logs-body"></tbody>
+        </table>
+        <p id="logs-message" class="message" role="status"></p>
+      </section>
+    </div>
+  </main>
+
+  <script src="/console/console.js"></script>
+</body>
+</html>
