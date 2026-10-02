@@ -2629,6 +2629,30 @@ git commit -m "feat(console): add the zero-build static admin console"
 - `.env.example`：`AIHUB_CONSOLE_SECRET`（**两种 PowerShell 写法 + openssl**，并说明「必须与 admin 一致、轮换会让已签发的令牌立刻失效」）。
 - 设计文档：§6.2 的 `QUOTA_EXCEEDED` 标注为已被 `insufficient_quota` 取代；§7.3 的接口表标注已实现/未实现（`/api/kb/**` 属 M5）。
 
+- **（2026-10-02 控制器补 —— 8 条"照字面执行会出错 / 会交出假证据"）**
+  1. **⚠️ Step 2 的基线数字已经过时**：原文写 `common 56 / web 95 / gateway 350 = 501`；**实测现为 `aihub-common` 68 / `aihub-web` 263 / `aihub-gateway` 391 ＝ 722**
+     （产物：Task 13–16 的 `.m4t*-logs/`、控制器 `.hb2-logs/C3-admin-full.log`、Task 13 网关 391/0）。
+     ⇒ **以实测为准**，报告里**逐个模块报实测数**，**不许**抄这条旧基线（这正是 README 里那些"过时数字"的来源）。
+     另：`mvn -B clean test` 是**整反应堆**（gateway 侧要 Docker）⇒ 与其他 Maven **互斥**，且**判据看每模块汇总行**，不看 `[exit code: N]`。
+  2. **本任务是 M4 里唯一被授权修改 `docker-compose.yml` 与 `.env.example` 的任务**（其它任务一律禁止改它）⇒ **不算越界**；
+     但**只许加这两个变量**：admin 的 `AIHUB_CONSOLE_SECRET`、gateway 的 `AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION`（第 4 步反向对照的开关）。
+     **不许**把真实密钥写进任何被提交的文件（`.env.example` 只放占位写法）。
+  3. **⚠️ 工作树里有一处不属于本任务的未提交改动**：`aihub-gateway/src/main/java/com/aihub/gateway/ratelimit/TokenBucket.java`
+     （**纯 javadoc 单行→多行**，2026-10-02 16:22:57，疑似 **IDE 自动格式化**）⇒ **不要 `git add` 它**（Step 4 的 5 个显式路径里没有它）、
+     **不要 `git checkout` 还原它**（本机 `core.autocrlf` 会改行尾）；若它仍在工作树，**在报告里登记**（**已知**、非子代理残留）。
+  4. **章节号先核对再写**：`§4`（数据面错误契约）、`§6.6`（渠道密钥与配置快照）都已存在；**`§6.7` 是本次新增**，要**接在 §6.6 之后、`§7` 之前**。
+     ⇒ 动笔前用 `Select-String -Pattern '^#{2,3} '` 列出真实章节号 —— 本项目已发生过"引用了一个不存在的 §12"。
+  5. **Step 1 的硬规矩**：对每一条新写的边界问「它有没有对应的代码/测试？」；**没有对应证据的句子不许写**，
+     并且每条边界要**指向具体产物**（类名/测试名/日志路径），不要写"已实现/已加固"这类无锚点的形容。
+  6. **验收记录口径**：`.superpowers/sdd/m4-acceptance.md` 已被 `.gitignore:30`（`.superpowers/`）忽略 ✓ ⇒ **不要试图提交它**。
+     脱敏清单**比"token 只留前缀"更宽**：token、`sys_user` 的**口令与 bcrypt 哈希**、`POST /api/api-keys` 返回的**一次性明文 key**、
+     `AIHUB_CONSOLE_SECRET`、渠道明文密钥、`api_key_cipher` 密文 —— **都不许**出现在记录或命令输出里；**合成口令也要脱敏**。
+  7. **★第 3 步与第 4 步是"结论 + 反证"的一对**：只许在**两条都实测**之后才写"秒级"的结论；若第 4 步（关掉订阅）**也快** ⇒
+     **第 3 步结论作废**，必须查出真正原因再声称达成（这就是本任务的 RED 证据）。
+     并按附录 **A3** 的口径：Redis 相关降级**必须并发压测**（顺序压测会被 2 秒超时放大成 ≈7 秒/请求而误判）。
+  8. **Docker 纪律**：`docker -H tcp://127.0.0.1:2375`；`$env:BUILDX_CONFIG` 指向工作区内；**永不读 `.env`、永不执行 `docker compose config`**；
+     `build` 之后用**镜像 ID × 运行容器**逐一核对（M3 的教训：盘上镜像可能还是旧代码），并核对 `compose ps` 与两侧 `/healthz`。
+
 - [ ] **Step 1: 文档改动 + 可证的断言**
 
 对每一条新写的边界，问一句「它有没有对应的代码/测试？」。没有对应证据的句子**不许写**（本仓库历史上出现过文档承诺了不存在的 WARN，被评审打回）。
