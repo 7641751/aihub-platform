@@ -122,3 +122,17 @@ aihub:
     # 默认值即生产值，测试不许覆盖（同上，覆盖会 fork 上下文）。
     embed:
       batch-size: 10
+    # ── 嵌入上游（D6）：OpenAI 兼容的 POST /v1/embeddings。生产由 env 注入；集成测试由
+    #    TestContainers.registerInfrastructure（**唯一的共享注册点**）注入宿主进程内的假上游。
+    #    空值 = 没配 ⇒ 失败发生在**调用时**而不是启动时，这样没有嵌入需求的上下文照常启动。
+    embedding:
+      base-url: ${AIHUB_KB_EMBEDDING_BASE_URL:}
+      model: ${AIHUB_KB_EMBEDDING_MODEL:kb-embedding}
+      # 判据文字与配置项必须是**同一个数**：KbEmbeddingClientTest 断言"配置读到的值 == 文档写的那个值"。
+      timeout-seconds: 30
+    # ── 向量库（D3）：真 Chroma 的 REST。collection 名与 metadata 形状是**跨仓库契约**（附录 A），
+    #    改它们等于对检索侧（另一个仓库的 Python）做破坏性变更。
+    chroma:
+      base-url: ${AIHUB_KB_CHROMA_BASE_URL:}
+      collection: kb_chunks
+      timeout-seconds: 30

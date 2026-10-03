@@ -5,7 +5,6 @@ import com.aihub.dao.entity.KbChunkEntity;
 import com.aihub.dao.entity.KbDocumentEntity;
 import com.aihub.dao.mapper.KbChunkMapper;
 import com.aihub.dao.mapper.KbDocumentMapper;
-import com.aihub.mq.kb.KbEmbedBatch;
 import com.aihub.mq.kb.KbMessageCodec;
 import com.aihub.mq.kb.KbTopology;
 import com.aihub.service.console.ConsoleClaims;
@@ -17,7 +16,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -113,17 +111,17 @@ class KbParseIntegrationTest extends AbstractIntegrationTest {
         long id = uploadId(TENANT, "doc.md", mdWith(25, "段落"));
         publishParse(id);
 
-        awaitUntil(Duration.ofSeconds(20), () -> "EMBEDDING".equals(statusOf(id)), id);
-
+        // 2026-10-03 控制器订正（Task 5 落地后）：kb.embed **已经有消费者**（同 JVM、争抢同一个队列）⇒
+        // ① 不能再等"状态恰好是 EMBEDDING"（embed 会立刻把它推到 READY ⇒ 竞态）；
+        // ② 不能再断言"解析阶段还没嵌入"（批次几乎同时被消费掉）；
+        // ③ 判据从"抢 kb.embed 队列"改为**数据库状态**（该 doc 的段全部拿到 embedded_at）。
+        awaitUntil(Duration.ofSeconds(60), () -> chunkRowsFor(id) == 25, id);
         assertThat(chunkRowsFor(id)).as("定向：只数这个 doc 的段").isEqualTo(25);
-        assertThat(embeddedCountFor(id)).as("解析阶段还没嵌入").isZero();
 
-        List<KbEmbedBatch> batches = awaitEmbedBatches(id, 3, Duration.ofSeconds(15));
-        assertThat(batches)
-                .as("25 段 / 每批 10 ⇒ 3 条消息（本条判据有保质期：Task 5 的消费者会抢走 kb.embed）")
-                .hasSize(3);
-        assertThat(batches).extracting(KbEmbedBatch::seqFrom).containsExactlyInAnyOrder(0, 10, 20);
-        assertThat(batches).extracting(KbEmbedBatch::seqTo).containsExactlyInAnyOrder(9, 19, 24);
+        awaitUntil(Duration.ofSeconds(60), () -> embeddedCountFor(id) == 25, id);
+        assertThat(embeddedCountFor(id))
+                .as("25 段 / 每批 10 ⇒ 3 批消息**确实发出并被消费**（判据已从队列改为 DB）")
+                .isEqualTo(25);
     }
 
     // ---------------------------------------------------------------- 2) 重放不产生重复段
@@ -132,7 +130,7 @@ class KbParseIntegrationTest extends AbstractIntegrationTest {
     void aReplayedParseMessageDoesNotDuplicateChunks() throws Exception {
         long id = uploadId(TENANT, "replay.md", mdWith(25, "重放"));
         publishParse(id);
-        awaitUntil(Duration.ofSeconds(20), () -> "EMBEDDING".equals(statusOf(id)), id);
+        awaitUntil(Duration.ofSeconds(60), () -> "READY".equals(statusOf(id)), id);   // 两段都跑完的**确定终态**
         assertThat(chunkRowsFor(id)).isEqualTo(25);
 
         // 把状态退回 PENDING，**强制**重放真正走到写段那一步：否则状态守卫（EMBEDDING ∉ {PENDING,PARSING}）
@@ -144,7 +142,7 @@ class KbParseIntegrationTest extends AbstractIntegrationTest {
         assertThat(statusOf(id)).as("重置后必须是 PENDING（否则下面的重放覆盖不到写段路径）").isEqualTo("PENDING");
 
         publishParse(id);
-        awaitUntil(Duration.ofSeconds(20), () -> "EMBEDDING".equals(statusOf(id)), id);
+        awaitUntil(Duration.ofSeconds(60), () -> "READY".equals(statusOf(id)), id);
 
         assertThat(chunkRowsFor(id)).as("同一条消息重放 ⇒ 段数不变（upsert 幂等）").isEqualTo(25);
     }
@@ -158,7 +156,7 @@ class KbParseIntegrationTest extends AbstractIntegrationTest {
         // 本用例就会红 —— 这才是"守卫"的可证伪形式（若用一行无文件的合成 READY，缺文件会抛异常回滚，
         // 状态照样是 READY ⇒ 断言无法被最小变异打红，等于没断言）。
         long readyId = uploadId(TENANT, "ready.md", mdWith(25, "就绪"));
-        awaitUntil(Duration.ofSeconds(20), () -> "EMBEDDING".equals(statusOf(readyId)), readyId);
+        awaitUntil(Duration.ofSeconds(60), () -> "READY".equals(statusOf(readyId)), readyId);
         kbDocumentMapper.update(null, new LambdaUpdateWrapper<KbDocumentEntity>()
                 .eq(KbDocumentEntity::getId, readyId).set(KbDocumentEntity::getStatus, "READY"));
 
@@ -168,7 +166,7 @@ class KbParseIntegrationTest extends AbstractIntegrationTest {
         // readyId 那条**已经被处理并 ack** —— 这比"睡一觉再看"既稳又不赌调度。
         long sentinel = uploadId(TENANT, "sentinel.md", mdWith(25, "哨兵"));
         publishParse(sentinel);
-        awaitUntil(Duration.ofSeconds(20), () -> "EMBEDDING".equals(statusOf(sentinel)), sentinel);
+        awaitUntil(Duration.ofSeconds(60), () -> "READY".equals(statusOf(sentinel)), sentinel);
 
         assertThat(statusOf(readyId))
                 .as("READY 的消息必须被 ack 丢弃：状态绝不打回 EMBEDDING/PARSING")
@@ -223,35 +221,8 @@ class KbParseIntegrationTest extends AbstractIntegrationTest {
                 .isNotNull(KbChunkEntity::getEmbeddedAt));
     }
 
-    /**
-     * 从 {@code kb.embed} 队列里收**属于本 doc**的批次，收到 {@code expected} 条或超时为止。
-     * 队列是共享的（可能残留别的用例的消息）⇒ 不是本 doc 的一律丢弃，绝不"取第一条就断言"。
-     */
-    private List<KbEmbedBatch> awaitEmbedBatches(long docId, int expected, Duration timeout)
-            throws InterruptedException {
-        List<KbEmbedBatch> matched = new ArrayList<>();
-        long deadline = System.nanoTime() + timeout.toNanos();
-        while (System.nanoTime() < deadline && matched.size() < expected) {
-            Message message = rabbitTemplate.receive(KbTopology.EMBED_QUEUE, 500);
-            if (message == null) {
-                continue;
-            }
-            String payload = new String(message.getBody(), UTF_8);
-            if (!payload.startsWith("embed:")) {
-                continue;
-            }
-            KbEmbedBatch batch;
-            try {
-                batch = KbMessageCodec.decodeEmbed(payload);
-            } catch (IllegalArgumentException e) {
-                continue;   // 解不开的残留消息：丢弃（本用例只关心自己的 doc）
-            }
-            if (batch.docId() == docId) {
-                matched.add(batch);
-            }
-        }
-        return matched;
-    }
+    // 2026-10-03 控制器删掉了 awaitEmbedBatches(...)：kb.embed 现在有消费者（Task 5），
+    // "抢队列"这条判据不可能稳定 —— 本类的判据一律改成数据库状态（见上面的订正说明）。
 
     /** 有界轮询（不许 sleep 硬等）；超时把当时的状态打进失败消息，而不是只说"超时了"。 */
     private void awaitUntil(Duration timeout, BooleanSupplier condition, long docId)

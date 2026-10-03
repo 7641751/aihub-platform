@@ -1,9 +1,11 @@
 package com.aihub.admin.support;
 
+import com.aihub.admin.kb.support.FakeEmbeddingUpstream;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.containers.RabbitMQContainer;
+import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.DockerImageName;
 
 /**
@@ -46,10 +48,25 @@ public final class TestContainers {
     public static final RabbitMQContainer RABBITMQ =
             new RabbitMQContainer(DockerImageName.parse("rabbitmq:3.13-management-alpine"));
 
+    public static final int CHROMA_PORT = 8000;
+
+    /**
+     * 向量库（M5 Task 5，决策 D3：**真 Chroma**，不许用假 HTTP 上游替代）。
+     *
+     * <p>镜像 tag 与 compose 的 {@code chroma} 服务**必须是同一个**（D3），且必须走 daocloud 代理仓库
+     * —— Docker Hub 直连在本机不可达。等待策略用 {@code /api/v1/heartbeat}：只等"端口在听"
+     * 会在 API 还没就绪时就放行，那是 flaky 的经典来源。
+     */
+    public static final GenericContainer<?> CHROMA =
+            new GenericContainer<>(DockerImageName.parse("docker.m.daocloud.io/chromadb/chroma:0.5.23"))
+                    .withExposedPorts(CHROMA_PORT)
+                    .waitingFor(Wait.forHttp("/api/v1/heartbeat").forPort(CHROMA_PORT));
+
     static {
         startContainer(MYSQL, "mysql:8.4（MySQL）");
         startContainer(REDIS, "redis:7-alpine（Redis）");
         startContainer(RABBITMQ, "rabbitmq:3.13-management-alpine（RabbitMQ）");
+        startContainer(CHROMA, "chromadb/chroma:0.5.23（向量库）");
     }
 
     private TestContainers() {
@@ -131,5 +148,12 @@ public final class TestContainers {
         registry.add("spring.rabbitmq.password", RABBITMQ::getAdminPassword);
 
         registry.add("aihub.internal.secret", () -> "test-internal-secret-test-internal-secret");
+
+        // M5 Task 5：向量库与假 embeddings 上游**都必须注册在这一处**（被两种方言的上下文共用）。
+        // 只在某个测试类上注册 ⇒ 会 fork 第 8 个上下文；而且每个上下文里都有 embed 消费者在争抢
+        // 同一个共享队列 ⇒ 任何一个上下文拿不到可用 URL，都会把消息推进重试/DLQ，制造噪声与假红。
+        registry.add("aihub.kb.chroma.base-url",
+                () -> "http://" + CHROMA.getHost() + ":" + CHROMA.getMappedPort(CHROMA_PORT));
+        registry.add("aihub.kb.embedding.base-url", FakeEmbeddingUpstream::baseUrl);
     }
 }

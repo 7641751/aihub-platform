@@ -47,7 +47,7 @@ import static org.assertj.core.api.Assertions.fail;
  * {@code KbParseConsumer} 会在**每个** Spring 上下文里订阅 {@code kb.parse}，于是"从队列收消息"的断言
  * 会被消费者抢走（实测：这两条原断言在 Task 4 后稳定红 —— {@code Expecting value to be true but was false}
  * 于 {@code awaitParseMessageFor}）。⇒ 改成等**数据库状态**：{@code kb_document.status} 走到
- * {@code EMBEDDING} 就等于"消息已发出**且**被消费"，比"盯着队列"既稳又不与消费者抢。
+ * {@code READY} 就等于"消息已发出**且**被消费**且**已嵌入"，比"盯着队列"既稳又不与消费者抢。
  */
 @TestPropertySource(properties = {
         "aihub.console.secret=console-it-secret-0123456789abcdefghijklmn"
@@ -93,8 +93,10 @@ class KbPublishIntegrationTest extends AbstractIntegrationTest {
         long id = body(res).path("data").path("id").asLong();
         assertThat(id).as("data.id 必须存在（响应体=%s）", res.getBody()).isPositive();
 
-        // 提交后必须发出一条可被消费的 parse 消息 ⇒ 该行会被推进到 EMBEDDING（没有发布则永远停在 PENDING）。
-        awaitStatus(id, "EMBEDDING", Duration.ofSeconds(20));
+        // 提交后必须发出一条可被消费的 parse 消息 ⇒ 该行会被一路推进到 READY（没有发布则永远停在 PENDING）。
+        // ⚠️ 2026-10-03 控制器订正：目标状态由中间态 `EMBEDDING` 改为**终态 `READY`** —— Task 5 的 embed
+        // 消费者落地后，流水线不再停在 EMBEDDING，等中间态会变成竞态（全量实测：超时红、当时状态=READY）。
+        awaitStatus(id, "READY", Duration.ofSeconds(60));
         assertThat(rowsFor(TENANT)).as("上传必须只建一行（定向查）").isEqualTo(1);
     }
 
@@ -109,7 +111,7 @@ class KbPublishIntegrationTest extends AbstractIntegrationTest {
         byte[] content = "# retry-me\nsame bytes\n".getBytes(UTF_8);
 
         long first = uploadId("retry.md", content);
-        awaitStatus(first, "EMBEDDING", Duration.ofSeconds(20));
+        awaitStatus(first, "READY", Duration.ofSeconds(60));   // 终态（中间态 EMBEDDING 已不再是停靠点，见上）
 
         // 模拟"卡住的行"（发布丢了 ⇒ 停在 PENDING）。再上传同一份内容必须**重新触发解析**：
         // 若不重发，状态会一直停在 PENDING ⇒ 下面的等待超时红。
@@ -118,7 +120,8 @@ class KbPublishIntegrationTest extends AbstractIntegrationTest {
 
         long second = uploadId("retry-again.md", content);
         assertThat(second).as("同内容必须命中同一行（幂等，D5）").isEqualTo(first);
-        awaitStatus(first, "EMBEDDING", Duration.ofSeconds(20));
+        // 从 PENDING 一路回到 READY ⇒ 证明"重复上传确实又发了一条 parse"（不重发就永远卡在 PENDING）。
+        awaitStatus(first, "READY", Duration.ofSeconds(60));
         assertThat(rowsFor(TENANT)).as("重复上传仍不许新增行").isEqualTo(1);
     }
 
