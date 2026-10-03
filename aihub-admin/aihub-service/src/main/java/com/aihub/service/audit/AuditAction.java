@@ -51,6 +51,11 @@ public final class AuditAction {
     // ---- 对账 ----
     public static final String RECONCILE_REPORT = "RECONCILE_REPORT";
 
+    // ---- 知识库文档（D13）：上传由**用户**写（actor_type=USER）；
+    //      READY/FAILED 是流水线终态、由**系统**写（actor_type=SYSTEM），在各自的 Task 里再加。
+    //      审计**绝不记**原件内容、chunk 文本、向量，也绝不记任何密钥。
+    public static final String KB_DOCUMENT_UPLOAD = "KB_DOCUMENT_UPLOAD";
+
     private AuditAction() {
     }
 }

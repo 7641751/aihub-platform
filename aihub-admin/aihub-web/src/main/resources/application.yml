@@ -4,6 +4,12 @@ server:
 spring:
   application:
     name: aihub-admin
+  # 上传原件的 multipart 上限：**必须显式配置**，默认 1MB 会**静默拒绝**稍大的文件
+  #（计划 Global Constraints / M5 Task 2）。PDF 等更大体积由 Task 7 一并覆盖在同一上限内。
+  servlet:
+    multipart:
+      max-file-size: 20MB
+      max-request-size: 20MB
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:mysql://127.0.0.1:3307/aihub?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC}
     username: ${SPRING_DATASOURCE_USERNAME:aihub}
@@ -100,3 +106,10 @@ aihub:
     reconcile-cron: "0 0 2 * * *"
     # 偏差判据：|周期至今重算值 − 桶值| / max(周期至今重算值, 1) > 本值才计（默认 1%，等于不算）。
     reconcile-tolerance-ratio: 0.01
+  kb:
+    # 上传原件的存储根目录（M5 D1）：原件是唯一真相源，Chroma 是可重建的派生数据。
+    # 生产（compose）用 AIHUB_KB_STORAGE_ROOT=/app/data/kb（挂卷跨重启存活）；
+    # 默认值刻意指向 target/ 下的**可丢弃**目录 —— 集成测试直接用它、且不许用 @TestPropertySource 覆盖
+    #（覆盖会改变 Spring 上下文缓存键，fork 出第 8 个上下文，违反 M5 的上下文预算）。
+    storage:
+      root: ${AIHUB_KB_STORAGE_ROOT:target/kb-storage}
