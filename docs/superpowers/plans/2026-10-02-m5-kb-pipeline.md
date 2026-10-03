@@ -390,7 +390,15 @@ git commit -m "feat(kb): accept document uploads with atomic storage, sha256 ded
 **Interfaces:**
 - Consumes: 既有 `RabbitTemplate`、`MeteringTopologyConfig`（**先读它，照抄形状**）、Spring 的 `TransactionSynchronizationManager`（先读既有 `ConfigChangePublisher.publishAfterCommit`）。
 - Produces:
-  - `KbTopology.PARSE_QUEUE = "aihub.kb.parse"`、`EMBED_QUEUE = "aihub.kb.embed"`、`DLQ = "aihub.kb.dlq"`、`DLX = "aihub.kb.dlx"`、`EXCHANGE = "aihub.kb"`；
+  - **`KbTopology` 的九个常量以决策 **D16** 为准（2026-10-03 控制器裁决）**：`EXCHANGE = "aihub.kb.exchange"`、
+    `PARSE_QUEUE = "aihub.kb.parse"`、`PARSE_ROUTING_KEY = "aihub.kb.parse"`、`EMBED_QUEUE = "aihub.kb.embed"`、
+    `EMBED_ROUTING_KEY = "aihub.kb.embed"`、`DEAD_LETTER_EXCHANGE = "aihub.kb.dlx"`、
+    `DEAD_LETTER_ROUTING_KEY = "aihub.kb.dlq"`、`DEAD_LETTER_QUEUE = "aihub.kb.dlq"`、
+    `MESSAGE_CONTENT_TYPE = "text/plain;charset=UTF-8"`（与 `MeteringTopology` **逐字同构**）。
+    ⚠️ 本行原先写的 `EXCHANGE = "aihub.kb"` 与裸路由键 `kb.parse`/`kb.embed` **与 D16 冲突** ——
+    实施者发现并上报，控制器裁决**按 D16 改回**（"照抄既有形状、不发明新形状"是 D16 的全部价值所在）。
+    `MESSAGE_CONTENT_TYPE` 由**发布端显式设置**（照计量链路的发布端），并由
+    `KbDocumentPublisherTest#theParseMessageDeclaresItsContentType` 钉住 —— 别再让它成为"声明了没人用"的死常量。
   - `KbMessageCodec.parse(docId)` / `embed(docId, seqFrom, seqTo)` 的**线格式**：`parse:{docId}`、`embed:{docId}:{seqFrom}:{seqTo}`（文本分隔符，**无 JSON**，与 `MeteringEventCodec` 同风格）+ 解码 + **畸形载荷必须抛**（让它进 DLQ 而不是被静默丢弃）；
   - `KbTopology.embedBatches(docId, chunkCount, batchSize) -> List<KbEmbedBatch>`（纯函数：`ceil(N/batchSize)` 条，**最后一批可以不满**）。
 

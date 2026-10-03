@@ -14,23 +14,27 @@ import java.util.List;
  * 一个 DLX + 一个 DLQ。两个阶段的**失败代价不同**（解析失败 = 文件问题，嵌入失败 = 上游/向量库问题），
  * 因此各一条队列；**共用 DLQ** 让运维只需盯一个地方。
  *
- * <p><b>路由键与队列名刻意不同</b>（{@code kb.parse} vs {@code aihub.kb.parse}）：把同一个字面量
- * 同时当队列名与路由键是一种易错写法（改名时容易只改一半），这里显式分开。
+ * <p><b>命名与既有计量链路逐字同构</b>（决策 **D16**）：{@code aihub.kb.exchange}（exchange）/
+ * {@code aihub.kb.parse}（routing + queue）/ {@code aihub.kb.embed}（routing + queue）/
+ * {@code aihub.kb.dlx} / {@code aihub.kb.dlq}，形状与 {@code MeteringTopology} 一一对应。
+ * <b>照抄形状、不发明新形状</b>：运维在两个链路之间切换时不该重新学一套命名。
+ * （2026-10-03 记：本类一度把 exchange 写成 {@code aihub.kb}、路由键写成裸的 {@code kb.parse} ——
+ * 那是个"看起来更漂亮"但与 D16 冲突的形状，已按决策表改回。）
  */
 public final class KbTopology {
 
     /** 业务交换机。 */
-    public static final String EXCHANGE = "aihub.kb";
+    public static final String EXCHANGE = "aihub.kb.exchange";
 
     /** 解析阶段队列（`PENDING|PARSING → PARSING`）。 */
     public static final String PARSE_QUEUE = "aihub.kb.parse";
     /** 解析阶段路由键。 */
-    public static final String PARSE_ROUTING_KEY = "kb.parse";
+    public static final String PARSE_ROUTING_KEY = "aihub.kb.parse";
 
     /** 嵌入阶段队列。 */
     public static final String EMBED_QUEUE = "aihub.kb.embed";
     /** 嵌入阶段路由键。 */
-    public static final String EMBED_ROUTING_KEY = "kb.embed";
+    public static final String EMBED_ROUTING_KEY = "aihub.kb.embed";
 
     /** 死信交换机。 */
     public static final String DEAD_LETTER_EXCHANGE = "aihub.kb.dlx";

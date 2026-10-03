@@ -78,8 +78,14 @@ public class KbDocumentPublisher {
      */
     public void publishParse(long docId) {
         try {
+            // 显式声明线格式的内容类型（照计量链路的发布端）：消费端（Task 4）因此不必猜
+            // "这条消息是谁用什么转换器发的"，`KbTopology.MESSAGE_CONTENT_TYPE` 也不再是死常量。
             rabbitTemplate.convertAndSend(KbTopology.EXCHANGE, KbTopology.PARSE_ROUTING_KEY,
-                    KbMessageCodec.parse(docId));
+                    KbMessageCodec.parse(docId),
+                    message -> {
+                        message.getMessageProperties().setContentType(KbTopology.MESSAGE_CONTENT_TYPE);
+                        return message;
+                    });
         } catch (RuntimeException e) {
             publishFailures.increment();
             log.warn("kb 解析消息发布失败（业务写已提交，该行会停在 PENDING 等运维重发）: docId={} {}",

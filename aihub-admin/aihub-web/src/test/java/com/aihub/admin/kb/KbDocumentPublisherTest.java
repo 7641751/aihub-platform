@@ -9,18 +9,24 @@ import com.aihub.service.kb.KbDocumentPublisher;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
 import org.springframework.amqp.AmqpException;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageBuilder;
+import org.springframework.amqp.core.MessagePostProcessor;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -64,13 +70,14 @@ class KbDocumentPublisherTest {
         try {
             publisher.publishParseAfterCommit(7L);
 
-            verify(rabbit, never()).convertAndSend(anyString(), anyString(), any(Object.class));
+            verify(rabbit, never()).convertAndSend(anyString(), anyString(), any(Object.class),
+                    any(MessagePostProcessor.class));
 
             TransactionSynchronizationManager.getSynchronizations()
                     .forEach(TransactionSynchronization::afterCommit);
 
-            verify(rabbit).convertAndSend(KbTopology.EXCHANGE, KbTopology.PARSE_ROUTING_KEY,
-                    KbMessageCodec.parse(7L));
+            verify(rabbit).convertAndSend(eq(KbTopology.EXCHANGE), eq(KbTopology.PARSE_ROUTING_KEY),
+                    eq(KbMessageCodec.parse(7L)), any(MessagePostProcessor.class));
         } finally {
             TransactionSynchronizationManager.clearSynchronization();
         }
@@ -88,8 +95,30 @@ class KbDocumentPublisherTest {
         assertThat(TransactionSynchronizationManager.isSynchronizationActive()).isFalse();
         publisher.publishParseAfterCommit(7L);
 
-        verify(rabbit).convertAndSend(KbTopology.EXCHANGE, KbTopology.PARSE_ROUTING_KEY,
-                KbMessageCodec.parse(7L));
+        verify(rabbit).convertAndSend(eq(KbTopology.EXCHANGE), eq(KbTopology.PARSE_ROUTING_KEY),
+                eq(KbMessageCodec.parse(7L)), any(MessagePostProcessor.class));
+    }
+
+    /**
+     * 线格式的内容类型由**发布端显式声明**（照计量链路的发布端；{@code KbTopology.MESSAGE_CONTENT_TYPE}
+     * 因此不再是"声明了没人用"的死常量）。消费端（Task 4）据此解码，不必猜上一条消息是谁用什么转换器发的。
+     */
+    @Test
+    void theParseMessageDeclaresItsContentType() {
+        RabbitTemplate rabbit = mock(RabbitTemplate.class);
+        KbDocumentPublisher publisher = new KbDocumentPublisher(rabbit, new SimpleMeterRegistry());
+
+        publisher.publishParse(7L);
+
+        ArgumentCaptor<MessagePostProcessor> postProcessor = ArgumentCaptor.forClass(MessagePostProcessor.class);
+        verify(rabbit).convertAndSend(eq(KbTopology.EXCHANGE), eq(KbTopology.PARSE_ROUTING_KEY),
+                eq(KbMessageCodec.parse(7L)), postProcessor.capture());
+
+        Message processed = postProcessor.getValue().postProcessMessage(
+                MessageBuilder.withBody(KbMessageCodec.parse(7L).getBytes(StandardCharsets.UTF_8)).build());
+        assertThat(processed.getMessageProperties().getContentType())
+                .as("内容类型必须是 MeteringTopology 同款的线格式声明")
+                .isEqualTo(KbTopology.MESSAGE_CONTENT_TYPE);
     }
 
     /**
@@ -104,7 +133,8 @@ class KbDocumentPublisherTest {
     void aBrokerFailureIsCountedAndWarnedButNeverPropagates() {
         RabbitTemplate rabbit = mock(RabbitTemplate.class);
         doThrow(new AmqpException("模拟 broker 不可用"))
-                .when(rabbit).convertAndSend(anyString(), anyString(), any(Object.class));
+                .when(rabbit).convertAndSend(anyString(), anyString(), any(Object.class),
+                        any(MessagePostProcessor.class));
         SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
         KbDocumentPublisher publisher = new KbDocumentPublisher(rabbit, meterRegistry);
 
