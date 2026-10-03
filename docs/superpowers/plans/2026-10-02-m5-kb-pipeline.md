@@ -598,6 +598,23 @@ git commit -m "feat(kb): parse documents into tracked chunks and fan out embed b
    （本任务只实现了"抛"，没有跑过 `重试 3 次 → RejectAndDontRequeue → kb.dlq` 这条链）。
 5. `embedBatchesReceived(EMBED_QUEUE, …)` 是**已知短期判据**（Task 5 的消费者会抢走 `kb.embed`）—— 见 Task 5 段落的警告。
 
+**（2026-10-03 独立评审 = 批准继续，0 Critical / 0 Important / 3 Minor）**
+- **三条"防假绿"逐条成立**：① 重放用例**先退 `PENDING`** 再重放是**必要且充分**的（不退回则守卫在写段前就 ack 丢弃，
+  用例根本走不到 upsert）；② `READY` 用例用**真实上传的行**才可被最小变异打红（合成行会因"缺文件⇒抛⇒回滚⇒仍 READY"而打不红）；
+  ③ `reconstruct(...) == text` **能同时证伪**"步长错/重叠错/丢尾巴"三种变异。
+- **事务与状态机无半成品/误终态路径**：单事务 ⇒ 中途异常整体回滚（不会留"半成品"）；`PARSING` **永不落盘**
+  （迁移与写真值同事务）⇒ 并发两条 parse 被条件 UPDATE + InnoDB 行锁序列化，后到者 `affected==0` ⇒ ack 丢弃，
+  且**与驱动 `useAffectedRows`/`CLIENT_FOUND_ROWS` 语义无关**（因为不存在跨事务的 `PARSING→PARSING` 匹配）。
+- **越界 0**：`246e184..17ac2c3` 恰 **12 文件**；`KbPublishIntegrationTest` 的改动**未使断言变弱**
+  （缺发布⇒两者都红；载荷写错⇒消费端抛⇒DLQ⇒停 PENDING⇒新断言红；消费端未注册⇒**新断言反而更严**）。
+  唯一损失是**故障归因粒度**（不再能区分"发布端坏"vs"消费端坏"），而载荷由 `KbMessageCodecTest`、after-commit 由 `KbDocumentPublisherTest` 各自覆盖。
+- **Minor（3 条，如实登记）**：① **⚠️ 实施者的 M1/M2/M3 红证日志采自"中期版本"**（红点行号 `:274`，而冻结提交上是 `:268`；
+  那批日志早于它"强化 READY 用例"的编辑）⇒ **证据出处与最终提交不同版本**（评审已在冻结提交上**重做 M3 并拿到逐字相同的红**，
+  并贴出根因 `Duplicate entry '1-0' for key 'kb_chunk.uk_kb_chunk_doc_seq'`，所以结论不受影响）；② `KbPublishIntegrationTest` 里
+  `…AfterCommit` 这个方法名已不再证明 after-commit（该性质移到单测了）—— 命名味道；③ `KbChunkerTest` 的 reconstruct 用单一字符文本，
+  理论上分不出"整体平移且长度多重集不变"（实际被长度断言拦下）。
+  ①已写进 `CONVENTIONS.md` §8 作为通用纪律：**变异证据必须落在最终提交的那个修订上**。
+
 **（2026-10-03 控制器派发前扫描 —— 5 条"照字面做就会红 / 会踩雷"）**
 1. **⚠️ `KbChunkerTest` 不许放 `aihub-service`**：该模块**没有 `src/test`、`pom.xml` 里也没有任何测试依赖**
    （与 Task 3 的 `aihub-mq` 完全同款）⇒ 计划那条路径**编译不过**。改放
