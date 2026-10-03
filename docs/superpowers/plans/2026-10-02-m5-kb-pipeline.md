@@ -519,6 +519,16 @@ git commit -m "feat(kb): declare the parse/embed queues with dead-lettering and 
 - Modify: `aihub-admin/aihub-web/src/main/resources/application.yml`（`aihub.kb.chunk.size-chars=800`、`overlap-chars=100`、`aihub.kb.embed.batch-size=10`）
 - Test: **`aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbChunkerTest.java`**（**2026-10-03 订正**：原写
   `aihub-service/src/test/...`，但该模块**没有测试目录、也没有测试依赖** ⇒ 编译不过）+ `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbParseIntegrationTest.java`
+- **（2026-10-03 控制器复核后补进 Files 的 4 个 —— 实施者上报、控制器裁定"属计划漏写、非越界扩张"）**：
+  - `aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbParseSink.java`（**端口**）+ `aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbParseService.java`（**实现**）：
+    `aihub-mq` 的 pom 只有 `aihub-common` + `spring-boot-starter-amqp`（实测），**看不到 `dao`/`service`**
+    ⇒ 消费者**无法**直接读 `kb_document`/原件、也写不了 `kb_chunk`。这是 mq↔service 的**接缝**，
+    照既有 `MeteringSink` 的先例做端口/适配器。**不加这两个文件，本任务无法实现**。
+  - `aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbDocumentPublisher.java`（改）：加 `publishEmbedAfterCommit`/`publishEmbed`
+    —— 段必须先随事务提交、消息才可见（Task 5 的消费者会按 `(docId, seq)` 回读段），复用它的 after-commit 与失败计数器。
+  - `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbPublishIntegrationTest.java`（改）：把"消息在队列里"的断言换成
+    **数据库判据**（`status` 走到 `EMBEDDING`）—— 这是 Task 3 javadoc 与本节风险条**已经写明**的 prescription（消费者会抢队列），
+    **属授权改动**，不是"偷改既有断言"。
 
 **Interfaces:**
 - Consumes: Task 3 的拓扑与编解码、Task 1 的 mapper、`KbFileStore`（读原件）。
@@ -531,7 +541,11 @@ git commit -m "feat(kb): declare the parse/embed queues with dead-lettering and 
 assertThat(KbChunker.chunk("", 800, 100)).isEmpty();
 assertThat(KbChunker.chunk("   \n\t ", 800, 100)).as("全空白 ⇒ 0 段（Task 5 会判 FAILED）").isEmpty();
 assertThat(KbChunker.chunk("abc", 800, 100)).containsExactly("abc");
-assertThat(KbChunker.chunk("x".repeat(2500), 800, 100)).hasSize(3);            // 800 + 700 + 700（带 100 重叠）
+// 2026-10-03 控制器订正：原写 hasSize(3) 并注 "800+700+700" —— **算术上不可能**：
+// 3 段、每段 ≤800、相邻重叠 100 ⇒ 最多覆盖 3*800 − 2*100 = 2200 < 2500，会**静默丢 300 个字符**。
+// 无缝隙滑窗的正确下界 = ceil((2500 − 100) / (800 − 100)) = 4。
+assertThat(KbChunker.chunk("x".repeat(2500), 800, 100)).hasSize(4);            // 800 + 800 + 800 + 400
+assertThat(reconstruct(chunks, 100)).isEqualTo(text);   // 拼接去重后必须逐字还原全文（把"丢字符"变成可证伪的失败）
 assertThat(KbChunker.chunk("中".repeat(1000), 800, 100)).allSatisfy(s -> assertThat(s.length()).isLessThanOrEqualTo(800));
 assertThatThrownBy(() -> KbChunker.chunk("abc", 100, 100)).as("重叠必须小于窗口，否则死循环").isInstanceOf(IllegalArgumentException.class);
 
@@ -565,6 +579,24 @@ git commit -m "feat(kb): parse documents into tracked chunks and fan out embed b
 
 **验收判据：** 状态走到 `EMBEDDING`；`kb_chunk` 行数 == `chunk_count`；批次条数 == `ceil(N/batchSize)`；重放不产生新 chunk；`READY`/`FAILED` 的消息被 ack 丢弃。
 **RED 证据：** 把 `uk_kb_chunk_doc_seq` 换成普通索引（或改成 `insert` 不 upsert）⇒ `aReplayedParseMessageDoesNotDuplicateChunks` 红。
+
+**（2026-10-03 控制器复核 —— 实施结果与三处上报）**
+1. **实施者抓出计划的三处缺陷**（都已按其正确行为落地并在用例里写明证明）：① **切分算术错**（见上面那行订正，
+   原文的 3 段会**静默丢 300 字符**）；② **mq↔service 接缝漏写**（`aihub-mq` 看不到 dao/service ⇒ 必须加端口/适配器）；
+   ③ **`KbChunkMapper` 无 upsert**（已由控制器在派发前补进 Files，实施者按 `VALUES()` 形式落地并写明 MySQL 8.4 的 1064 约束）。
+2. **重放用例的"真空"风险已被实施者正面处理**（这是本任务最容易交出假绿的地方）：
+   `aReplayedParseMessageDoesNotDuplicateChunks` **先把状态手工退回 `PENDING`** 再重放，否则状态守卫
+   （`EMBEDDING ∉ {PENDING, PARSING}`）会在**写段之前**就 ack 丢弃 ⇒ 用例根本覆盖不到 upsert。
+   `READY` 那条同理：必须用**真实上传（文件存在）**的行，否则去掉守卫后"缺文件 ⇒ 抛 ⇒ 回滚 ⇒ 状态仍是 READY"，
+   断言**无法被最小变异打红**（= 没断言）。两条注释都写明了理由 —— 这是 §8「不可证伪的断言不算断言」的落实。
+3. **控制器代办的静态核验**：提交面恰 **11 文件**、无越界（无 `pom.xml`/迁移/compose/`.env`/gateway）、`MUTANT` 残留 **0**、
+   工作树**干净**；`KbChunkMapper.upsert` 用 `VALUES()`；`KbChunkerTest` 在 `aihub-web` 且**零 Spring**；
+   `KbParseIntegrationTest` 逐字复用合成密钥、**不加 `@Import`** ⇒ 全量 **`Tomcat` = 7**、`aihub-web` **295/0**、`aihub-common` **68/0**。
+4. **仍未覆盖（如实登记，**交给 Task 6**）**：`0 段 ⇒ FAILED("无可提取文本")`（D14）的逻辑**已实现但没有任何用例执行它**
+   （`KbParseService.markNoText` 只有编译覆盖）；`KB_DOCUMENT_FAILED` 审计的实施者有意留到 Task 6。
+   ⇒ **Task 6 必须补**：为"空/全空白文档 ⇒ `FAILED` + `error_msg` + 审计"加集成用例，并端到端验 DLQ
+   （本任务只实现了"抛"，没有跑过 `重试 3 次 → RejectAndDontRequeue → kb.dlq` 这条链）。
+5. `embedBatchesReceived(EMBED_QUEUE, …)` 是**已知短期判据**（Task 5 的消费者会抢走 `kb.embed`）—— 见 Task 5 段落的警告。
 
 **（2026-10-03 控制器派发前扫描 —— 5 条"照字面做就会红 / 会踩雷"）**
 1. **⚠️ `KbChunkerTest` 不许放 `aihub-service`**：该模块**没有 `src/test`、`pom.xml` 里也没有任何测试依赖**
@@ -686,6 +718,13 @@ git commit -m "feat(kb): embed chunks into Chroma and finish the pipeline at REA
 ---
 
 ## Task 6: 失败路径与死信（**M5 的官方验收**：全成或全清 / 中断上传不留脏数据）
+
+> ⚠️ **（2026-10-03 控制器提前登记 —— 本任务必须补齐的两件"已实现但没用例钉住"的事）**：
+> ① **`0 段 ⇒ FAILED("无可提取文本")`（D14）**：`KbParseService.markNoText` **已实现**，
+>    但**没有任何用例执行它**（Task 4 只有编译覆盖）⇒ 本任务要为它加集成用例：上传一份**全空白**的 `.md`
+>    ⇒ 等 `kb_document.status` 走到 `FAILED`、`error_msg` 非空、**`kb_chunk` 的段数 == 0**、且**不发** `kb.embed`。
+> ② **`KB_DOCUMENT_FAILED` 审计**：Task 4 有意**只做状态迁移、不做审计**（避免越界），并把出口留在这里。
+>    还要端到端验 DLQ（`重试 3 次 → RejectAndDontRequeueRecoverer → kb.dlq`）—— Task 4 只实现了"编解码异常往外抛"。
 
 **Files:**
 - Create: `aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbMessageRecoverer.java`（D7）
