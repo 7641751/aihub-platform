@@ -665,13 +665,49 @@ git commit -m "feat(kb): parse documents into tracked chunks and fan out embed b
 > ② 同理，Task 4 的 `KbParseIntegrationTest` 里"上传/发布后等状态"的用例会与你的消费者并发 ⇒
 > 断言一律走**状态轮询**（DB），不要抢队列。**改动这两处属于本任务的分内事，不是越界。**
 
+**（2026-10-03 控制器派发前扫描 —— 7 条"照字面做就会红 / 会踩雷"）**
+1. **⚠️ `KbIntegrationTestBase` 不许带任何属性来源**：本文件下面那句"只加 Chroma 单例容器与助手 ⇒ 与既有测试共用默认上下文"
+   **加不出来**。Chroma 的 URL 与**假 embeddings 上游**的 URL **必须注册在 `TestContainers.registerInfrastructure(registry)`**
+   —— 那是 `AbstractIntegrationTest.registerProperties` 与"非 UTC 方言"的第二个上下文**共用**的唯一一处；
+   Chroma 容器本身声明成 **`TestContainers.CHROMA` 单例**（照 `REDIS`/`RABBITMQ` 的形状）。
+   若在 `KbIntegrationTestBase` 上写 `@DynamicPropertySource` ⇒ **fork 第 8 个上下文**（判据：全量 `Tomcat started on port` 必须仍是 **7**）。
+   **而且这不只是预算问题**：**每个**上下文都会跑 embed 消费者（Task 4 的 parse 消费者产出的 `kb.embed` 会在**同一个 JVM** 被消费，
+   且多个上下文的消费者**争抢**同一个共享队列）⇒ 只有 Task 5 的上下文知道 Chroma/embeddings 的 URL 时，
+   别的上下文里的 embed 消费者会失败 → 重试 → DLQ，制造噪声与假红。⇒ `KbIntegrationTestBase` = **无注解**的助手基类。
+2. **⚠️ mq↔service 接缝（Task 4 同款，计划又漏写了）**：`aihub-mq` 的 pom 看不到 `aihub-service` ⇒ `KbEmbedConsumer`
+   **不能**直接注入 `KbEmbeddingClient`/`KbVectorStoreClient`。照 `KbParseSink`/`KbParseService` 的先例加
+   **端口 `KbEmbedSink`（`aihub-mq`）+ 实现 `KbEmbedService`（`aihub-service`）**（已补进 Files 与 `git add`）。
+3. **⚠️ "超时用例走到 FAILED"在本任务做不到，而且会很慢**：写 `FAILED` + `error_msg` + `cleanup` 的是**自定义 `MessageRecoverer`**
+   —— 那是 **Task 6** 的产物（D7）；更实际的是容器会**重试 3 次 + 指数退避**，一次 30 秒超时会把集成用例拖到分钟级。
+   ⇒ **把"超时有界"折成零上下文单测**（`KbEmbeddingClientTest`：对着 `neverRespond()` 的假上游，断言耗时 `< timeout + 5s` **且抛异常**），
+   **集成用例只证 READY 路径**；`FAILED`/`cleanup`/审计**留给 Task 6**（别在这里写"走到 FAILED"，那是一条无法达成的验收）。
+4. **⚠️ 假上游要先定好 Task 6 要用的失败注入接口，而且必须能复位**（它是 JVM 级单例，用例之间会互相污染）：
+   至少 `respondWithDeterministicVectors(dim)`（**假上游固定 8 维**，与附录 A 一致）、`neverRespond()`、`failOnBatch(n)`，
+   以及每个用例 `@BeforeEach` 里的 `reset()`。
+5. **⚠️ 命名与元数据逐字照附录 A**（**跨仓库契约，改它就是破坏性变更**）：collection 名 `kb_chunks`
+   （由 `aihub.kb.chroma.collection` 配置）；`vector_id = "{docId}:{seq}"`；metadata **必填**
+   `doc_id`(long) / `tenant_id`(long) / `seq`(int)；**文本不进 Chroma**（只回查 MySQL）。
+   写进 Chroma 的坐标**必须**能从 `vector_id` 推出来（否则 `seqOfEveryRecord` 那类断言无从下手）。
+6. **⚠️ `count` 是 `GET`**（`POST` 实测得 **405**）：Chroma 的 `count`/按名取集合走 `GET`，`upsert`/`get`/`delete` 走 `POST`，
+   且**除"按集合名"的路由外都吃 `collection_id`（UUID）** —— 别照直觉写。
+7. **`EMBEDDING_TIMEOUT_SECONDS` 必须有来源**：定义配置项 `aihub.kb.embedding.timeout-seconds=30`（yml 默认值，**测试不许覆盖**），
+   客户端读它；用例断言"**配置读到的值 == 文档里写的那个值**"，否则"阈值与判据文字一致"这句无法证伪。
+
 **Files:**
 - Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbEmbeddingClient.java`
 - Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbVectorStoreClient.java`（Chroma REST）
 - Create: `aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbEmbedConsumer.java`
 - Create: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/support/KbIntegrationTestBase.java`（**不加任何注解**，只加 Chroma 单例容器与助手 ⇒ 与既有测试**共用默认上下文**）
 - Create: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/support/FakeEmbeddingUpstream.java`（JDK `HttpServer`）
+- Create（**2026-10-03 控制器补**，mq↔service 接缝）: `aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbEmbedSink.java` + `aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbEmbedService.java`
+- **Modify（2026-10-03 控制器补 —— 这条最容易漏）**: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/support/TestContainers.java`
+  （加 **`CHROMA` 单例** + 在 `registerInfrastructure` 里注册 Chroma 与假上游的 URL —— 那是**唯一**的共享注册点）
+- **Modify（2026-10-03 控制器补）**: `aihub-admin/aihub-web/src/main/resources/application.yml`
+  （`aihub.kb.embedding.timeout-seconds=30`、`aihub.kb.chroma.collection=kb_chunks`、以及 `embedding.base-url`/`chroma.base-url` 的环境变量占位默认值）
 - Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbEmbedIntegrationTest.java`
+- Test（**2026-10-03 控制器补**，零上下文）: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbEmbeddingClientTest.java`（**超时有界**那条搬到这里）
+- **Modify（2026-10-03 控制器补）**: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbParseIntegrationTest.java`
+  （段首警告 ① 要求把那条 embed 队列断言改成 DB 判据 —— 改既有文件所以必须列进 Files 与 `git add`）
 
 **Interfaces:**
 - Consumes: Task 4 的 chunk 行、`aihub.kb.embedding.base-url`、`aihub.kb.chroma.base-url`。
@@ -705,13 +741,18 @@ git commit -m "feat(kb): parse documents into tracked chunks and fan out embed b
 }
 
 @Test void aReplayedEmbedBatchDoesNotGrowTheVectorStore() { /* 同一批投两次 ⇒ count 不变（upsert 生效） */ }
-@Test void anEmbeddingTimeoutIsBoundedAndFailsFast() {
+// 2026-10-03 订正：这条**从集成用例搬走** —— ① 写 FAILED 的是 Task 6 的 MessageRecoverer（D7），本任务做不到；
+// ② 容器重试 3 次 + 指数退避 ⇒ 一次 30 秒超时会把集成用例拖到分钟级。
+// ⇒ 有界性用**零上下文单测**（KbEmbeddingClientTest，不启 Spring）证；集成层只证 READY 路径。
+@Test void anEmbeddingTimeoutIsBoundedAndFailsFast() {          // ← 放在 KbEmbeddingClientTest
     upstream.neverRespond();
-    long start = System.nanoTime();
-    /* ... 走到 FAILED ... */
-    assertThat(Duration.ofNanos(System.nanoTime() - start))
-            .as("判据文字写的是「超时上限 %d 秒」，阈值必须与之一致", EMBEDDING_TIMEOUT_SECONDS)
-            .isLessThan(Duration.ofSeconds(EMBEDDING_TIMEOUT_SECONDS + 5));
+    Instant start = Instant.now();
+    assertThatThrownBy(() -> client.embed(List.of("x")))
+            .as("超时必须抛，绝不许静默返回空向量（那会把整篇文档写成空向量并置 READY）")
+            .isInstanceOf(RuntimeException.class);
+    assertThat(Duration.between(start, Instant.now()))
+            .as("阈值必须与配置项/文档写的那个值一致（aihub.kb.embedding.timeout-seconds）")
+            .isLessThan(Duration.ofSeconds(timeoutSeconds + 5));
 }
 ```
 
@@ -720,12 +761,19 @@ git commit -m "feat(kb): parse documents into tracked chunks and fan out embed b
 - [ ] **Step 4: 跑测试确认通过**；- [ ] **Step 5: 提交**
 
 ```bash
+# 2026-10-03 控制器订正：补 mq 端口 / service 实现 / TestContainers / application.yml / 两个测试文件（全部显式路径）
 git add aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbEmbeddingClient.java \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbVectorStoreClient.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbEmbedService.java \
+        aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbEmbedSink.java \
         aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbEmbedConsumer.java \
+        aihub-admin/aihub-web/src/main/resources/application.yml \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/support/TestContainers.java \
         aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/support/KbIntegrationTestBase.java \
         aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/support/FakeEmbeddingUpstream.java \
-        aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbEmbedIntegrationTest.java
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbEmbeddingClientTest.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbEmbedIntegrationTest.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbParseIntegrationTest.java
 git commit -m "feat(kb): embed chunks into Chroma and finish the pipeline at READY"
 ```
 
