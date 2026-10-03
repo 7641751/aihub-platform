@@ -780,6 +780,27 @@ git commit -m "feat(kb): embed chunks into Chroma and finish the pipeline at REA
 **验收判据：** 上传 md ⇒ `READY`；**直接查 Chroma**：chunk 数 == `chunk_count`、`seq` 连续、metadata 的 `tenant_id` 正确；重放不增；embeddings 超时**有界**且阈值与判据文字一致。
 **RED 证据：** 把 upsert 改成 insert（非幂等）⇒ 重放用例红；把 `vector_id` 改成随机 UUID ⇒ `seqOfEveryRecord` 红（无法从 id 推出坐标）。
 
+**（2026-10-03 控制器接手实现 —— 派发的子代理被闲置超时取消，只留下 Step 0 的完整实证）**
+- **接手理由与状态**：子代理跑了 ~2h **没写一行代码**（只在 Step 0 里把 Chroma 契约逐条实测并留证，见 `.m5t5-logs/step0-*.txt`；探针容器由控制器清理）。
+  控制器按它的 `STATUS.txt` 直接实现：**13 个文件**（12 个见 Files + `KbPublishIntegrationTest` 的判据订正），全量 **`aihub-web` 303/0、`aihub-common` 68/0、`Tomcat` = 7**。
+- **⚠️ 控制器实测到的根因（最值钱的一条）**：JDK `HttpClient` 对**明文 `http://`** 默认协商 HTTP/2，会发 `Upgrade: h2c` 前奏；
+  Chroma 的 uvicorn/h11 **解析不了**它 ⇒ 建集合返回 **422 `{"loc":["body"],"msg":"Field required","input":null}`**（有时 400 `Invalid HTTP request received.`）。
+  **同一个 URL、同一份 JSON 用 curl（HTTP/1.1）得到 200** ⇒ 症状像"体没写对"，真因是协议协商。
+  修法 = 两个客户端都 `.version(HttpClient.Version.HTTP_1_1)`。已写进 `CONVENTIONS.md` §8。
+- **⚠️ 第二类：流水线终点后移 ⇒ "等中间态"的断言集体变竞态**。Task 4 时 `awaitStatus(…, "EMBEDDING")` 是有效判据；
+  embed 消费者落地后流水线不再停靠 `EMBEDDING` ⇒ 全量里**连红 2 条**（`KbPublishIntegrationTest` 两条，`当时状态=READY`）。
+  连改 **3 个文件**（`KbParseIntegrationTest`、`KbPublishIntegrationTest` + 类注释）才全绿；判据统一改为**终态 `READY`** 或**行数不变量**。
+  也写进 §8（"换阶段时 grep 一遍中间态字符串"）。
+- **变异体（3 条，均三重验证：红点原文 / SHA 一致 / `MUTANT` 残留 0 / 还原后 clean 绿）**：
+  **M1** 去掉 HTTP/1.1 钉 ⇒ 复现 422 + **400 `Invalid HTTP request received.`**（根因实证）；
+  **M2** metadata 不写 `tenant_id` ⇒ `KbEmbedIntegrationTest:70` 红（租户隔离维度丢失）；
+  **M3** `vector_id` 随机 UUID ⇒ `NumberFormatException: "60b1a8ad-…"` @ `:133`（坐实"id 必须可推导"，即计划点名的 RED）。
+- **RED 如实登记**：本轮**没有**自然 RED（控制器是先写实现后跑；且一次失败运行会因 3×90 秒等待被工具杀死、日志截断，见 §8 的教训）
+  ⇒ 判别力由上面 3 条变异体提供（与 Task 2/16 的先例一致）。
+- **控制器自己的两处失误（登记）**：① 测试里三处内层 ASCII 引号未转义（`"超时上限 %d 秒"`）⇒ 编译错；
+  ② 三个测试方法漏 `throws Exception`。都是"自己写的代码自己没先编译"的代价（编译校验步骤把它们一次暴露）。
+- **仍未覆盖（如实登记，交 Task 6）**：`FAILED`/`cleanup`/审计（`MessageRecoverer`）、DLQ 端到端、`0 段 ⇒ FAILED` 的集成用例。
+
 ---
 
 ## Task 6: 失败路径与死信（**M5 的官方验收**：全成或全清 / 中断上传不留脏数据）
