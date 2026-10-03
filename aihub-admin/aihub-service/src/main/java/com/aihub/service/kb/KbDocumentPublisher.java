@@ -1,5 +1,6 @@
 package com.aihub.service.kb;
 
+import com.aihub.mq.kb.KbEmbedBatch;
 import com.aihub.mq.kb.KbMessageCodec;
 import com.aihub.mq.kb.KbTopology;
 import io.micrometer.core.instrument.Counter;
@@ -90,6 +91,49 @@ public class KbDocumentPublisher {
             publishFailures.increment();
             log.warn("kb 解析消息发布失败（业务写已提交，该行会停在 PENDING 等运维重发）: docId={} {}",
                     docId, e.toString());
+        }
+    }
+
+    /**
+     * 事务安全的嵌入阶段发布入口（Task 4）：**有活动事务就注册 after-commit 钩子，没有就立即发**。
+     *
+     * <p>与 {@link #publishParseAfterCommit(long)} 同形、同样的理由：embed 消费者（Task 5）会按
+     * {@code (docId, seq)} 去读 {@code kb_chunk}，必须"段先提交、消息后可见"。
+     *
+     * @param batch 已写好段的闭区间批次
+     */
+    public void publishEmbedAfterCommit(KbEmbedBatch batch) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    publishEmbed(batch);
+                }
+            });
+            return;
+        }
+        publishEmbed(batch);
+    }
+
+    /**
+     * 把 {@code embed:{docId}:{seqFrom}:{seqTo}} 投到 {@code kb.embed}。**永不抛异常**：发布是可丢的
+     * 触发手段，文档的真相源是 MySQL（{@code kb_document} + {@code kb_chunk} + 原件）。
+     *
+     * <p>残余（诚实登记）：发布丢了 ⇒ 该 doc 会停在 {@code EMBEDDING}（没有别的机制会重发）⇒
+     * 靠计数器 {@value #PUBLISH_FAILURES_METRIC} 告警 + 运维重发（重新上传即现成的重试手势）。
+     */
+    public void publishEmbed(KbEmbedBatch batch) {
+        try {
+            rabbitTemplate.convertAndSend(KbTopology.EXCHANGE, KbTopology.EMBED_ROUTING_KEY,
+                    KbMessageCodec.embed(batch.docId(), batch.seqFrom(), batch.seqTo()),
+                    message -> {
+                        message.getMessageProperties().setContentType(KbTopology.MESSAGE_CONTENT_TYPE);
+                        return message;
+                    });
+        } catch (RuntimeException e) {
+            publishFailures.increment();
+            log.warn("kb 嵌入消息发布失败（段已提交，该 doc 会停在 EMBEDDING 等运维重发）: batch={} {}",
+                    batch, e.toString());
         }
     }
 }

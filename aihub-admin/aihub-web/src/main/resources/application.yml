@@ -113,3 +113,12 @@ aihub:
     #（覆盖会改变 Spring 上下文缓存键，fork 出第 8 个上下文，违反 M5 的上下文预算）。
     storage:
       root: ${AIHUB_KB_STORAGE_ROOT:target/kb-storage}
+    # 切分窗口（字符数）与相邻段重叠（字符数）。步长 = size - overlap；overlap 必须 < size。
+    # 默认值即生产值；集成测试**直接用默认值**（用 @TestPropertySource 覆盖会 fork 第 8 个 Spring 上下文）。
+    chunk:
+      size-chars: 800
+      overlap-chars: 100
+    # 每条 kb.embed 消息携带的段数上界（D10）：批次条数 = ceil(chunkCount / batch-size)。
+    # 默认值即生产值，测试不许覆盖（同上，覆盖会 fork 上下文）。
+    embed:
+      batch-size: 10
