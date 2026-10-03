@@ -108,6 +108,28 @@ class KbPublishIntegrationTest extends AbstractIntegrationTest {
         assertThat(rowsFor(TENANT)).as("上传必须只建一行（定向查）").isEqualTo(1);
     }
 
+    /**
+     * 控制器裁决（2026-10-03）：**重复上传也会重新触发解析** —— 这是"发布丢了 ⇒ 行停在 PENDING"的
+     * **唯一现成补救手段**（DLQ 只管**消费端**失败、计数器只**观测**，两者都不会把消息重新推下去）。
+     *
+     * <p>代价如实登记：对一份**已经 READY** 的文档再传一次，会多做一次解析（有界，且 Task 4/5 的写入按设计幂等）。
+     */
+    @Test
+    void reUploadingTheSameBytesPublishesAgainSoAStuckRowCanBeRetried() throws Exception {
+        byte[] content = "# retry-me\nsame bytes\n".getBytes(UTF_8);
+
+        long first = uploadId("retry.md", content);
+        assertThat(awaitParseMessageFor(first, Duration.ofSeconds(10)))
+                .as("第一次上传必须发出 '%s'", KbMessageCodec.parse(first)).isTrue();
+
+        long second = uploadId("retry-again.md", content);
+        assertThat(second).as("同内容必须命中同一行（幂等，D5）").isEqualTo(first);
+        assertThat(awaitParseMessageFor(first, Duration.ofSeconds(10)))
+                .as("重复上传必须**再发一次** '%s'（否则卡在 PENDING 的行没有任何补救手段）", KbMessageCodec.parse(first))
+                .isTrue();
+        assertThat(rowsFor(TENANT)).as("重复上传仍不许新增行").isEqualTo(1);
+    }
+
     // ---------------------------------------------------------------- 助手
 
     private ResponseEntity<String> postMultipart(String path, Long tenantId, String filename, byte[] content) {
@@ -120,6 +142,13 @@ class KbPublishIntegrationTest extends AbstractIntegrationTest {
         headers.setContentType(MediaType.MULTIPART_FORM_DATA);
         headers.setBearerAuth(token());
         return restTemplate.exchange(path, HttpMethod.POST, new HttpEntity<>(parts, headers), String.class);
+    }
+
+    /** 上传一份内容并返回 {@code data.id}（两处断言共用，避免把响应解析抄两遍）。 */
+    private long uploadId(String filename, byte[] content) throws Exception {
+        ResponseEntity<String> res = postMultipart("/api/kb/documents", TENANT, filename, content);
+        assertThat(res.getStatusCode()).as("上传必须 200（响应体=%s）", res.getBody()).isEqualTo(HttpStatus.OK);
+        return body(res).path("data").path("id").asLong();
     }
 
     /**

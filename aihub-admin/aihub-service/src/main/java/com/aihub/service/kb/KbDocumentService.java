@@ -103,6 +103,15 @@ public class KbDocumentService {
                     fileStore.promote(staged);
                 }
                 audit(tenantId, actor, existing, true);
+                // 控制器裁决（2026-10-03）：**幂等路径也要发**。原先这里不发，理由是"那一行可能已过了 PENDING，
+                // 重新驱动解析没有意义（运维重发由 DLQ/计数器的出口负责）" —— 那句话**是错的**：
+                // DLQ 只管**消费端**失败，计数器只**观测**发布失败，两者都不会把消息重新推下去。
+                // 于是"发布丢了 ⇒ 该行永远 PENDING"成了**没有任何补救手段**的死状态。
+                // 让重复上传也驱动一次解析，等于给运维一个现成的重试手势。
+                // 代价（如实登记）：对一份**已经 READY** 的文档再传一次会多做一次解析 —— 有界（用户动作驱动），
+                // 且 Task 4/5 的写入按设计是幂等的（重放收敛到同一状态）。
+                // D5 的口径随之更正为「对**数据**无副作用（不新增行/文件），但会**重新触发解析**」。
+                publisher.publishParseAfterCommit(existing.getId());
                 return new UploadResult(existing, true);
             }
 
@@ -116,8 +125,7 @@ public class KbDocumentService {
             }
             audit(tenantId, actor, row, false);
             // Task 3：**建行之后**注册 after-commit 发布 —— 事务回滚时钩子不执行，因此"消息发了但行没提交"
-            // 不可能发生。重复上传（幂等路径）**不**注册：那一行已经存在、可能已过了 PENDING，
-            // 重新驱动解析没有意义（运维重发由 DLQ/计数器的出口负责）。
+            // 不可能发生。（重复上传那条路径同样会发：两条路径的语义都是"请解析这份文档"。）
             publisher.publishParseAfterCommit(row.getId());
             return new UploadResult(row, false);
         } catch (RuntimeException e) {

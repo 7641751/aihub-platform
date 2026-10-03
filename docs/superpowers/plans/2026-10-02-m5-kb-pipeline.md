@@ -487,6 +487,25 @@ git commit -m "feat(kb): declare the parse/embed queues with dead-lettering and 
 **RED 证据（2026-10-03 订正）：** 把 `publishParseAfterCommit` 改成**立即发布** ⇒ `KbDocumentPublisherTest` 的
 "提交前 `verify(never())`" 必红。**原稿那条"回滚对照"作废**：它靠 `@Import` ⇒ 会 fork 第 8 个上下文（仓库里那条既有对照的代价就是这么来的）。
 
+**（2026-10-03 控制器裁决 —— 实施者上报的 D16 命名冲突 + 控制器发现的"卡住行没有补救手段"）**
+1. **D16 赢**：`KbTopology` 的九个常量按 D16 与 `MeteringTopology` **逐字同构**（`EXCHANGE = "aihub.kb.exchange"`、
+   `PARSE_ROUTING_KEY = "aihub.kb.parse"`、`EMBED_ROUTING_KEY = "aihub.kb.embed"`）；实施者自创的
+   `EXCHANGE = "aihub.kb"` + 裸路由键 `kb.parse`/`kb.embed` **已改回**（"照抄既有形状、不发明新形状"是 D16 的全部价值）。
+   同时让发布端**显式声明 `MESSAGE_CONTENT_TYPE`**（照计量链路的发布端），并由
+   `KbDocumentPublisherTest#theParseMessageDeclaresItsContentType` 钉住 —— 它不再是"声明了没人用"的死常量。
+2. **重复上传也要发**（`KbDocumentService.upload` **两条路径都**注册 `publishParseAfterCommit`）：原先只在"新建行"
+   路径发，注释给的理由是"运维重发由 DLQ/计数器的出口负责" —— **那句话是假的**：DLQ 只管**消费端**失败、
+   计数器只**观测**发布失败，两者都不会把消息重新推下去 ⇒ "发布丢了 ⇒ 行永远 `PENDING`"曾是**没有任何补救手段**
+   的死状态。现在**重复上传 = 现成的重试手势**，由
+   `KbPublishIntegrationTest#reUploadingTheSameBytesPublishesAgainSoAStuckRowCanBeRetried` 钉住。
+   ⇒ **D5 的口径据此更正**："无副作用"指的是**数据**（不新增行、不新增文件），**不是**"不发消息"——
+   重复上传**会重新触发一次解析**（代价有界，且 Task 4/5 的写入按设计幂等，重放收敛）。附录 B 第 8 条记了这条边界。
+3. **控制器自验（评审子代理第 11 次被外部杀死、未交回报告 ⇒ 按 Task 16 的先例由控制器代验）**：
+   D16 九个常量**逐字一致** ✓；`KbMessageCodecTest` 是 `class KbMessageCodecTest {`（**零 Spring**）✓；
+   `bothBusinessQueuesDeclareADeadLetterExchange:115` 在位 ✓；**控制器自己重做 M1 变异**（把"提交后发"改成"立即发"）⇒
+   `publishesOnlyAfterCommitNeverBefore:73` 报 **"Never wanted here"**、`Tests run: 4, Failures: 3` + `BUILD FAILURE`，
+   还原（SHA 一致 / `MUTANT` 残留 0）后 `clean` 回绿 **4/0** ✓。**全量 `Tomcat started on port` = 7、`aihub-web` 287/0** ✓。
+
 ---
 
 ## Task 4: consumer-parse（解析 → 切分 → 写 `kb_chunk` → 分批发 `kb.embed`）
@@ -756,3 +775,7 @@ git commit -m "docs(m5): record the KB pipeline and the cross-language vector co
 5. **`kb_chunk` 存了一份文本**（D1 残余）：与原件重复占空间，换来可重放与一条 SQL 清理。
 6. **嵌入维度变更 = 重建 collection**（附录 A）：本里程碑不提供迁移工具。
 7. **Chroma 单实例、无鉴权**（本地演示形态）：生产加固（凭据、网络隔离、多副本）属后续里程碑。
+8. **发布端丢消息 ⇒ 该行会停在 `PENDING`**（控制器 2026-10-03 登记）：`kb.parse` 的发布失败只**计数**
+   （`aihub.kb.publish_failures`）+ WARN，**不会**让已提交的业务写失败；而 **DLQ 只覆盖消费端失败**、计数器只观测
+   ⇒ 这类行**没有自动重试**。**现成的补救 = 重新上传同一份内容**（幂等路径也会重发一条 `parse:{id}`，见 Task 3 的裁决记录）；
+   若坚持不动数据，只能**手工向 `aihub.kb.parse` 投一条 `parse:{id}`**。代价：对已 `READY` 的文档重传会多做一次解析（有界、幂等收敛）。
