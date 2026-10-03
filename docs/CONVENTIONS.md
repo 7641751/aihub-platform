@@ -497,6 +497,22 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
   **可被 `Instant.parse` 解析的带 `Z` 字面量**（解析失败 400）⇒ **填了也 400**；若前端还"值非空才带参数"，
   那么空输入时更是**必然 400**。⇒ 前端必须**无条件**带参数并**规范化**（补秒 + 补 `Z`；为空时给一个有意义的默认窗口），
   且这类"缺省即 400"的端点要在**页面侧**就给出默认值，而不是指望操作者知道服务端的必填规则。
+- **Spring 测试上下文预算：要注入属性，就必须"逐字复用某个既有类的属性集"**（2026-10-03，M5 Task 2 实测）：
+  **事实**：`aihub.console.secret` 在 `application.yml` 里**刻意没有默认值**（D16：空 = 门关着），
+  而**任何**要签发控制台令牌的集成测试都**必须**注入它 —— 所以"集成测试不许写 `@TestPropertySource`"
+  **是一条错的纪律**（照它写，测试根本写不出来：`ConsoleTokenService.issue` 直接抛
+  `IllegalStateException: 控制台签名密钥未配置或不足 32 字符`）。
+  **真正的规则是不许新增第 8 个 Spring 上下文**，做法是：**让 `@TestPropertySource` 的属性与某个既有测试类
+  逐字相同，并且不加 `@Import`**（`@Import` 会把导入者类算进上下文缓存键 ⇒ 必然 fork；
+  `@DynamicPropertySource` 同理）。先例就在仓库里：`ApiKeyAdminIntegrationTest` 的 javadoc 明写它与
+  `ConsoleLoginIntegrationTest` **属性逐字相同、且不加 `@Import`**，因此**共用一个上下文**；
+  `ChannelAdminIntegrationTest:589` 则记着"新写一个带同样属性的类会 fork **第 8 个**"。
+  **判据**：跑**全量** admin 套件后数 `Tomcat started on port` —— 必须仍是 **7**。
+  M5 Task 2 的 `KbUploadIntegrationTest` 用一把逐字相同的字面量 `console-it-secret-0123456789abcdefghijklmn` 注入、
+  不加 `@Import`，全量实测 **`Tomcat` = 7** ✓（`aihub-common` 68/0、`aihub-web` 270/0）。
+  **推论（同样适用于"只想改存储目录/超时"这类需求）**：**不要**为了控制某个可配置项去加属性；
+  要么把它做成 `application.yml` 的**默认值**（像 `aihub.kb.storage.root: target/kb-storage` 那样，
+  测试直接用默认值 + 自己清理），要么复用既有属性集。
 - **变异实验必须在「干净」状态下进行，且"突然出现的红"要先怀疑残留变异**（2026-10-02，Task 15 用一次**误判**换来的）：
   正确顺序 = **变异前 `Copy-Item` 字节级备份 → 变异 → `clean` → 跑**（**不许只删 `*.class`**）**→ 还原 → 再 `clean` → 跑绿**。
   为什么：Maven 的增量判定会让"删了 class 但没 `clean`"的构建拿到**类缺失的假红**（Task 15 实测：8 条 `ERROR` ＝ 上下文加载失败）；

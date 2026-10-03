@@ -338,6 +338,39 @@ git add aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/ \
 git commit -m "feat(kb): accept document uploads with atomic storage, sha256 dedup and audit"
 ```
 
+**（2026-10-03 控制器接手完成 —— 派发的子代理在被杀前做到 step1（测试类 + `AuditAction` + `application.yml`），
+控制器从它留下的 `.m5t2-logs/STATUS.txt` 续做 step3–step6；本节记录与计划的偏差）**
+
+1. **⚠️ Global Constraints 里"集成测试不许声明 `@TestPropertySource`"这条是错的**：`aihub.console.secret`
+   在 `application.yml` 里**刻意没有默认值**（D16），而任何要签发控制台令牌的测试都**必须**注入它 ——
+   照那条字面执行，测试根本写不出来。**真正的规则是"不许新增第 8 个 Spring 上下文"**，做法是：
+   属性与既有测试类（`ConsoleLoginIntegrationTest` / `ApiKeyAdminIntegrationTest`）**逐字相同**、
+   且**不加 `@Import`**（`@Import` 会把导入者类算进缓存键 ⇒ 必然 fork）。
+   实测全量 `Tomcat started on port` = **7** ✓。完整纪律见 `docs/CONVENTIONS.md` §8。
+   **推论**：要控制某个可配置项（存储目录之类）时，**别去加属性** —— 把它做成 `application.yml` 的默认值
+   （`aihub.kb.storage.root: target/kb-storage`），测试用默认值 + 自己清理。
+2. **自然 RED 被环境吃掉了（诚实登记）**：第一次 RED 报 `Tests run: 5, Errors: 5`，但根因**不是**
+   "控制器不存在"，而是 **Testcontainers 找不到 Docker**（`Could not find a valid Docker environment` /
+   `Connection refused`）—— 当天 Docker Desktop 已停（WSL2 后端 `docker-desktop` 发行版 Stopped）。
+   **那次不算 RED**；控制器把 Docker 拉起后代码已写好，RED 不可复得 ⇒ 判别力改由变异体提供：
+   **M-A**（审计改空操作）红在 `KbUploadIntegrationTest.java:143`（`expected: 1L but was: 0L`）、
+   **M-B**（去掉 `size<1` 的 400 守卫）红在 `:222`（`expected: 400 BAD_REQUEST but was: 200 OK`，
+   变异签名 `"size":0` 出现在响应体里）；两条都按"备份 → 变异 → **`clean`** → 跑 → 还原 → **再 `clean`**"
+   执行并三重验证（SHA256 一致 / `MUTANT` 残留 0 / 还原后 `clean` 跑绿 **5/0**）。
+3. **覆盖缺口（诚实登记，别当成已覆盖）**：把 `KbFileStore` 的"临时文件 + 原子改名"改成"直接写目标文件"，
+   **没有任何用例会红** —— 临时文件只在飞行中存在，黑盒测试看不见它。⇒ 这条纪律目前**只靠代码审查**。
+4. **对决定 D5 的一处有意偏离**：重复上传时计划写"删掉本次的临时文件"；实现改成
+   "**原件在盘上就删临时文件，原件不在就 promote 补上**" —— 用同样的代价自愈"有行没文件"（运维误删）的破洞；
+   对测试仍然只剩 1 个文件。
+5. **实测数字**（产物 `.m5t2-logs/`）：聚焦 `KbUploadIntegrationTest` **5/0**；全量 `aihub-common` **68/0**、
+   `aihub-web` **270/0**（= M4 基线 264 + Task 1 的 1 条结构用例 + 本任务 5 条）、**`Tomcat` = 7**；
+   整反应堆 `test-compile` 8 模块 `SUCCESS`。
+6. **提交**：`258b2d4`（6 文件：4 新增 + 2 修改）。**没有**多建计划外文件；未碰 `pom.xml` / 迁移 / compose。
+
+```bash
+# （上面那条 commit 命令的收尾）
+```
+
 **验收判据：** 上传返回 `PENDING` 且原件落盘（内容逐字可比）；同内容二次上传返回**同一 `id`**；**截断上传不留行、不留文件**；缺 `tenantId`/未知扩展名 ⇒ 400；每次成功上传产生且仅产生一条**不含敏感字段**的 `KB_DOCUMENT_UPLOAD` 审计行。
 **RED 证据：** `aTruncatedUploadLeavesNoRowAndNoFile` 在"先建行再落盘"的顺序下红（这正是官方的"中断上传不留脏数据"）。
 
