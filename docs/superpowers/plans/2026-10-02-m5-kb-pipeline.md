@@ -812,12 +812,42 @@ git commit -m "feat(kb): embed chunks into Chroma and finish the pipeline at REA
 > ② **`KB_DOCUMENT_FAILED` 审计**：Task 4 有意**只做状态迁移、不做审计**（避免越界），并把出口留在这里。
 >    还要端到端验 DLQ（`重试 3 次 → RejectAndDontRequeueRecoverer → kb.dlq`）—— Task 4 只实现了"编解码异常往外抛"。
 
-**Files:**
+**（2026-10-03 控制器派发前扫描 —— 6 条"做错了整个验收会落空 / 会波及既有链路"）**
+1. **⚠️ 恢复器**必须**抛出**，否则消息被 ack 掉、根本进不了 DLQ**（本轮最关键的一条）。Spring AMQP 的语义是：
+   `MessageRecoverer.recover(...)` **正常返回 ⇒ 容器 ack 这条消息**（消息消失）；只有**抛** `AmqpRejectAndDontRequeueException`
+   才会 requeue=false 拒绝 ⇒ 经业务队列的 `x-dead-letter-exchange` 进 `aihub.kb.dlq`。
+   ⇒ 恢复器里 **DB 部分可以 try/catch（记日志）**，但最后**必须** `throw new AmqpRejectAndDontRequeueException(...)`；
+   `catch → return` 会让"置 FAILED"与"进 DLQ"**只剩一半**，而 `dlqDepth() > 0` 那条断言会红（那正是它该红的样子）。
+2. **⚠️ 恢复器**不许**接到共享的监听容器工厂上（会改掉计量链路的行为）**：本仓**没有任何自定义容器工厂的先例**（实测），
+   而 `spring.rabbitmq.listener.simple.retry.*`（`enabled=true / max-attempts=3 / 200ms×2 / max 2s`）与
+   `default-requeue-rejected=false` 是**全局**的 ⇒ 若把 `MessageRecoverer` 设到默认工厂，`MeteringConsumer` 的死信行为会被一起改掉（它有自己的 DLQ 用例）。
+   ⇒ **做法**：新建一个**专用工厂** `kbListenerContainerFactory`（`SimpleRabbitListenerContainerFactory`，
+   **用注入的 `RabbitProperties` 派生出 maxAttempts/interval/multiplier/maxInterval** —— 别把 yml 里的数抄成字面量，那会漂移），
+   只给它挂 `RetryInterceptorBuilder.stateless()...recoverer(kbMessageRecoverer)`；然后在**两个 kb 消费者**上写
+   `@RabbitListener(queues = ..., containerFactory = "kbListenerContainerFactory")` ⇒ 计量链路**不受影响** ✓。
+3. **⚠️ `AuditAction` 必须改，而计划漏写了它**（现只有 `KB_DOCUMENT_UPLOAD`，实测）⇒ 补 `KB_DOCUMENT_FAILED`；
+   已加进 Files 与 `git add`（本项目已多次因为"常量不在清单里"而两头踩）。
+   审计主体照 D13：READY/FAILED 那种**系统**产生的终态用 `new AuditService.Actor("SYSTEM", ...)`（不是 USER）。
+4. **⚠️ `FakeEmbeddingUpstream` 要加 `failFromBatch(n)`**：它现在只有 `failOnCall(n)`（**只失败第 n 次**）——
+   那样**重试就会成功**、永远到不了终态。本任务需要的是"**从第 n 次起一直失败**"（重试 3 次全失败 ⇒ 恢复器接管）。
+   保留 `failOnCall`（`KbEmbeddingClientTest` 在用），新增 `failFromBatch`，并确保 `reset()` 把它清掉。
+5. **DLQ 深度怎么读**：既有先例是 `rabbitTemplate.receive(DEAD_LETTER_QUEUE, 200)` 的**排空式**读法
+   （`MeteringConsumerIntegrationTest:399/412`）。本任务用**非破坏性**读法更合适：注入 `AmqpAdmin`，
+   `getQueueInfo(KbTopology.DEAD_LETTER_QUEUE).getMessageCount()`；同时**在 `@BeforeEach` 排空 DLQ**（共享 broker ⇒ 别的用例会留消息）。
+6. **两处细节**：① `error_msg` 要**有界**地从异常派生（类名 + 摘要，截断），且要**能看出是哪一段**失败的
+   —— 测试断言 `contains("embed")` 靠的是 `embeddings 上游返回 500` 里的 `embeddings`（**别改成不含 embed 的措辞**）；
+   ② `0 段 ⇒ FAILED`（D14）那条路径走的是 `KbParseService.markNoText`，**不是**异常 ⇒ 它也必须**自己写 `KB_DOCUMENT_FAILED` 审计**
+   （只在条件更新**命中了行**时写，否则会重复记）。
+
+**Files（2026-10-03 控制器补：`AuditAction`、两个消费者（挂专用工厂）、假上游（加 `failFromBatch`）—— 共 9 个）:**
 - Create: `aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbMessageRecoverer.java`（D7）
 - Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbDocumentCleanup.java`（D8：`cleanup(docId)`，幂等可重入）
-- Modify: `KbTopologyConfig`（把 `MessageRecoverer` 接到监听容器工厂；重试 3 次指数退避）
-- Modify: `KbDocumentService`（+`markFailed(docId, reason)`，写 `KB_DOCUMENT_FAILED` 审计）
-- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbFailureIntegrationTest.java`
+- Modify: `aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbTopologyConfig.java`（加**专用** `kbListenerContainerFactory`）
+- **Modify（补）**: `aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbParseConsumer.java` + `KbEmbedConsumer.java`（挂 `containerFactory`）
+- Modify: `aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbDocumentService.java`（+`markFailed(docId, reason)`，写 `KB_DOCUMENT_FAILED` 审计）
+- **Modify（补）**: `aihub-admin/aihub-service/src/main/java/com/aihub/service/audit/AuditAction.java`（+`KB_DOCUMENT_FAILED`）
+- **Modify（补）**: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/support/FakeEmbeddingUpstream.java`（+`failFromBatch`）
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbFailureIntegrationTest.java`（`@TestPropertySource` 用那把合成密钥、**不加 `@Import`** ⇒ `Tomcat` 仍 7）
 
 **Interfaces:**
 - Consumes: 全部既有件 + DLQ。
@@ -857,10 +887,15 @@ git commit -m "feat(kb): embed chunks into Chroma and finish the pipeline at REA
 - [ ] **Step 4: 跑测试确认通过**；- [ ] **Step 5: 提交**
 
 ```bash
+# 2026-10-03 控制器订正：补 AuditAction / 两个消费者（挂专用工厂）/ 假上游（failFromBatch）—— 共 9 个显式路径
 git add aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbMessageRecoverer.java \
-        aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbDocumentCleanup.java \
         aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbTopologyConfig.java \
+        aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbParseConsumer.java \
+        aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbEmbedConsumer.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbDocumentCleanup.java \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbDocumentService.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/audit/AuditAction.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/support/FakeEmbeddingUpstream.java \
         aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbFailureIntegrationTest.java
 git commit -m "feat(kb): roll back written chunks on terminal failure and route to the DLQ"
 ```
