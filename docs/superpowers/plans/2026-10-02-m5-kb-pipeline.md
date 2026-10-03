@@ -378,13 +378,14 @@ git commit -m "feat(kb): accept document uploads with atomic storage, sha256 ded
 
 ## Task 3: MQ 拓扑 + 提交后发布 `kb.parse`
 
-**Files:**
+**Files（2026-10-03 控制器订正：`KbEmbedBatch` 是计划漏写的第 4 个类；编解码测试**不许**放 `aihub-mq`）:**
 - Create: `aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbTopology.java`
+- Create: `aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbEmbedBatch.java`（**计划漏写**：`embedBatches` 的返回类型，`record KbEmbedBatch(long docId, int seqFrom, int seqTo)`）
 - Create: `aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbMessageCodec.java`
-- Create: `aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbTopologyConfig.java`（**照 `MeteringTopologyConfig` 的"死信三件套"**）
+- Create: `aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbTopologyConfig.java`（**照 `MeteringTopologyConfig` 的"死信六件套"**，只是这里要**两套**业务队列/绑定）
 - Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbDocumentPublisher.java`（`publishParseAfterCommit(docId)`）
 - Modify: `KbDocumentService.upload`（建行之后注册 `afterCommit` 发布）
-- Test: `aihub-admin/aihub-mq/src/test/java/com/aihub/mq/kb/KbMessageCodecTest.java` + `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbPublishIntegrationTest.java`
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbMessageCodecTest.java`（**纯单测**）+ `.../KbDocumentPublisherTest.java`（**纯单测**，after-commit 判别力）+ `.../KbPublishIntegrationTest.java`
 
 **Interfaces:**
 - Consumes: 既有 `RabbitTemplate`、`MeteringTopologyConfig`（**先读它，照抄形状**）、Spring 的 `TransactionSynchronizationManager`（先读既有 `ConfigChangePublisher.publishAfterCommit`）。
@@ -393,7 +394,41 @@ git commit -m "feat(kb): accept document uploads with atomic storage, sha256 ded
   - `KbMessageCodec.parse(docId)` / `embed(docId, seqFrom, seqTo)` 的**线格式**：`parse:{docId}`、`embed:{docId}:{seqFrom}:{seqTo}`（文本分隔符，**无 JSON**，与 `MeteringEventCodec` 同风格）+ 解码 + **畸形载荷必须抛**（让它进 DLQ 而不是被静默丢弃）；
   - `KbTopology.embedBatches(docId, chunkCount, batchSize) -> List<KbEmbedBatch>`（纯函数：`ceil(N/batchSize)` 条，**最后一批可以不满**）。
 
-- [ ] **Step 1: 写失败测试**（编解码的固定向量 + 一批一个队列的端到端发布）
+- **（2026-10-03 控制器派发前扫描 —— 7 条"照字面做就会红 / 会交出假证据"）**
+  1. **⚠️ `aihub-mq` 没有 `src/test`、其 `pom.xml` 也没有 `spring-boot-starter-test`** ⇒ 计划把 `KbMessageCodecTest`
+     放在 `aihub-mq/src/test/java` **编译不过**。⇒ **改放 `aihub-web/src/test/java/com/aihub/admin/kb/`**
+     （纯 JUnit + AssertJ，**不启 Spring** ⇒ 不占上下文预算）；`aihub-web` 经 `aihub-service → aihub-mq` 的传递依赖
+     已能看到那些类。**不许**为此改 `aihub-mq/pom.xml`（不在 Files 里 ⇒ 越界）。
+  2. **⚠️ 计划给的测试助手在本项目不存在**：`receiveFrom(queue, Duration)`、`activeRowsFor(...)` **全仓不存在**；
+     `postMultipart(...)` 是 `KbUploadIntegrationTest` 自己的 `private` 助手。⇒ 收消息用**既有先例**
+     `rabbitTemplate.receive(queue, timeoutMs)`（`MeteringConsumerIntegrationTest:399/412`），**轮询到 deadline**
+     （不是"收一条就断言相等"—— 队列里会有别的用例的消息）；行数断言照 `KbUploadIntegrationTest.rowsFor` 的形状自己写。
+  3. **⚠️ 计划的 RED 证据是错的**（它写"在 Task 8 补的回滚对照上红"）。事实：那种对照**仓库里已经有了**
+     （`ChannelAdminIntegrationTest#rolledBackWritePublishesNothingAndDoesNotRaiseTheWatermark`），但它靠
+     **`@Import` 一个 probe 配置**造回滚 ⇒ **会 fork 上下文**（见 `ChannelAdminIntegrationTest:589`）⇒ Task 3 **不许**照抄。
+     ⇒ 换成**零上下文**的真判别力单测 `KbDocumentPublisherTest`：
+     `TransactionSynchronizationManager.initSynchronization()` → `publishParseAfterCommit(id)` →
+     **`verify(rabbitTemplate, never())`（提交前一条都不许发）** → 手动 `getSynchronizations().forEach(TransactionSynchronization::afterCommit)`
+     → `verify(rabbitTemplate).convertAndSend(EXCHANGE, PARSE_ROUTING_KEY, "parse:" + id)`；`finally` 里 `clearSynchronization()`。
+     **把实现改成"立即发"这条就必红** —— 这就是本任务的自然 RED（也是它的判别力来源）。
+  4. **⚠️ `git add` 又写了目录**（`.../mq/kb/`）—— **第 5 次**同类缺陷。必须逐个展开成**显式文件路径**（含新增的 `KbEmbedBatch.java`）。
+  5. **⚠️ 队列里有前任的残留**：Task 2 的上传用例**每次上传都会发一条** `kb.parse` ⇒ `KbPublishIntegrationTest`
+     必须先在 `@BeforeEach` **抽干** `kb.parse`（`while (rabbitTemplate.receive(queue, 0) != null) { }`），再上传、再断言。
+  6. **⚠️ 计划没写、但必须由本任务定下来的两件事**：
+     - `KbTopology` 除队列/DLX/DLQ 外还必须有**路由键**常量（`PARSE_ROUTING_KEY = "kb.parse"`、
+       `EMBED_ROUTING_KEY = "kb.embed"`、`DEAD_LETTER_ROUTING_KEY`），且**两个业务队列都要挂 `x-dead-letter-exchange`**
+       （照 `MeteringTopologyConfig`：exchange + 两个 queue + 两个 binding + DLX + DLQ + DLQ binding）。
+     - **发布失败怎么办**（计划完全没写）：业务写**已经提交**，把"发不出去"升级成"业务失败"只会让用户以为没存上（
+       `ConfigChangePublisher.publish` 的类注释就是为这件事写的）。⇒ **吞 `RuntimeException` + WARN + 计数器
+       `aihub.kb.publish_failures`**（照 `PUBLISH_FAILURES_METRIC` 的先例把名字暴露成常量）。
+       **残余风险如实登记**：消息真丢了 ⇒ 该行**永远 `PENDING`**；Task 6 的 DLQ 只管**消费端**失败，管不到这个 ⇒
+       只能靠计数器告警 + 运维重发（Task 8 的边界清单要写上）。
+  7. **上下文预算**：`KbPublishIntegrationTest` 必须**逐字复用** Task 2 那把合成密钥（`@TestPropertySource(properties = {"aihub.console.secret=console-it-secret-0123456789abcdefghijklmn"})`）
+     且**不加 `@Import`** ⇒ `Tomcat` 保持 **7**；`KbMessageCodecTest`/`KbDocumentPublisherTest` 是**纯单测**（不启 Spring）⇒ 不占预算。
+     ⚠️ 后续任务（Task 4 起）的 consumer 会在**同一个 JVM** 里消费 `kb.parse` ⇒ 本任务"从队列收消息"的断言到那时会被消费者抢走；
+     Task 4 起要用**数据库状态**（`kb_document.status`/`kb_chunk`）做判据，而不是抢队列。
+
+- [ ] **Step 1: 写失败测试**（编解码的固定向量 + after-commit 判别力 + 端到端发布）
 
 ```java
 // KbMessageCodecTest（纯单测）
@@ -403,27 +438,46 @@ assertThatThrownBy(() -> KbMessageCodec.decodeParse("embed:7:0:9")).as("错路�
 assertThat(KbTopology.embedBatches(7L, 25, 10)).extracting(KbEmbedBatch::seqFrom).containsExactly(0, 10, 20);   // 25 段 ⇒ 3 批，末批 5 段
 assertThat(KbTopology.embedBatches(7L, 0, 10)).as("0 段不该走到这里（Task 4 会先判 FAILED）").isEmpty();
 
-// KbPublishIntegrationTest：上传后消息真的进了 kb.parse
+// KbDocumentPublisherTest（纯单测；控制器 2026-10-03 换掉"回滚对照"，因为它要 @Import、会 fork 上下文）
+TransactionSynchronizationManager.initSynchronization();
+try {
+    publisher.publishParseAfterCommit(7L);
+    verify(rabbit, never()).convertAndSend(anyString(), anyString(), any(Object.class));   // 提交前一条都不许发
+    TransactionSynchronizationManager.getSynchronizations().forEach(TransactionSynchronization::afterCommit);
+    verify(rabbit).convertAndSend(KbTopology.EXCHANGE, KbTopology.PARSE_ROUTING_KEY, KbMessageCodec.parse(7L));
+} finally {
+    TransactionSynchronizationManager.clearSynchronization();
+}
+
+// KbPublishIntegrationTest：上传后消息真的进了 kb.parse（收消息用既有 RabbitTemplate.receive，别自造 receiveFrom）
 var res = postMultipart("/api/kb/documents", TENANT, "a.md", BYTES);
-assertThat(receiveFrom(KbTopology.PARSE_QUEUE, Duration.ofSeconds(10)))
-        .as("提交后必须发出解析消息").isEqualTo(KbMessageCodec.parse(idOf(res)));
-assertThat(activeRowsFor(TENANT)).isEqualTo(1);
+assertThat(receiveParsingMessageFor(idOf(res), Duration.ofSeconds(10)))
+        .as("提交后必须发出解析消息").isTrue();
+assertThat(rowsFor(TENANT)).isEqualTo(1);
 ```
 
-- [ ] **Step 2: 跑它确认失败** → 队列不存在 / 收不到消息。
-- [ ] **Step 3: 实现**（拓扑照抄计量链路；`publishAfterCommit` 用 `TransactionSynchronizationManager.registerSynchronization`，**提交后才发**）
+- [ ] **Step 2: 跑它确认失败** → 队列不存在 / 收不到消息 / `KbDocumentPublisher` 不存在（**如实登记形态**）。
+- [ ] **Step 3: 实现**（拓扑照抄计量链路，两套队列各挂死信；`publishAfterCommit` 用 `TransactionSynchronizationManager.registerSynchronization`，**提交后才发**）
 - [ ] **Step 4: 跑测试确认通过**；- [ ] **Step 5: 提交**
 
 ```bash
-git add aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/ \
-        aihub-admin/aihub-mq/src/test/java/com/aihub/mq/kb/KbMessageCodecTest.java \
+# 2026-10-03 订正：原稿第一行是【目录】（本项目第 5 次同类缺陷）⇒ 逐个显式路径
+git add aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbTopology.java \
+        aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbEmbedBatch.java \
+        aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbMessageCodec.java \
+        aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbTopologyConfig.java \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbDocumentPublisher.java \
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbDocumentService.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbMessageCodecTest.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbDocumentPublisherTest.java \
         aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbPublishIntegrationTest.java
 git commit -m "feat(kb): declare the parse/embed queues with dead-lettering and publish after commit"
 ```
 
-**验收判据：** `kb.parse`/`kb.embed`/DLQ 三件套被声明（含 `x-dead-letter-exchange`）；上传事务**提交后**消息才进队列；畸形载荷在编解码处**抛**（将来会进 DLQ，不允许静默丢）。
-**RED 证据：** 把 `publishAfterCommit` 改成**提交前**发布 ⇒ `KbPublishIntegrationTest` 在"事务回滚也要看到没有消息"的对照用例上红（Task 8 补这条对照）。
+**验收判据：** `kb.parse`/`kb.embed`/DLQ 被声明（**两个业务队列都含 `x-dead-letter-exchange`**）；上传事务**提交后**消息才进队列
+（判据 = `KbDocumentPublisherTest` 的"提交前 `never()`"）；畸形载荷在编解码处**抛**（不允许静默丢）；`Tomcat` 仍 **7**。
+**RED 证据（2026-10-03 订正）：** 把 `publishParseAfterCommit` 改成**立即发布** ⇒ `KbDocumentPublisherTest` 的
+"提交前 `verify(never())`" 必红。**原稿那条"回滚对照"作废**：它靠 `@Import` ⇒ 会 fork 第 8 个上下文（仓库里那条既有对照的代价就是这么来的）。
 
 ---
 
