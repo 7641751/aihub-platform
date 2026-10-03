@@ -22,7 +22,9 @@ import java.util.Set;
 /**
  * 文档入库的**同步半段**（M5 Task 2）：校验 → 边读边算 sha256 + 原子落盘 → 建 {@code kb_document(PENDING)} 行 → 审计。
  *
- * <p><b>异步半段不在这里</b>：任务 3 起才"提交后发消息"，本类**不发布任何消息**（也**不留占位/TODO**）。
+ * <p><b>异步半段不在本类</b>：本类只在**建行之后**注册一个 after-commit 钩子，由
+ * {@link KbDocumentPublisher} 在**事务提交之后**把 {@code parse:{docId}} 投到 {@code kb.parse}
+ * （Task 3）。发布失败不升级成业务失败（见 {@code KbDocumentPublisher} 的登记）。
  *
  * <p><b>幂等是唯一键给的</b>：{@code uk_kb_document_tenant_sha(tenant_id, sha256)} ⇒ 同租户同内容永远只有一行。
  * 重复上传是**用户的正常动作**（点了两次、换个文件名再传一次），所以按 M4 Task 12 的定稿处理：
@@ -51,11 +53,14 @@ public class KbDocumentService {
     private final KbDocumentMapper kbDocumentMapper;
     private final KbFileStore fileStore;
     private final AuditService auditService;
+    private final KbDocumentPublisher publisher;
 
-    public KbDocumentService(KbDocumentMapper kbDocumentMapper, KbFileStore fileStore, AuditService auditService) {
+    public KbDocumentService(KbDocumentMapper kbDocumentMapper, KbFileStore fileStore,
+                             AuditService auditService, KbDocumentPublisher publisher) {
         this.kbDocumentMapper = kbDocumentMapper;
         this.fileStore = fileStore;
         this.auditService = auditService;
+        this.publisher = publisher;
     }
 
     /**
@@ -110,6 +115,10 @@ public class KbDocumentService {
                         "kb_document 插入后读不回：tenantId=" + tenantId + " sha256=" + staged.sha256());
             }
             audit(tenantId, actor, row, false);
+            // Task 3：**建行之后**注册 after-commit 发布 —— 事务回滚时钩子不执行，因此"消息发了但行没提交"
+            // 不可能发生。重复上传（幂等路径）**不**注册：那一行已经存在、可能已过了 PENDING，
+            // 重新驱动解析没有意义（运维重发由 DLQ/计数器的出口负责）。
+            publisher.publishParseAfterCommit(row.getId());
             return new UploadResult(row, false);
         } catch (RuntimeException e) {
             // promote 成功后临时文件已不存在，deleteIfExists 是幂等的 —— 这里只处理"还没改名就失败"的情形。
