@@ -514,8 +514,11 @@ git commit -m "feat(kb): declare the parse/embed queues with dead-lettering and 
 - Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbChunker.java`（纯函数）
 - Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbTextExtractor.java`（`md`/`txt`；Task 7 加 `pdf`）
 - Create: `aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbParseConsumer.java`
-- Modify: `aihub-admin/aihub-web/src/main/resources/application.yml`（`aihub.kb.chunk.size-chars=800`、`overlap-chars=100`）
-- Test: `aihub-admin/aihub-service/src/test/java/com/aihub/service/kb/KbChunkerTest.java` + `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbParseIntegrationTest.java`
+- **Modify（2026-10-03 控制器补，原计划漏写了它）**：`aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/KbChunkMapper.java`
+  —— 现在是光秃秃的 `BaseMapper<KbChunkEntity>`，**没有 upsert**，而"重放不产生重复段"必须靠它。
+- Modify: `aihub-admin/aihub-web/src/main/resources/application.yml`（`aihub.kb.chunk.size-chars=800`、`overlap-chars=100`、`aihub.kb.embed.batch-size=10`）
+- Test: **`aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbChunkerTest.java`**（**2026-10-03 订正**：原写
+  `aihub-service/src/test/...`，但该模块**没有测试目录、也没有测试依赖** ⇒ 编译不过）+ `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbParseIntegrationTest.java`
 
 **Interfaces:**
 - Consumes: Task 3 的拓扑与编解码、Task 1 的 mapper、`KbFileStore`（读原件）。
@@ -549,11 +552,13 @@ assertThatThrownBy(() -> KbChunker.chunk("abc", 100, 100)).as("重叠必须小�
 - [ ] **Step 2: 跑它确认失败**；- [ ] **Step 3: 实现**；- [ ] **Step 4: 跑测试确认通过**；- [ ] **Step 5: 提交**
 
 ```bash
+# 2026-10-03 订正：补 KbChunkMapper（原计划漏写）；KbChunkerTest 从 aihub-service 挪到 aihub-web（那模块没有测试依赖）
 git add aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbChunker.java \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbTextExtractor.java \
         aihub-admin/aihub-mq/src/main/java/com/aihub/mq/kb/KbParseConsumer.java \
+        aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/KbChunkMapper.java \
         aihub-admin/aihub-web/src/main/resources/application.yml \
-        aihub-admin/aihub-service/src/test/java/com/aihub/service/kb/KbChunkerTest.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbChunkerTest.java \
         aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbParseIntegrationTest.java
 git commit -m "feat(kb): parse documents into tracked chunks and fan out embed batches"
 ```
@@ -561,9 +566,55 @@ git commit -m "feat(kb): parse documents into tracked chunks and fan out embed b
 **验收判据：** 状态走到 `EMBEDDING`；`kb_chunk` 行数 == `chunk_count`；批次条数 == `ceil(N/batchSize)`；重放不产生新 chunk；`READY`/`FAILED` 的消息被 ack 丢弃。
 **RED 证据：** 把 `uk_kb_chunk_doc_seq` 换成普通索引（或改成 `insert` 不 upsert）⇒ `aReplayedParseMessageDoesNotDuplicateChunks` 红。
 
+**（2026-10-03 控制器派发前扫描 —— 5 条"照字面做就会红 / 会踩雷"）**
+1. **⚠️ `KbChunkerTest` 不许放 `aihub-service`**：该模块**没有 `src/test`、`pom.xml` 里也没有任何测试依赖**
+   （与 Task 3 的 `aihub-mq` 完全同款）⇒ 计划那条路径**编译不过**。改放
+   `aihub-web/src/test/java/com/aihub/admin/kb/KbChunkerTest.java`（纯 JUnit + AssertJ，**不启 Spring** ⇒ 不占上下文预算）。
+   **不许**为此改 `aihub-service/pom.xml`（不在 Files 里 ⇒ 越界）。
+2. **⚠️ `KbChunkMapper` 必须改，而计划漏写了它**：它现在是光秃秃的
+   `public interface KbChunkMapper extends BaseMapper<KbChunkEntity> {}`，**一个 upsert 都没有**；
+   而"重放同一条消息不产生重复段"（本任务验收之一）**必须**靠
+   `INSERT INTO kb_chunk (...) VALUES (...) ON DUPLICATE KEY UPDATE text = VALUES(text), vector_id = VALUES(vector_id), created_at = VALUES(created_at)`
+   —— 唯一键 `uk_kb_chunk_doc_seq (doc_id, seq)` **已存在**（`V3__kb_pipeline.sql` 实测 ✓），所以这条路成立。
+   ⇒ **Files 补一条 `Modify: aihub-admin/aihub-dao/src/main/java/com/aihub/dao/mapper/KbChunkMapper.java`**，
+   **`git add` 也要含它**（否则要么越界、要么实施者自己发明一个不在清单里的路径 —— 本项目两头都踩过）。
+   注意 MySQL 8.4 上**行别名 `AS new` 会 1064 语法错误**，必须用 `VALUES()`（M4 Task 15 已实测，见 CONVENTIONS §8）。
+3. **⚠️ 消费端不许吞异常**：照既有 `MeteringConsumer` 的 javadoc（"载荷解不开时**抛异常**（不是 log + return）：
+   静默 ACK 一条解不开的消息等于**永久丢数据**"）—— 本任务的编解码异常**必须往外抛**，才能走
+   "重试 3 次 → `RejectAndDontRequeueRecoverer` → DLQ"这条既有链路。**`catch (RuntimeException) { log.warn; return; }`
+   是禁止写法**（Task 6 会验 DLQ，那种写法会让它永远进不去）。
+4. **状态迁移必须是"带条件"的，且 `READY`/`FAILED` 只 ack 不改**：用
+   `kbDocumentMapper.update(null, new LambdaUpdateWrapper<KbDocumentEntity>().eq(id).in(status, PENDING, PARSING).set(status, PARSING))`
+   —— **受影响行数 == 0 就意味着"别人已经推进过 / 它已是 READY/FAILED" ⇒ ack 后直接返回，不写 chunk、不发消息**。
+   这样重放一条已 `READY` 的消息不会把它打回 `PARSING`（本任务验收里那条"`READY` 的消息被 ack 丢弃"就靠它）。
+   **不必**再加 mapper 方法（`LambdaUpdateWrapper` 就够，别扩大 Files）。
+5. **两处计划没定、必须自己定死的**：
+   - **批次大小从哪来**：`embedBatches(docId, chunkCount, batchSize)` 的 `batchSize` 计划没给 ⇒ 在 `application.yml`
+     的 `aihub.kb` 段加 `embed.batch-size=10`（与 `chunk.size-chars=800`/`overlap-chars=100` 一起），
+     **用默认值**（测试**不许**用 `@TestPropertySource` 覆盖它 ⇒ 那会 fork 上下文）。
+   - **原件路径**：消息里只有 `docId` ⇒ 从 `kb_document` 行读出 **`tenant_id` + `sha256`**，再用
+     `KbFileStore.targetFor(tenantId, sha256)` 拿路径（**不要**从消息里带路径，也别扫目录）。文件不存在**先按"抛"处理**
+     （Task 6 再决定要不要把它转成 `FAILED`）。
+
+**（2026-10-03 控制器补的两条风险）**
+- **⚠️ 消费者一落地就"抢队列"**：本任务的 `@RabbitListener` 会在**每一个** Spring 上下文里订阅 `kb.parse` ⇒
+  `KbUploadIntegrationTest`/`KbPublishIntegrationTest` 上传时发的消息会被它吃掉。本任务的断言因此**一律用数据库状态**
+  （`kb_document.status` / `kb_chunk` 行数）。**回归必须包含 Task 2/3 的那两类用例**并如实报告有无交互。
+- **`embedBatchesReceived(KbTopology.EMBED_QUEUE, id)` 这条断言有保质期**：它抢的是 `kb.embed`，**Task 5 的消费者
+  一落地就会失效**（同 Task 3 那次）⇒ 见 Task 5 段落开头的警告。
+- **`awaitUntil` 必须有界**（不许 `sleep`），且超时时**把当时的状态打出来**（否则排查只剩"超时了"三个字）。
+- **`KbParseIntegrationTest` 必须逐字复用那把合成密钥**（`@TestPropertySource` + **不加 `@Import`**）⇒ `Tomcat` 仍 **7**。
+
 ---
 
 ## Task 5: consumer-embed + Chroma（**第一次端到端绿**）
+
+> ⚠️ **（2026-10-03 控制器提前登记）本任务一落地，两件事会同时变化，必须一起改**：
+> ① 你新加的 `@RabbitListener` 会订阅 `kb.embed`，于是 **`KbParseIntegrationTest` 里那条
+> `embedBatchesReceived(KbTopology.EMBED_QUEUE, id)`（Task 4 的判据）会开始被抢走** —— 它必须改成
+> **数据库判据**（`kb_chunk.embedded_at` 的行数 / `kb_document.status`），否则退化成 flaky。
+> ② 同理，Task 4 的 `KbParseIntegrationTest` 里"上传/发布后等状态"的用例会与你的消费者并发 ⇒
+> 断言一律走**状态轮询**（DB），不要抢队列。**改动这两处属于本任务的分内事，不是越界。**
 
 **Files:**
 - Create: `aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbEmbeddingClient.java`
