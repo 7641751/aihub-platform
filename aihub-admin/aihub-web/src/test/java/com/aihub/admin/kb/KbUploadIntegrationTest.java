@@ -186,8 +186,9 @@ class KbUploadIntegrationTest extends AbstractIntegrationTest {
                 .isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(body(noTenant).path("code").asText()).isEqualTo("INVALID_PARAM");
 
-        // 未知扩展名（本任务白名单只有 md/txt）⇒ 400
-        ResponseEntity<String> badExt = postMultipart("/api/kb/documents", TENANT, "a.pdf", "# x\n".getBytes(UTF_8));
+        // 未知扩展名 ⇒ 400。⚠️ 2026-10-05 控制器订正：这里原来用 `.pdf` 当反例，但 **M5 Task 7 已把 pdf 加入白名单**
+        //（白名单 = md/txt/pdf），继续用 pdf 会让本用例把"合法"判成"非法"。换成一个仍然不支持的扩展名。
+        ResponseEntity<String> badExt = postMultipart("/api/kb/documents", TENANT, "a.exe", "# x\n".getBytes(UTF_8));
         assertThat(badExt.getStatusCode()).as("未知扩展名必须 400（响应体=%s）", badExt.getBody())
                 .isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(body(badExt).path("code").asText()).isEqualTo("INVALID_PARAM");

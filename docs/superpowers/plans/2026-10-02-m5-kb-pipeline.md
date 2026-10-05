@@ -923,11 +923,19 @@ git commit -m "feat(kb): roll back written chunks on terminal failure and route 
 
 ## Task 7: PDF 支持（PDFBox）
 
+**（2026-10-05 控制器派发前扫描 —— 2 条"照字面做就红 / 会往库里塞二进制"）**
+1. **⚠️ 白名单不在 `KbDocumentController`，而在 `KbDocumentService`**（实测 `:66`：`private static final Set<String> ALLOWED_EXTENSIONS = Set.of("md","txt")`；
+   `KbTextExtractor` 的 javadoc 也写着"上传白名单已经在 `KbDocumentService` 拦过一次"）。⇒ 照计划改 `KbDocumentController` 的话，
+   **PDF 会在上传那一步就被 400 拒掉**，本任务的验收根本走不到 —— Files/`git add` 已订正为 `KbDocumentService`。
+2. **⚠️ 不要往仓库里提交二进制夹具**：计划原本要 `test/resources/kb/sample-text.pdf`。⇒ 改为**在测试里用 PDFBox 现场生成**两份 PDF
+   （① 有文本层：写几百行 HELVETICA 文本；② 无文本层：只画一个矩形、不写任何文本算子）。这样夹具是**可读、可复核、可复现**的代码，
+   而不是一个来路不明的 blob（本项目一贯不提交非文本产物）。
+
 **Files:**
 - Modify: `aihub-admin/aihub-service/pom.xml`（+`org.apache.pdfbox:pdfbox`，**版本显式**）
 - Modify: `KbTextExtractor`（+`pdf` 分支）
-- Modify: `KbDocumentController`（扩展名白名单 +`pdf`）
-- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbPdfIntegrationTest.java` + 夹具 `aihub-admin/aihub-web/src/test/resources/kb/sample-text.pdf`
+- **Modify（订正）**: `aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbDocumentService.java`（白名单 +`pdf`）
+- Test: `aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbPdfIntegrationTest.java`（**夹具在测试里生成，不提交 `.pdf`**）
 
 **Interfaces:**
 - Consumes: `KbTextExtractor` 的扩展点。
@@ -943,16 +951,29 @@ git commit -m "feat(kb): roll back written chunks on terminal failure and route 
 - [ ] **Step 5: 提交**
 
 ```bash
+# 2026-10-05 订正：白名单在 KbDocumentService（不是 Controller）；夹具在测试里生成（不提交 .pdf）
 git add aihub-admin/aihub-service/pom.xml \
         aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbTextExtractor.java \
-        aihub-admin/aihub-web/src/main/java/com/aihub/admin/web/console/KbDocumentController.java \
-        aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbPdfIntegrationTest.java \
-        aihub-admin/aihub-web/src/test/resources/kb/sample-text.pdf
+        aihub-admin/aihub-service/src/main/java/com/aihub/service/kb/KbDocumentService.java \
+        aihub-admin/aihub-web/src/test/java/com/aihub/admin/kb/KbPdfIntegrationTest.java
 git commit -m "feat(kb): extract text from PDFs with PDFBox and fail loudly on empty text layers"
 ```
 
 **验收判据：** 文本层 PDF ⇒ `READY`；无文本层 ⇒ `FAILED("无可提取文本")`（**不是** `READY`）；`pom.xml` 只多这一条且版本显式。
 **RED 证据：** 把 `chunkCount==0` 的判定去掉（默认 `READY`）⇒ "无文本层"用例红（**静默成功是最糟的失败**）。
+
+**（2026-10-05 控制器实施记录）**
+- **版本偏差（登记）**：计划写 `pdfbox:3.0.3`，但本机 `.m2` 里只有 **3.0.5**（且 `pdfbox/fontbox` 都是 3.0.5）⇒ 用 **3.0.5**（版本仍**显式**）。
+  **Step 0 的传递依赖实测清单**（本地仓库）：`pdfbox` + `fontbox`（皆 3.0.5）+ **bouncycastle** `bcprov-jdk18on` / `bcpkix-jdk18on` / `bcutil-jdk18on`
+  ⇒ 证实"**PDFBox 不是零传递依赖**"（与派发前扫描一致，D2 的"最小依赖"设想已订正）。
+- **控制器自己的两处失误（登记）**：① `PDRectangle` 写错包（正确是 `org.apache.pdfbox.pdmodel.**common**.PDRectangle`）⇒ 3 处编译错；
+  ② 测试里一处**内层 ASCII 引号未转义**（与 Task 5 同一个坑）。
+- **连带改动（必须改，不是越界）**：`KbUploadIntegrationTest` 有一条"`.pdf` 必须被 400 拒掉"的旧断言 —— pdf 进白名单后它必然红
+  （全量实测 `expected 400 but was 200`）⇒ 反例换成 `.exe`，并在注释里写明原因。
+- **验收**：`KbPdfIntegrationTest` **2/0**（有文本层 ⇒ READY 且 `embeddedCount == chunkRows`；无文本层 ⇒ `FAILED("无可提取文本")` + 0 段 + 无向量 + 不是 READY）；
+  全量 `aihub-common` **68/0**、`aihub-web` **308/0**、**`Tomcat` = 7**、`BUILD SUCCESS`。
+- **变异体 1 条**（计划点名的 RED）：去掉 `chunks.isEmpty() ⇒ markNoText` 的出口 ⇒ "无文本层"用例红，
+  诊断行 **`status=PARSING chunks=0`**（文档**永远卡在 PARSING**：既不 FAILED 也不 READY）⇒ 坐实"静默成功/静默卡住是最糟的失败"。还原后 SHA 一致、`MUTANT` 残留 0。
 
 ---
 

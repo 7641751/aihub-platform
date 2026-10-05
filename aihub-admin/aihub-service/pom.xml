@@ -58,5 +58,18 @@
             <groupId>org.springframework.security</groupId>
             <artifactId>spring-security-crypto</artifactId>
         </dependency>
+        <!--
+          PDFBox（M5 Task 7）：PDF 原件的**文本层**抽取（PDFTextStripper）。版本**显式**（3.0.3）——
+          它在 Spring Boot BOM 里没有被管理，写死是刻意的（升版本要有意识地做）。
+          ⚠️ **不是零传递依赖**（M5 派发前扫描实测）：一起进来 **4 个 artifact** ——
+          `pdfbox` + `fontbox` + `bcprov/bcpkix/bcutil-jdk18on:1.78.1`，合计约 12.5MB。
+          这是对 D2「PDFBox 最小依赖」设想的订正（原以为只多一个 jar）。
+          无文本层的 PDF（扫描件 / 只画了图）⇒ 抽取得到空串 ⇒ 由 D14 判 `FAILED("无可提取文本")`，**不做 OCR**。
+        -->
+        <dependency>
+            <groupId>org.apache.pdfbox</groupId>
+            <artifactId>pdfbox</artifactId>
+            <version>3.0.5</version>
+        </dependency>
     </dependencies>
 </project>

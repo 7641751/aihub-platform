@@ -62,8 +62,8 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
     public static final int DEFAULT_PAGE_SIZE = 20;
     public static final int MAX_PAGE_SIZE = 200;
 
-    /** 本任务的白名单：**只有** md/txt（pdf 属 Task 7，会在那一任务里显式加入）。 */
-    private static final Set<String> ALLOWED_EXTENSIONS = Set.of("md", "txt");
+    /** 白名单：`md` / `txt` / `pdf`（pdf 由 M5 Task 7 显式加入；三处必须同时扩：本白名单 + `KbTextExtractor` + 用例）。 */
+    private static final Set<String> ALLOWED_EXTENSIONS = Set.of("md", "txt", "pdf");
 
     private final KbDocumentMapper kbDocumentMapper;
     private final KbFileStore fileStore;
