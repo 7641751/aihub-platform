@@ -133,6 +133,14 @@
   把 `AIHUB_KB_EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode` +
   `AIHUB_KB_EMBEDDING_MODEL=text-embedding-v3` 指过去即可复跑（脚本已备好：`.m5t8-logs/accept-b.ps1`）。
 
+  **⚠️ 复跑时又抓到一个真缺陷（2026-10-05，纠正 Task 3 的一处结论）**：换成可用模型后重传同一份 pdf，
+  日志是 `KbParseService: 解析跳过：doc 2 不在 PENDING/PARSING（别人已推进 / 已 READY/FAILED），ack 丢弃`
+  ⇒ **重复上传这条"重试手势"只对仍处 `PENDING` 的行有效**（那种情形正是 Task 3 要救的"发布丢失"），
+  而对 **`FAILED` 行完全无效** —— 消费端的**带条件状态迁移**会把重发的消息 **ack 丢掉**。
+  ⇒ **`FAILED` 目前是"只能看、不能重试"的终态**：既没有重试端点，重复上传也是空操作。
+  **绕法（仅验收可用）**：换一个租户上传同一份文件 ⇒ 新行、`PENDING` ⇒ 流水线照常跑；
+  **正路**（待做）：加一个"重试"入口（STM 允许 `FAILED → PARSING`）或允许 `FAILED` 行被重发的消息推进。
+
 **跨语言向量契约**（检索侧那个仓库的 Python 必须照它写）见 `docs/CONVENTIONS.md` **§6.8**：
 
 | 项 | 值 |

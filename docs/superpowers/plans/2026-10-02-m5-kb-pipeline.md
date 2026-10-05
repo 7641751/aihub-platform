@@ -1057,6 +1057,13 @@ git commit -m "docs(m5): record the KB pipeline and the cross-language vector co
   ④ 同时暴露一处**真缺口（已写进 README）**：`KbEmbeddingClient` **不发 `Authorization` 头**、也没有 api-key 配置项 ⇒
   **任何需要密钥的真实上游目前都接不上**；要接真上游必须补 `aihub.kb.embedding.api-key` + compose env 白名单 + 测试。
   ⑤ 顺带给 compose 补了 `AIHUB_KB_EMBEDDING_MODEL`（白名单，缺它就没法指定上游模型名）。
+- **⚠️（2026-10-05 复跑尝试再抓一个真缺陷，纠正 Task 3 的结论）**：用户换成可用模型 `qwen3.7-text-embedding`（探针 `200`、维度 **1024**）后重传同一份 pdf，
+  日志为 `KbParseService: 解析跳过：doc 2 不在 PENDING/PARSING（别人已推进 / 已 READY/FAILED），ack 丢弃`
+  ⇒ **"重复上传 = 重试手势"只对仍 `PENDING` 的行成立**（Task 3 要救的正是那种），
+  **对 `FAILED` 行无效** —— 带条件状态迁移会把重发消息 **ack 丢掉**。
+  ⇒ **`FAILED` 是"只能看、不能重试"的终态**（无重试端点、重复上传是空操作）。**绕法**：换租户上传同一文件拿新行（仅验收）；
+  **正路**：加"重试"入口或允许 `FAILED` 被重发消息推进。**B 档本次仍未跑成**（用户选择后台执行但未真正启动；
+  反代已杀、admin 已复位到 `.env` 配置）。
 
 ---
 
