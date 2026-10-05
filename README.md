@@ -124,6 +124,15 @@
   得加 `aihub.kb.embedding.api-key`（非空时加 `Authorization: Bearer …`）、把它加进 compose 的 env 白名单，
   并补测试；在此之前，B 档要么走"本机假上游"（集成测试那条路），要么在验收时用一次性反代注入密钥。
 
+  **B 档实测受阻（2026-10-05，如实登记）**：用一次性的本机反代（JDK `HttpServer` 单文件，密钥只经环境变量、
+  **不落盘**）接阿里云 DashScope 的 `https://dashscope.aliyuncs.com/compatible-mode`，上游返回
+  **`400`（而不是 `401`）** ⇒ **鉴权通过**、base-url 拼法正确；但响应体是
+  `"Free quota exhausted ... type: AllocationQuota.FreeTierOnly"`（`text-embedding-v3` / `-v4` 都一样）
+  ⇒ **该账号的免费额度已耗尽、无法调用任何模型**。**B 档因此仍未验**，且**原因在上游配额、不在本仓库**
+  （网关上 `/v1/embeddings` 仍是 404，也不提供 embeddings 上游）。配额恢复（控制台关闭"仅免费额度"或换一把可用 Key）后，
+  把 `AIHUB_KB_EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode` +
+  `AIHUB_KB_EMBEDDING_MODEL=text-embedding-v3` 指过去即可复跑（脚本已备好：`.m5t8-logs/accept-b.ps1`）。
+
 **跨语言向量契约**（检索侧那个仓库的 Python 必须照它写）见 `docs/CONVENTIONS.md` **§6.8**：
 
 | 项 | 值 |

@@ -1048,6 +1048,15 @@ git commit -m "docs(m5): record the KB pipeline and the cross-language vector co
   `ERROR 1064 ... near '﻿SELECT ...'`；`$OutputEncoding` 与 `TrimStart([char]0xFEFF)` 都没救，
   改用 **HTTP 接口**（`GET /api/kb/documents`）取状态最省事。另：`mysql -N -B` 与控制台显示中文会乱码，
   **库里的值是好的**（列是 utf8mb4）。
+- **（2026-10-05 B 档尝试：被上游配额挡住，非本仓库问题）**：用户给了 DashScope 兼容端点与一把 Key，选"一次性反代注入密钥"
+  （JDK `HttpServer` 单文件代理，密钥只经环境变量、不落盘、用完即杀）。实测：
+  ① 客户端是 `baseUrl + "/v1/embeddings"` ⇒ 官方 URL 末尾的 `/v1` **必须去掉**（否则 `.../v1/v1/embeddings` ⇒ 404）；
+  ② 上游返回 **`400` 而非 `401`** ⇒ **鉴权通过**；③ 但响应体是
+  `"Free quota exhausted ... AllocationQuota.FreeTierOnly"`（`text-embedding-v3`/`-v4` 同样）⇒
+  **账号免费额度耗尽**，任何模型都调不动 ⇒ **B 档仍未验**，且**不能算作本仓库的缺陷**。
+  ④ 同时暴露一处**真缺口（已写进 README）**：`KbEmbeddingClient` **不发 `Authorization` 头**、也没有 api-key 配置项 ⇒
+  **任何需要密钥的真实上游目前都接不上**；要接真上游必须补 `aihub.kb.embedding.api-key` + compose env 白名单 + 测试。
+  ⑤ 顺带给 compose 补了 `AIHUB_KB_EMBEDDING_MODEL`（白名单，缺它就没法指定上游模型名）。
 
 ---
 

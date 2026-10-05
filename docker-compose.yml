@@ -98,6 +98,8 @@ services:
       # embeddings 上游（OpenAI 兼容 /v1/embeddings）。**默认空** ⇒ 调用时响亮失败 ⇒ 流水线走
       # FAILED + 清理 + DLQ —— 那正是离线 compose 上能验的那一档；要验 READY 必须给一个**真实上游**。
       AIHUB_KB_EMBEDDING_BASE_URL: ${AIHUB_KB_EMBEDDING_BASE_URL:-}
+      # ⚠️ base-url **不许带尾部 /v1**（客户端会自己拼 `/v1/embeddings`）；模型名必须与上游一致。
+      AIHUB_KB_EMBEDDING_MODEL: ${AIHUB_KB_EMBEDDING_MODEL:-kb-embedding}
       AIHUB_KB_CHROMA_BASE_URL: ${AIHUB_KB_CHROMA_BASE_URL:-http://chroma:8000}
     volumes:
       - admin-files:/app/data/kb
