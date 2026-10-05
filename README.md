@@ -98,7 +98,13 @@
   `aihub.kb.dlq` **1** 条、审计 `KB_DOCUMENT_UPLOAD` + `KB_DOCUMENT_FAILED`、存储根只剩 1 个 sha256 原件；
   **官方判据"中断上传不留脏数据"**：真发 539 字节却声明 5 MB 后断开 ⇒ `EOFException`，**行数不变、盘上不多文件**。
   **反证**：解析阶段确实写过 4 段（当日志 + `chunk_count=4`），终态 `kb_chunk` 为 0 —— 若 `cleanup` 是空操作就会停在 4。
-  ⚠️ **A 档没跑 pdf**、也**无法在 Chroma 侧做向量清理的对照**（没有上游 ⇒ 向量从未写入）：两条都**如实登记为缺口**。
+  另加**真实 PDF**（`12.4 幂级数.pdf`，**813,280 字节**，用户提供的教材页）：同样 `200 / PENDING` ⇒ 日志
+  `解析完成：doc 2 切出 9 段`（**文本层被 PDFBox 抽出**，共 7130 字符）⇒ `文档 2 的向量与分段已清理干净` ⇒
+  `进入终态 FAILED（stage=embed）`；实测 `GET /api/kb/documents?tenantId=1` 返回
+  `{id:2, filename:"12.4-power-series.pdf", sizeBytes:813280, status:"FAILED", chunkCount:9}`（与 `md` 的
+  `{id:1, sizeBytes:2777, chunkCount:4}` 并列，`total:2`）。
+  ⚠️ **A 档仍无法在 Chroma 侧做向量清理的对照**（没有上游 ⇒ 向量从未写入）：这条**如实登记为缺口**，
+  Chroma 侧的"写进去 → 失败 → 清理掉"由 `KbEmbedIntegrationTest`（真 Chroma 容器）覆盖。
   ⚠️ **`docker compose up --build` 在本机可能构建失败**：M5 引入的 PDFBox 不在构建容器的 Maven 缓存里，
   而**构建容器解析不了 DNS**（`repo.maven.apache.org: No address associated with hostname`）⇒ 用
   `docker build --network=host -t aihub-platform-admin -f aihub-admin/aihub-web/Dockerfile .` 再

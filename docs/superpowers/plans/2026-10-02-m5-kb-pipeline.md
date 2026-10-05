@@ -1036,9 +1036,18 @@ git commit -m "docs(m5): record the KB pipeline and the cross-language vector co
   （`repo.maven.apache.org: No address associated with hostname`）。绕法：
   `docker build --network=host -t aihub-platform-admin -f aihub-admin/aihub-web/Dockerfile .` + `docker compose up -d --no-build admin chroma`
   （**不改 Dockerfile / compose**）。**任何新增 Maven 依赖的里程碑都会踩这一下** ⇒ 已写进 README。
-- ⚠️ **如实登记的两处缺口**：① **A 档只跑了 md，没跑 pdf**（pdf 走同一路径且有 Task 7 的测试覆盖，
-  但"compose 上传 pdf"**没有证据**）；② **A 档无法在 Chroma 侧做向量清理的对照**（没有上游 ⇒ 向量从未写入），
-  对照改落在 `kb_chunk`（解析确实写过 4 段、终态 0 行）上；向量侧的清理由 `KbEmbedIntegrationTest` 覆盖。
+- **（2026-10-05 补跑 pdf，由用户提供真实文件）**：`12.4 幂级数.pdf`（**813,280 字节**）⇒ `200 / id=2` ⇒
+  日志 `解析完成：doc 2 切出 9 段`（**文本层被抽出**，7130 字符）⇒ `文档 2 的向量与分段已清理干净` ⇒
+  `进入终态 FAILED（stage=embed）`；`GET /api/kb/documents?tenantId=1` 实测
+  `{id:2, sizeBytes:813280, status:"FAILED", chunkCount:9}` 与 `{id:1, chunkCount:4}`，`total:2`；
+  `kb.dlq=2`、Chroma count=0、存储根 2 个 sha256 原件、审计 `KB_DOCUMENT_UPLOAD target_id=2`。
+  ⇒ **"compose 上传 pdf"这条现在有证据了**。
+- ⚠️ **仍如实登记的缺口**：**A 档无法在 Chroma 侧做向量清理的对照**（没有上游 ⇒ 向量从未写入），
+  对照改落在 `kb_chunk`（`md` 写过 4 段、`pdf` 写过 9 段，终态都是 0 行）上；向量侧的清理由 `KbEmbedIntegrationTest` 覆盖。
+- ⚠️ **工装坑（记下来免得下次再踩）**：PS 5.1 把字符串**管道**给原生进程时会带 **BOM** ⇒ `mysql` 报
+  `ERROR 1064 ... near '﻿SELECT ...'`；`$OutputEncoding` 与 `TrimStart([char]0xFEFF)` 都没救，
+  改用 **HTTP 接口**（`GET /api/kb/documents`）取状态最省事。另：`mysql -N -B` 与控制台显示中文会乱码，
+  **库里的值是好的**（列是 utf8mb4）。
 
 ---
 
