@@ -1076,6 +1076,11 @@ git commit -m "docs(m5): record the KB pipeline and the cross-language vector co
   保留 3 参便捷构造 ⇒ 既有调用点与空值行为**逐字不变**。**RED 是编译级的**（4 参构造不存在，已如实登记）。
   配置面：`docker-compose.yml`（白名单加 `AIHUB_KB_EMBEDDING_API_KEY`）、`.env.example`、`CONVENTIONS.md` §6.8、README 均已更新。
   **实测**：聚焦两测试类 **10/0**；全量 `aihub-common` **68/0**、`aihub-web` **310/0**（= 308 + 新增 2）、**`Tomcat` = 7**。
+  **✅ 真实 compose 复验（2026-10-05，原生鉴权、无反代）**：① 两个早已 `FAILED` 的文档（`md`/tenant1、`pdf`/tenant3）**重传同一份内容**
+  ⇒ 都 `FAILED → EMBEDDING → READY`（`chunks=4`/`9`），终态 `errorMsg` 为空（重入清错生效）；修之前同一动作被 `解析跳过…ack 丢弃` 吃掉。
+  ② 同轮两行都 `READY` ⇒ 请求真的带上 `Authorization: Bearer …` 并被上游接受（修之前回 `401 "You didn't provide an API key…"`）。
+  Chroma 直查 `count=22`：`doc1` 4 条（`1:0..1:3`，`tenant_id=1`）、`doc4` 9 条（`4:0..4:8`，`tenant_id=3`）。
+  ⚠️ 过程中踩到一次**旧镜像**（改完代码没重建 ⇒ 两条修复都没生效、症状与未修时相同）—— **改完代码必须 `docker build --network=host` 重建镜像**，否则 compose 验收验的是旧行为。
 
 ---
 
