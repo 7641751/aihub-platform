@@ -173,7 +173,7 @@ aihub-platform/
 | 表 | 关键字段 | 说明 |
 |---|---|---|
 | `request_log` | request_id, tenant_id, api_key_id, channel_id, model, prompt_tokens, completion_tokens, total_tokens, latency_ms, ttft_ms, status, error_code, created_at | 按月分区；`request_id` 唯一索引 |
-| `kb_document` | id, tenant_id, filename, size, sha256, status, chunk_count, error_msg, uploaded_at, updated_at | 状态机见 6.2 |
+| `kb_document` | id, tenant_id, filename, size_bytes, sha256, status, chunk_count, error_msg, created_at, updated_at | 状态机见 6.4（**2026-10-05 订正字段名**：初稿写的 `size`/`uploaded_at` 与实际迁移 `V1`/`V3` 不符）|
 | `billing_daily` | tenant_id, stat_date, requests, tokens, cost | 日汇总，可由 `request_log` 重算 |
 
 ### 5.3 索引与分区要点
@@ -232,15 +232,17 @@ PENDING → PARSING → EMBEDDING → READY
 
 **向量库元数据契约（跨语言接口，必须双方一致）：**
 
+**（2026-10-05 实现状态订正 —— 以**已落地**的契约为准，字段名与 `docs/CONVENTIONS.md` §6.8 逐字一致）**
+
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `doc_id` | 是 | 删除 / 替换 / 回滚的定位键 |
-| `tenant_id` | 是 | 租户隔离依据，Python 检索侧必须按此过滤 |
-| `kb_id` | 是 | 知识库归属 |
-| `origin` | 是 | 固定 `upload`，与预置文档区分 |
-| `filename` | 是 | 展示与同名检测 |
-| `chunk` | 是 | 段序号，从 0 连续 |
-| `sha256` | 否 | 便于一致性核对 |
+| `doc_id` | 是 | 删除 / 替换 / 回滚的定位键（`cleanup(docId)` 按它全删）|
+| `tenant_id` | 是 | 租户隔离依据，Python 检索侧**必须**按 `where={"tenant_id": N}` 过滤 |
+| `seq` | 是 | 段序号，从 0 连续；**记录 id 就是 `"{docId}:{seq}"`**（可推导 ⇒ 重放按 id 覆盖即幂等）|
+
+**初稿（2026-09-23）列的 `kb_id` / `origin` / `filename` / `chunk` / `sha256` 未被 M5 实现** —— M5 是**单知识库**、
+只有"上传"一种来源，这些信息分别在 `kb_document`（filename / sha256）与 `kb_chunk`（文本）里。
+**检索侧不要依赖它们**；文本**不进** Chroma（回查 MySQL 的 `kb_chunk.text`）。
 
 ---
 
@@ -275,6 +277,9 @@ PENDING → PARSING → EMBEDDING → READY
 | GET | `/api/billing/daily?tenantId=&from=&to=` | 账单查询（**必须显式 `tenantId`**：运营查询，缺省 400，见 `CONVENTIONS.md` §10 R3.1） |
 | GET | `/api/logs` | 请求日志分页查询（**必须 `tenantId` + 时间范围**：同上，禁止无界扫描） |
 
+> **（2026-10-05 实现状态更新）** `/api/kb/documents`（上传 + 列表）已在 **M5** 落地，受 `ConsoleAuthFilter` 守门
+> （控制面租户模型同 §10）。**取消上传端点仍未实现**（D9：设计 §6.4 提过"取消"，但本节接口表里没有该端点 ⇒ M5 明确登记为不做）。
+>
 > **（2026-10-02 实现状态标注）** 上表除 **`/api/kb/**`（文档入库，属 **M5**，本期未实现）** 之外，
 > 其余接口均已在 **M4** 落地并受 `ConsoleAuthFilter` 守门（D3 令牌 + D10 两级角色）。
 > 完整的错误码、租户模型与配额语义以 `docs/CONVENTIONS.md`（§4 / §6.7 / §10）为准 —— **它与本文档冲突时以 CONVENTIONS 为准**。
@@ -384,6 +389,13 @@ MQ 计量事件 ──▶ admin consumer
 | M6 压测与打磨 | 3 周 | k6 压测报告、故障注入报告、README、部署上线 | 拿出 P99 / TTFT / 限流生效数据 |
 
 合计约 22 周（≈5 个月），另留 1 个月缓冲。
+
+**（2026-10-05 实现状态）M5 已完成并推送**（`docs/superpowers/plans/2026-10-02-m5-kb-pipeline.md`，Task 1–8；
+`docker-compose.yml` 增加真 `chroma` 服务 + `admin-files` 卷 + 三个 env）。
+**验收分两档如实登记**（详见 `README.md` 的「M5 到底做了什么」与「已知边界」）：
+**A 档**（真实 compose，离线可复现）= 失败路径 + **"中断上传不留脏数据"**（本行那句验收标准）+ 一条反证对照；
+**B 档**（上传 ⇒ `READY` 且从 Chroma 取回）需要**一个真实可用的 `/v1/embeddings` 上游** —— 本机没有，
+因此**不在 compose 上声称验过**，该现象由 `KbEmbedIntegrationTest`（真 Chroma 容器 + 进程内假上游）覆盖。
 
 每个里程碑完成后打 git tag，并写一篇短技术笔记，作为面试话术底稿。
 

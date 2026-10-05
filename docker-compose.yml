@@ -50,6 +50,14 @@ services:
       retries: 20
       start_period: 30s
 
+  # M5（D3）：向量库。**真 Chroma**，镜像与测试里那个 GenericContainer 用**同一个 tag**（
+  # docker.m.daocloud.io 代理仓库 —— Docker Hub 直连在本机不通）。
+  # 刻意**不挂卷**：向量是**可重建的派生数据**（原件才是唯一真相源），挂卷只会掩盖"能不能重建"这件事。
+  chroma:
+    image: docker.m.daocloud.io/chromadb/chroma:0.5.23
+    ports:
+      - "8000:8000"
+
   admin:
     build:
       context: .
@@ -61,6 +69,11 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      # M5：**故意不用 service_healthy** —— chroma 镜像里有没有 curl/wget/python 没实测过，
+      # 编一个 healthcheck 一旦写错就会让 service_healthy 永远不满足 ⇒ admin 永远不启动。
+      # 用 service_started，chroma 的就绪是异步的（客户端调用时自己重试）。
+      chroma:
+        condition: service_started
     environment:
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/aihub?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
       SPRING_DATASOURCE_USERNAME: aihub
@@ -78,6 +91,16 @@ services:
       AIHUB_DEMO_SEED_ENABLED: ${AIHUB_DEMO_SEED_ENABLED:-false}
       AIHUB_DEMO_SEED_PRIMARY_API_KEY: ${AIHUB_DEMO_SEED_PRIMARY_API_KEY:-}
       AIHUB_DEMO_SEED_STANDBY_API_KEY: ${AIHUB_DEMO_SEED_STANDBY_API_KEY:-}
+      # ── M5：KB 流水线（compose 的 `environment:` 是**显式白名单** —— 没列进来的变量在容器里是空的，
+      #    这是 M4 Task 17 用一次验收失败换来的）──
+      # 原件存储根：**挂卷**，跨重启存活（原件是唯一真相源；Chroma 只是可重建的派生数据）。
+      AIHUB_KB_STORAGE_ROOT: /app/data/kb
+      # embeddings 上游（OpenAI 兼容 /v1/embeddings）。**默认空** ⇒ 调用时响亮失败 ⇒ 流水线走
+      # FAILED + 清理 + DLQ —— 那正是离线 compose 上能验的那一档；要验 READY 必须给一个**真实上游**。
+      AIHUB_KB_EMBEDDING_BASE_URL: ${AIHUB_KB_EMBEDDING_BASE_URL:-}
+      AIHUB_KB_CHROMA_BASE_URL: ${AIHUB_KB_CHROMA_BASE_URL:-http://chroma:8000}
+    volumes:
+      - admin-files:/app/data/kb
     ports:
       - "8081:8081"
 
@@ -113,3 +136,5 @@ services:
 volumes:
   mysql-data:
   gateway-spool:
+  # M5：KB 原件（**必须跨重启存活** —— 它是唯一真相源；Chroma 可以从原件重建，反过来不行）。
+  admin-files:

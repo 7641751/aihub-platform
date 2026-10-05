@@ -1001,6 +1001,25 @@ git commit -m "docs(m5): record the KB pipeline and the cross-language vector co
 **验收判据：** 设计文档 §12 对 M5 的那句话（**中断上传不留脏数据**）在**真实 compose** 上复现；CONVENTIONS 里的跨语言契约与代码**逐字一致**；README 的已知边界含 D9（取消未实现）、D14（扫描版 PDF 不支持）、D2（PDFBox 版面还原能力的残余）。
 **RED 证据：** **没有反证的验收不算验收** —— 第 3 步必须有"关掉/改坏一处 ⇒ 现象消失"的对照（例如把 `cleanup` 关掉后 Chroma 里应留下残留），对照跑不出差异就说明观测点选错了。
 
+**（2026-10-05 控制器派发前扫描 —— 3 条"照字面做就交不出证据 / 会卡死验收"）**
+1. **⚠️ compose 里 `AIHUB_KB_EMBEDDING_BASE_URL` 指向哪里？计划没写，而这是 Step 3 的生死线**：
+   容器里**没有**假上游（`FakeEmbeddingUpstream` 是 **test 作用域**、跑在测试 JVM 里），网关**也不转发** `/v1/embeddings`
+   （README 已实测 `POST /v1/embeddings` ⇒ **404**）⇒ 没有可用上游时流水线必然停在 `FAILED`。
+   ⇒ **验收分两档，README 必须如实写清**：
+   - **A 档（离线必须做到 = 本任务的正式判据）**：`md` 与 `pdf` 真上传 ⇒ 解析/切分/批次发出
+     （可从 `kb_chunk` 行数与日志看到）⇒ 由于**没有可用 embeddings 上游**，终态是
+     **`FAILED` + Chroma 干净 + `kb.dlq` 有消息 + 一条 `KB_DOCUMENT_FAILED` 审计** —— 这恰好把 D7/D8 的失败路径
+     在**真实 compose** 上验了；再加设计文档 §12 的那句"**中断上传不留脏数据**"。
+   - **B 档（需要真实上游，不许编造）**：`READY` + **从 Chroma 取回** 需要**一个可用的 OpenAI 兼容 `/v1/embeddings`**。
+     本机**没有** ⇒ **不许在 compose 上声称验过**；该现象由 `KbEmbedIntegrationTest`（**真 Chroma 容器** + 进程内假上游）覆盖。
+     **若用户能给出上游 URL**，验收时把 `AIHUB_KB_EMBEDDING_BASE_URL` 指向它补跑 B 档。
+2. **⚠️ `depends_on` 不许给 chroma 编 healthcheck**：chroma 镜像里有没有 `curl`/`wget`/`python` **没实测过**，
+   写错会让 `service_healthy` **永远不满足** ⇒ admin **永远不启动**（比"晚几秒就绪"糟得多）。
+   ⇒ 用 `condition: service_started`，并如实登记"chroma 的就绪是异步的，客户端自己重试"。
+3. **⚠️ Step 2 的 `mvn -B clean test` 要拆成两半跑**：整反应堆（admin + **gateway 391**）在一次调用里可能超过命令时限
+   被**杀死并截断日志**（Task 5 已实测过一次）。⇒ 拆成 `-pl aihub-admin/aihub-web -am` 与 `-pl aihub-gateway` 两条，
+   分别报**每模块**实测数（M4 基线 723 = 68 + 264 + 391，M5 必然增加）。
+
 ---
 
 ## 附录 A：跨语言向量契约（**检索侧是另一个仓库的 Python，改它就是破坏性变更**）

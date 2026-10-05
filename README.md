@@ -49,7 +49,7 @@
 （admin 端口，见「快速开始」）→ 用 `sys_user` 的账号登录 → 令牌存在 **`sessionStorage`**（关标签页即失效）。三个视图：
 **渠道**（列表 + 新建 + 探测）、**API Key**（列表 + 新建，明文**只显示一次**）、**请求日志**（按 `tenantId` + 时间范围查询）。
 页面不引任何第三方脚本、不用 `innerHTML`（所有服务端文本走 `textContent`）。
-- [ ] **M5 异步流水线**：文档上传 → 解析 → 嵌入 → 向量库
+- [x] **M5 异步流水线**：文档上传 → 解析 → 嵌入 → 向量库（2026-10-05 完成，见下「M5 到底做了什么」）
 - [ ] **M6 压测与打磨**：压测报告、故障注入报告、上线
 
 **M1 到底做了什么**：`/v1/**` 现在必须带 API Key，缺省或非法一律 `401` 加 OpenAI 形状错误体（`{"error":{"code":"invalid_api_key",...}}`）；密钥解析走三级回源（本机 Caffeine → 共享 Redis → admin 的 HMAC 内部接口），任一级故障都降级到下一级而不是拒绝请求；转发端点是**字节级直通代理**，上游的状态码、响应体字节与 `Content-Type` 原样回写，因此流式（SSE）与非流式（JSON）由请求体里的 `stream` 字段决定，网关不分流、也不再把上游错误折叠成 `500`；新增 `GET /v1/models`，单渠道场景下回报配置的默认模型。
@@ -77,7 +77,56 @@
 **复现口径（诚实说明）**：上面的数字与「`mvn -B test` 在本机全绿」都产自这台开发机：除了 Docker 守护进程，它还依赖两项**不在仓库里**的环境配置 —— 用户级 `~/.testcontainers.properties`（把 Testcontainers 指向 TCP 上的 Docker）以及本机 `.mvn/maven.config` 里的 JVM 参数。因此在一台干净机器上，需自行保证：Docker 可达，且 JDK 21+ 上允许 Mockito 的动态 agent 挂载（例如 `mvn -B test -DargLine="-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading"`）；这些**环境作用域**的 JVM 开关有意不进 `pom.xml`。`aihub-web` 的集成测试要真起容器，必须让 Testcontainers 找到 Docker（本机是 `DOCKER_HOST=tcp://127.0.0.1:2375`）；`aihub-gateway` 的测试**不需要** Docker，也不需要有 broker 在跑。
 
 
-## M0/M1/M2/M3/M4 已知边界
+## M5 到底做了什么
+
+把「RAG 知识库的**写入侧**」做成一条**可运营、可回滚**的异步流水线（检索侧属另一个 Python 项目，本里程碑**不做**）：
+
+`POST /api/kb/documents`（multipart）→ 算 sha256 + **原子落盘**（临时文件 + 改名；原件是唯一真相源）→ `kb_document(PENDING)`
+→ **事务提交后**发 `aihub.kb.parse` → 解析（`md`/`txt`/`pdf`，PDF 走 PDFBox 抽**文本层**）→ 切分（默认 800 字符窗口 / 100 重叠，**无缝隙滑窗**）
+→ 写 `kb_chunk`（`uk(doc_id, seq)`，重放 upsert 不产生重复段）→ 按 `ceil(N/batch-size)` 发 `aihub.kb.embed`
+→ 调 **embeddings 上游**（OpenAI 兼容 `/v1/embeddings`，**显式超时**）→ 写 **真 Chroma**（`vector_id = "{docId}:{seq}"`，metadata `doc_id`/`tenant_id`/`seq`）
+→ 逐段打 `embedded_at` → **全部打满 ⇒ `READY`**。
+任一阶段重试耗尽 ⇒ **清 Chroma → 删 `kb_chunk` → `FAILED` + 审计**，消息进 `aihub.kb.dlq`（**全成或全清**）。
+
+**M5 的真实验收（2026-10-05）分两档，如实写清**（原始输出见 `.superpowers/sdd/m5-acceptance.md`）：
+
+- **A 档：真实 Docker Compose（离线可复现，本里程碑的正式判据）**——起 `chroma` + admin，真上传 `md` 与 `pdf`：
+  解析/切分/分批消息都真实发生（`kb_chunk` 行数、日志可查）；由于**离线环境没有可用的 embeddings 上游**，
+  终态是 **`FAILED` + Chroma 干净 + `kb.dlq` 有消息 + 一条 `KB_DOCUMENT_FAILED` 审计**（这恰好把失败路径与"全清"在真实 compose 上验了）；
+  另有**中断上传不留脏数据**（无行、无文件）与一条**反证对照**（把 `cleanup` 关掉 ⇒ Chroma 留下残留）。
+- **B 档：`READY` + 从 Chroma 取回，需要**一个真实可用的 OpenAI 兼容 `/v1/embeddings` 上游**。
+  本机**没有**这个上游（网关**不转发** `/v1/embeddings`：实测 `POST /v1/embeddings` ⇒ 404），
+  因此**不在 compose 上声称验过**；该现象由集成测试 `KbEmbedIntegrationTest` 覆盖 —— **真 Chroma 容器** + 进程内假上游，
+  断言"直接查 Chroma：25 条向量、`seq` 可从 id 反推、metadata 的 `tenant_id` 正确"。要跑 B 档，把
+  `AIHUB_KB_EMBEDDING_BASE_URL` 指向你自己的上游即可（代码一行不改）。
+
+**跨语言向量契约**（检索侧那个仓库的 Python 必须照它写）见 `docs/CONVENTIONS.md` **§6.8**：
+
+| 项 | 值 |
+|---|---|
+| collection | `kb_chunks`（`aihub.kb.chroma.collection`）|
+| 记录 id | `"{docId}:{seq}"`（可推导）|
+| metadata 必填 | `doc_id`(long)、`tenant_id`(long)、`seq`(int)；检索侧**必须**用 `where={"tenant_id": N}` 过滤 |
+| 文本 | **不进** Chroma（回查 `kb_chunk.text`）|
+| 删除 | `where={"doc_id": id}` 全删 |
+
+## M0/M1/M2/M3/M4/M5 已知边界
+
+**M5 新增**（每一条都有对应的代码/测试，或明确写着"没有证据"）
+
+1. **取消上传未实现**（D9）：上传只能等它跑完或失败（`cleanup` 已写成可复用形状）。
+2. **扫描版/图片型 PDF 不支持**（D14）：`FAILED("无可提取文本")`，**不做 OCR**。
+3. **PDFBox 的版面还原能力有限**（D2）：多栏/表格可能串行；抽取的是**文本层**，不是版面。
+4. **解析与嵌入都是"至少一次"**：靠 `uk(doc_id, seq)` + Chroma `upsert` 做幂等；同一 doc 的并发重复上传被唯一键吸收。
+5. **`kb_chunk` 存了一份文本**（D1 残余）：与原件重复占空间，换来可重放与一条 SQL 清理。
+6. **嵌入维度变更 = 重建 collection**：本里程碑不提供迁移工具。
+7. **Chroma 单实例、无鉴权**（本地演示形态）：生产加固（凭据、网络隔离、多副本）属后续里程碑。
+8. **发布端丢消息 ⇒ 该行会停在 `PENDING`**：`kb.parse` 发布失败只**计数**（`aihub.kb.publish_failures`）+ WARN，
+   **不会**让已提交的业务写失败；DLQ 只覆盖**消费端**失败 ⇒ 这类行**没有自动重试**。
+   **现成的补救 = 重新上传同一份内容**（幂等路径也会重发一条 `parse:{id}`）；否则只能**手工投一条** `parse:{id}`。
+   代价：对已 `READY` 的文档重传会多做一次解析（有界、幂等收敛）。
+9. **compose 上的 `READY` 需要真实 embeddings 上游**（见上「A 档 / B 档」）—— 离线环境验到的是失败路径与"全清"。
+
 
 **M4 新增（每一条都有对应的代码 / 测试，不是"以后再说"）**
 

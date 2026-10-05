@@ -293,6 +293,40 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 > 注意 **admin 信封**里的 `ErrorCode.QUOTA_EXCEEDED` **仍然存在**，那是 **admin 侧的码**（`/api/**` 的 `code`），
 > **不要**与 `/v1/**` 上发给 OpenAI SDK 的 `error.code` 混为一谈。
 
+## 6.8 KB 流水线与跨语言向量契约（2026-10-05，M5）
+
+**流水线（全异步；状态全在 MySQL，向量库只是**可重建的派生数据**，原件才是唯一真相源）**：
+`POST /api/kb/documents` 上传原件 → `kb_document(PENDING)` → **提交后**发 `aihub.kb.parse` → 解析切分写 `kb_chunk`
+→ 发 `aihub.kb.embed`（分批）→ 调 embeddings 上游 → 写 **Chroma** → 逐段打 `embedded_at` → **全部打满 ⇒ `READY`**。
+任一阶段重试耗尽（3 次指数退避）⇒ 自定义 `MessageRecoverer`：**① 清 Chroma → ② 删 `kb_chunk` → ③ 置 `FAILED` + 审计**，
+然后**拒绝**该消息（`AmqpRejectAndDontRequeueException`）⇒ 进 `aihub.kb.dlq`。
+⚠️ 恢复器**必须抛**：正常返回等于容器 **ack** 掉这条消息（既不置 FAILED、也不进 DLQ）。
+
+**MQ 命名**（与计量链路 `aihub.metering.*` **逐字同构**，事实源 `KbTopology`）：
+`aihub.kb.exchange` / `aihub.kb.parse` / `aihub.kb.embed` / `aihub.kb.dlx` / `aihub.kb.dlq`；
+线格式是**文本分隔符**（`parse:{docId}`、`embed:{docId}:{seqFrom}:{seqTo}`）、**无 JSON**，内容类型 `text/plain;charset=UTF-8`（发布端显式设置）。
+两个业务队列**都**挂 `x-dead-letter-exchange`。
+
+**⚠️ 跨语言向量契约**（检索侧是**另一个仓库的 Python**；改它就是**破坏性变更**）：
+
+| 项 | 值 |
+|---|---|
+| collection 名 | `kb_chunks`（配置项 `aihub.kb.chroma.collection`）—— 单 collection，靠 metadata 隔离租户 |
+| 记录 id | `vector_id = "{docId}:{seq}"`（**可推导** ⇒ 重放按 id 覆盖即幂等、可 grep、可从 id 反推坐标）|
+| metadata **必填** | `doc_id`(long)、`tenant_id`(long)、`seq`(int)；检索侧**必须**用 `where={"tenant_id": N}` 过滤 |
+| 文本 | **不进** Chroma（存在 `kb_chunk.text`，检索侧回查 MySQL）|
+| 删除语义 | 按 `where={"doc_id": id}` 全删（与 `cleanup(docId)` 同一语义）|
+| 嵌入维度 | 由 embeddings 上游决定；**换模型 = 重建 collection**（破坏性变更，必须记文档）|
+| Chroma 的实测事实 | **`count` 是 `GET`**（`POST` ⇒ **405**）；`upsert` **幂等**（重放同 id ⇒ count 不变）；`get/delete` 用 `where`；集合级路由吃 `collection_id`(UUID)，**只有"按集合名"那条吃名字**；**JDK `HttpClient` 必须钉 `HTTP_1_1`**（明文 `http://` 默认发 h2c 升级前奏，uvicorn 会报 422/400 —— 见 §8）|
+
+**端点**：`POST /api/kb/documents`（multipart：`file` + `tenantId` 文本 part）、`GET /api/kb/documents`（分页）—— 控制面 `/api/**`，鉴权见 §10。
+**幂等**：`uk_kb_chunk_doc_seq(doc_id, seq)` + Chroma `upsert` ⇒ 解析与嵌入都是**至少一次**，重放收敛；
+**重复上传**不新增行/文件（D5），但**会重新触发一次解析** —— 这是"发布丢了 ⇒ 行停在 `PENDING`"的**现成补救手段**
+（`kb.parse` 的发布失败只计数 + WARN，DLQ 只覆盖**消费端**失败）。
+**配置项**：`aihub.kb.storage.root`、`aihub.kb.chunk.size-chars`/`overlap-chars`、`aihub.kb.embed.batch-size`、
+`aihub.kb.embedding.base-url`/`model`/`timeout-seconds`、`aihub.kb.chroma.base-url`/`collection`/`timeout-seconds`
+（**默认值即生产值**；测试**不许**覆盖它们 —— 覆盖会 fork 出第 8 个 Spring 上下文，见 §8）。
+
 ## 7. 数据库约定
 
 - 字符集 `utf8mb4`，时间字段 `datetime(3)` 且按 UTC 存储。
