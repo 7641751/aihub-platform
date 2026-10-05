@@ -114,6 +114,15 @@
   因此**不在 compose 上声称验过**；该现象由集成测试 `KbEmbedIntegrationTest` 覆盖 —— **真 Chroma 容器** + 进程内假上游，
   断言"直接查 Chroma：25 条向量、`seq` 可从 id 反推、metadata 的 `tenant_id` 正确"。要跑 B 档，把
   `AIHUB_KB_EMBEDDING_BASE_URL` 指向你自己的上游即可（代码一行不改）。
+  ⚠️ **两个真陷阱**（2026-10-05 由代码实测得到）：
+  **① base-url 里不要带 `/v1`** —— 客户端是 `URI.create(baseUrl + "/v1/embeddings")`，
+  所以官方那种 `https://dashscope.aliyuncs.com/compatible-mode/v1` 要写成
+  `https://dashscope.aliyuncs.com/compatible-mode`（带 `/v1` 会 404）；模型名走
+  `AIHUB_KB_EMBEDDING_MODEL`（默认 `kb-embedding` 只是占位；真实上游必须给对，如 `text-embedding-v3`）。
+  **② `KbEmbeddingClient` 目前不发 `Authorization` 头**（只有 `Content-Type`，也没有 api-key 配置项）⇒
+  **需要密钥的真实上游（DashScope 之类）目前接不上**（会 401）。这是 M5 的**已知缺口**：要接真上游，
+  得加 `aihub.kb.embedding.api-key`（非空时加 `Authorization: Bearer …`）、把它加进 compose 的 env 白名单，
+  并补测试；在此之前，B 档要么走"本机假上游"（集成测试那条路），要么在验收时用一次性反代注入密钥。
 
 **跨语言向量契约**（检索侧那个仓库的 Python 必须照它写）见 `docs/CONVENTIONS.md` **§6.8**：
 
