@@ -141,6 +141,21 @@
   **绕法（仅验收可用）**：换一个租户上传同一份文件 ⇒ 新行、`PENDING` ⇒ 流水线照常跑；
   **正路**（待做）：加一个"重试"入口（STM 允许 `FAILED → PARSING`）或允许 `FAILED` 行被重发的消息推进。
 
+## B 档已验（2026-10-05，真实 compose + 真实上游）
+
+用可用模型 `qwen3.7-text-embedding`（探针 `200`、维度 **1024**）接阿里云 DashScope 兼容端点
+（经一次性本机反代注入 `Authorization`，密钥只走环境变量），**换租户新行**上传同一份 813,280 字节的 PDF：
+
+```
+上传 → 200 / id=3 / PENDING   →   t=5s  READY (chunkCount=9)
+Chroma 直查：kb_chunks count=9、VECTORS_FOR_DOC_3=9
+记录 id = 3:0,3:1,…,3:8（= "{docId}:{seq}"，可反推）  metadata tenant_id=2、seq=0..8
+```
+
+⇒ **`上传 ⇒ 解析 ⇒ 嵌入（真上游）⇒ 写 Chroma ⇒ READY` 全链路在真实 compose 上成立**（B 档缺口清零）。
+仍待补的两件事（都不影响 A/B 档结论）：① `FAILED` 行的**重试入口**（见上）；② `KbEmbeddingClient` 的 **`api-key` 支持**
+（现在靠一次性反代注入密钥；原生支持后就不用反代了）。
+
 **跨语言向量契约**（检索侧那个仓库的 Python 必须照它写）见 `docs/CONVENTIONS.md` **§6.8**：
 
 | 项 | 值 |

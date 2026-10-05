@@ -1062,8 +1062,13 @@ git commit -m "docs(m5): record the KB pipeline and the cross-language vector co
   ⇒ **"重复上传 = 重试手势"只对仍 `PENDING` 的行成立**（Task 3 要救的正是那种），
   **对 `FAILED` 行无效** —— 带条件状态迁移会把重发消息 **ack 丢掉**。
   ⇒ **`FAILED` 是"只能看、不能重试"的终态**（无重试端点、重复上传是空操作）。**绕法**：换租户上传同一文件拿新行（仅验收）；
-  **正路**：加"重试"入口或允许 `FAILED` 被重发消息推进。**B 档本次仍未跑成**（用户选择后台执行但未真正启动；
-  反代已杀、admin 已复位到 `.env` 配置）。
+  **正路**：加"重试"入口或允许 `FAILED` 被重发消息推进。
+- **✅（2026-10-05 B 档跑通）**：模型换 `qwen3.7-text-embedding`（探针 `200`、维度 **1024**）后，**换租户（tenant 2）新行**上传同一份
+  813,280 字节 PDF ⇒ `200 / id=3 / PENDING` ⇒ **`t=5s READY（chunkCount=9）`**；Chroma 直查 **count=9**、
+  `VECTORS_FOR_DOC_3=9`、记录 id `3:0..3:8`（`"{docId}:{seq}"` 可反推）、`metadata tenant_id=2`、`seq=0..8`。
+  ⇒ **`上传 ⇒ 解析 ⇒ 嵌入（真上游）⇒ Chroma ⇒ READY` 全链路在真实 compose 上成立**，**B 档缺口清零**。
+  仍待补：① `FAILED` 重试入口；② `KbEmbeddingClient` 的 `api-key` 原生支持（现在靠一次性反代注入密钥）。
+  反代已杀、admin 已复位到 `.env` 配置、无密钥残留。
 
 ---
 
