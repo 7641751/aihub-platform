@@ -1020,6 +1020,26 @@ git commit -m "docs(m5): record the KB pipeline and the cross-language vector co
    被**杀死并截断日志**（Task 5 已实测过一次）。⇒ 拆成 `-pl aihub-admin/aihub-web -am` 与 `-pl aihub-gateway` 两条，
    分别报**每模块**实测数（M4 基线 723 = 68 + 264 + 391，M5 必然增加）。
 
+**（2026-10-05 完成记录 —— Task 8 收口）**
+- **Step 1（文档 + 配置）**：`docker-compose.yml`（真 `chroma` 服务 + `admin-files` 卷 + 三个 KB env +
+  `chroma: service_started`）、`.env.example`、`CONVENTIONS.md` **§6.8**、`README.md`（M5 段落 + A/B 两档 + 9 条边界）、
+  设计文档（§5.2 字段名订正、**§6.4 元数据契约订正**、§7.3、§12）。提交 `2d7984a`。
+- **Step 2（全量）**：`aihub-common` **68/0**、`aihub-web` **308/0**、`aihub-gateway` **391/0** = **767**（M4 基线 723 ⇒ +44），
+  `BUILD SUCCESS`，**`Tomcat started on port` = 7** ✓。
+- **Step 3（真实 compose 全栈验收，A 档）**：`md`（2777 字符）⇒ `200 / id=1` ⇒ 日志 `切出 4 段` ⇒
+  `进入终态 FAILED（stage=embed）`（无可用 embeddings 上游）⇒ 实测 `chunk_count=4` / `kb_chunk` **0 行** /
+  Chroma count **0** / `kb.dlq` **1** 条 / 审计 `KB_DOCUMENT_UPLOAD` + `KB_DOCUMENT_FAILED` / 存储根只剩 1 个原件；
+  **官方判据"中断上传不留脏数据"**：真发 539 字节却声明 5 MB 后断开 ⇒ `EOFException`，**行数不变、盘上不多文件** ✓。
+  原始输出见 **`.superpowers/sdd/m5-acceptance.md`**（git-ignored）。
+- ⚠️ **真发现（运维相关）**：`docker compose up --build` 在本机**构建失败** ——
+  `org.apache.pdfbox:pdfbox:3.0.5` 不在构建容器的 Maven 缓存里，而**构建容器解析不了 DNS**
+  （`repo.maven.apache.org: No address associated with hostname`）。绕法：
+  `docker build --network=host -t aihub-platform-admin -f aihub-admin/aihub-web/Dockerfile .` + `docker compose up -d --no-build admin chroma`
+  （**不改 Dockerfile / compose**）。**任何新增 Maven 依赖的里程碑都会踩这一下** ⇒ 已写进 README。
+- ⚠️ **如实登记的两处缺口**：① **A 档只跑了 md，没跑 pdf**（pdf 走同一路径且有 Task 7 的测试覆盖，
+  但"compose 上传 pdf"**没有证据**）；② **A 档无法在 Chroma 侧做向量清理的对照**（没有上游 ⇒ 向量从未写入），
+  对照改落在 `kb_chunk`（解析确实写过 4 段、终态 0 行）上；向量侧的清理由 `KbEmbedIntegrationTest` 覆盖。
+
 ---
 
 ## 附录 A：跨语言向量契约（**检索侧是另一个仓库的 Python，改它就是破坏性变更**）

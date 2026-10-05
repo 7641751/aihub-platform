@@ -90,10 +90,19 @@
 
 **M5 的真实验收（2026-10-05）分两档，如实写清**（原始输出见 `.superpowers/sdd/m5-acceptance.md`）：
 
-- **A 档：真实 Docker Compose（离线可复现，本里程碑的正式判据）**——起 `chroma` + admin，真上传 `md` 与 `pdf`：
-  解析/切分/分批消息都真实发生（`kb_chunk` 行数、日志可查）；由于**离线环境没有可用的 embeddings 上游**，
-  终态是 **`FAILED` + Chroma 干净 + `kb.dlq` 有消息 + 一条 `KB_DOCUMENT_FAILED` 审计**（这恰好把失败路径与"全清"在真实 compose 上验了）；
-  另有**中断上传不留脏数据**（无行、无文件）与一条**反证对照**（把 `cleanup` 关掉 ⇒ Chroma 留下残留）。
+- **A 档：真实 Docker Compose（离线可复现，本里程碑的正式判据）** —— **已实测**（2026-10-05，`md` 2777 字符）：
+  起真 `chroma` + admin（Flyway 到 **v3**），`POST /api/kb/documents` ⇒ `200 / id=1 / PENDING` ⇒ 日志
+  `解析完成：doc 1 切出 4 段，将发 1 条 kb.embed` ⇒ 无可用上游 ⇒ `KbDocumentCleanup: 文档 1 的向量与分段已清理干净`
+  ⇒ `进入终态 FAILED（stage=embed）` ⇒ `KbMessageRecoverer(:85) → AmqpRejectAndDontRequeueException`。
+  实测：`kb_document = FAILED / chunk_count=4`、`kb_chunk` **0 行**、Chroma `kb_chunks` **count=0**、
+  `aihub.kb.dlq` **1** 条、审计 `KB_DOCUMENT_UPLOAD` + `KB_DOCUMENT_FAILED`、存储根只剩 1 个 sha256 原件；
+  **官方判据"中断上传不留脏数据"**：真发 539 字节却声明 5 MB 后断开 ⇒ `EOFException`，**行数不变、盘上不多文件**。
+  **反证**：解析阶段确实写过 4 段（当日志 + `chunk_count=4`），终态 `kb_chunk` 为 0 —— 若 `cleanup` 是空操作就会停在 4。
+  ⚠️ **A 档没跑 pdf**、也**无法在 Chroma 侧做向量清理的对照**（没有上游 ⇒ 向量从未写入）：两条都**如实登记为缺口**。
+  ⚠️ **`docker compose up --build` 在本机可能构建失败**：M5 引入的 PDFBox 不在构建容器的 Maven 缓存里，
+  而**构建容器解析不了 DNS**（`repo.maven.apache.org: No address associated with hostname`）⇒ 用
+  `docker build --network=host -t aihub-platform-admin -f aihub-admin/aihub-web/Dockerfile .` 再
+  `docker compose up -d --no-build admin chroma`（**不改 Dockerfile / compose**）。**新增 Maven 依赖的里程碑都会踩这一下。**
 - **B 档：`READY` + 从 Chroma 取回，需要**一个真实可用的 OpenAI 兼容 `/v1/embeddings` 上游**。
   本机**没有**这个上游（网关**不转发** `/v1/embeddings`：实测 `POST /v1/embeddings` ⇒ 404），
   因此**不在 compose 上声称验过**；该现象由集成测试 `KbEmbedIntegrationTest` 覆盖 —— **真 Chroma 容器** + 进程内假上游，
