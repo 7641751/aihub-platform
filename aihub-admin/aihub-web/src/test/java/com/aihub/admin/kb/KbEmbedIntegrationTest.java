@@ -94,6 +94,35 @@ class KbEmbedIntegrationTest extends KbIntegrationTestBase {
         assertThat(embeddedCountFor(id)).as("重放后仍然全打满").isEqualTo(CHUNKS);
     }
 
+    /**
+     * {@code FAILED} 必须**可以重试**（实测缺陷：消费端的带条件迁移只认 {@code PENDING/PARSING}，
+     * 于是 {@code FAILED} 行的解析消息被 ack 丢弃 ⇒ 它曾是"只能看、不能重试"的终态）。
+     *
+     * <p>这里的现场等价于"embed 阶段重试耗尽后的行"：行是 {@code FAILED}、带着 {@code error_msg}。
+     * 重放 {@code parse:{id}}（= 重复上传同一份内容时发出的那条消息）之后，流水线必须能从零重跑
+     * 到 {@code READY}，并且把上一次的错误信息清掉。
+     */
+    @Test
+    void aFailedDocumentIsReDrivenByAReplayedParseMessage() throws Exception {
+        FakeEmbeddingUpstream.respondWithDeterministicVectors(8);
+        long id = uploadId(TENANT, "retry-after-failure.md", markdownOf(17_000, "重试"));
+        awaitUntil(Duration.ofSeconds(90), () -> "READY".equals(statusOf(id)), id);
+
+        kbDocumentMapper.update(null, new LambdaUpdateWrapper<KbDocumentEntity>()
+                .eq(KbDocumentEntity::getId, id)
+                .set(KbDocumentEntity::getStatus, "FAILED")
+                .set(KbDocumentEntity::getErrorMsg, "模拟：embed 阶段重试耗尽"));
+        assertThat(statusOf(id)).as("前置：行必须真的处于 FAILED").isEqualTo("FAILED");
+
+        publishParse(id);
+
+        awaitUntil(Duration.ofSeconds(90), () -> "READY".equals(statusOf(id)), id);
+        assertThat(statusOf(id)).as("FAILED 行必须能被重放的解析消息重新驱动到 READY").isEqualTo("READY");
+        assertThat(chunkRowsFor(id)).as("重跑后分段数必须回到满").isEqualTo(CHUNKS);
+        assertThat(kbDocumentMapper.selectById(id).getErrorMsg())
+                .as("重试时上一次的错误信息必须被清掉，否则运维看到的是过期报错").isNull();
+    }
+
     @Test
     void anEmbedBatchForAnAlreadyReadyDocumentIsAckedAndIgnored() throws Exception {
         FakeEmbeddingUpstream.respondWithDeterministicVectors(8);

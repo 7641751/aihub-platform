@@ -86,8 +86,13 @@ public class KbParseService implements KbParseSink {
         // 条件迁移（裁定 #4）：只有 PENDING/PARSING 才推进。affected == 0 ⇒ 抢跑或已终态 ⇒ ack 丢弃。
         int advanced = kbDocumentMapper.update(null, new LambdaUpdateWrapper<KbDocumentEntity>()
                 .eq(KbDocumentEntity::getId, docId)
-                .in(KbDocumentEntity::getStatus, KbStatus.PENDING, KbStatus.PARSING)
-                .set(KbDocumentEntity::getStatus, KbStatus.PARSING));
+                // FAILED **也**在可重入集合里：它曾经是"只能看、不能重试"的终态 ——
+                // 消费端的带条件迁移只认 PENDING/PARSING，于是重放的解析消息被 ack 丢弃，
+                // 而 `FAILED` 恰恰是最需要重试的那一档（上游修好后重传同一份内容即重跑）。
+                .in(KbDocumentEntity::getStatus, KbStatus.PENDING, KbStatus.PARSING, KbStatus.FAILED)
+                .set(KbDocumentEntity::getStatus, KbStatus.PARSING)
+                // 重入时清掉上一次的错误信息：否则行已 READY、运维看到的却还是过期报错。
+                .set(KbDocumentEntity::getErrorMsg, null));
         if (advanced == 0) {
             log.info("解析跳过：doc {} 不在 PENDING/PARSING（别人已推进 / 已 READY/FAILED），ack 丢弃", docId);
             return;

@@ -6,9 +6,14 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import com.sun.net.httpserver.HttpServer;
+
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -94,5 +99,40 @@ class KbEmbeddingClientTest {
                 .as("未配置 base-url ⇒ 调用时抛，并指出缺哪个键")
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("aihub.kb.embedding.base-url");
+    }
+
+    /**
+     * 真实上游（DashScope / OpenAI 等）都要鉴权，而客户端原先**一个鉴权头都不发** ⇒ 接不上任何带密钥的上游。
+     * 契约：配了就发 {@code Authorization: Bearer <key>}；空白等于没配 ⇒ **一个头都不加**
+     * （默认行为必须与加这个特性之前**逐字相同**，否则既有部署会被静默改变）。
+     */
+    @Test
+    void aConfiguredApiKeyIsSentAsABearerTokenAndABlankOneSendsNothing() throws Exception {
+        AtomicReference<String> seen = new AtomicReference<>("UNSET");
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/embeddings", exchange -> {
+            seen.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            byte[] out = "{\"data\":[{\"embedding\":[0.5]}]}".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, out.length);
+            exchange.getResponseBody().write(out);
+            exchange.close();
+        });
+        server.start();
+        try {
+            String base = "http://127.0.0.1:" + server.getAddress().getPort();
+
+            new KbEmbeddingClient(base, "kb-embedding", TIMEOUT_SECONDS, "sk-unit-test-key")
+                    .embed(List.of("x"));
+            assertThat(seen.get()).as("配了 api-key 就必须以 Bearer 形式发出去")
+                    .isEqualTo("Bearer sk-unit-test-key");
+
+            seen.set("UNSET");
+            new KbEmbeddingClient(base, "kb-embedding", TIMEOUT_SECONDS, "   ")
+                    .embed(List.of("x"));
+            assertThat(seen.get()).as("空白密钥等于没配 ⇒ 不发 Authorization 头").isNull();
+        } finally {
+            server.stop(0);
+        }
     }
 }

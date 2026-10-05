@@ -324,7 +324,8 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 **重复上传**不新增行/文件（D5），但**会重新触发一次解析** —— 这是"发布丢了 ⇒ 行停在 `PENDING`"的**现成补救手段**
 （`kb.parse` 的发布失败只计数 + WARN，DLQ 只覆盖**消费端**失败）。
 **配置项**：`aihub.kb.storage.root`、`aihub.kb.chunk.size-chars`/`overlap-chars`、`aihub.kb.embed.batch-size`、
-`aihub.kb.embedding.base-url`/`model`/`timeout-seconds`、`aihub.kb.chroma.base-url`/`collection`/`timeout-seconds`
+`aihub.kb.embedding.base-url`/`model`/`timeout-seconds`/`api-key`（**base-url 不许带尾部 `/v1`**：客户端自己拼 `/v1/embeddings`；
+`api-key` 非空才加 `Authorization: Bearer …`，空值 = 一个头都不加）、`aihub.kb.chroma.base-url`/`collection`/`timeout-seconds`
 （**默认值即生产值**；测试**不许**覆盖它们 —— 覆盖会 fork 出第 8 个 Spring 上下文，见 §8）。
 
 ## 7. 数据库约定

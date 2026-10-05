@@ -1069,6 +1069,13 @@ git commit -m "docs(m5): record the KB pipeline and the cross-language vector co
   ⇒ **`上传 ⇒ 解析 ⇒ 嵌入（真上游）⇒ Chroma ⇒ READY` 全链路在真实 compose 上成立**，**B 档缺口清零**。
   仍待补：① `FAILED` 重试入口；② `KbEmbeddingClient` 的 `api-key` 原生支持（现在靠一次性反代注入密钥）。
   反代已杀、admin 已复位到 `.env` 配置、无密钥残留。
+- **✅（2026-10-05 两处待补项已实现，TDD 先红后绿）**：
+  ① **`FAILED` 可重试**：`KbParseService` 的带条件迁移放宽为 `PENDING|PARSING|FAILED`，并在重入时 `set(error_msg, null)`。
+  **RED 是断言级的**（`aFailedDocumentIsReDrivenByAReplayedParseMessage:119` 超时，打印 `status=FAILED chunks=25 embedded=25 vectors=25`）。
+  ② **`api-key` 原生支持**：`aihub.kb.embedding.api-key`（env `AIHUB_KB_EMBEDDING_API_KEY`），非空才加 `Authorization: Bearer …`；
+  保留 3 参便捷构造 ⇒ 既有调用点与空值行为**逐字不变**。**RED 是编译级的**（4 参构造不存在，已如实登记）。
+  配置面：`docker-compose.yml`（白名单加 `AIHUB_KB_EMBEDDING_API_KEY`）、`.env.example`、`CONVENTIONS.md` §6.8、README 均已更新。
+  **实测**：聚焦两测试类 **10/0**；全量 `aihub-common` **68/0**、`aihub-web` **310/0**（= 308 + 新增 2）、**`Tomcat` = 7**。
 
 ---
 

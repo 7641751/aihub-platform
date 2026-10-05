@@ -100,6 +100,8 @@ services:
       AIHUB_KB_EMBEDDING_BASE_URL: ${AIHUB_KB_EMBEDDING_BASE_URL:-}
       # ⚠️ base-url **不许带尾部 /v1**（客户端会自己拼 `/v1/embeddings`）；模型名必须与上游一致。
       AIHUB_KB_EMBEDDING_MODEL: ${AIHUB_KB_EMBEDDING_MODEL:-kb-embedding}
+      # 上游鉴权（非空则以 `Authorization: Bearer …` 发出；空 = 一个头都不加，与加该特性前逐字相同）。
+      AIHUB_KB_EMBEDDING_API_KEY: ${AIHUB_KB_EMBEDDING_API_KEY:-}
       AIHUB_KB_CHROMA_BASE_URL: ${AIHUB_KB_CHROMA_BASE_URL:-http://chroma:8000}
     volumes:
       - admin-files:/app/data/kb

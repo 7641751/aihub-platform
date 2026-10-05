@@ -153,8 +153,15 @@ Chroma 直查：kb_chunks count=9、VECTORS_FOR_DOC_3=9
 ```
 
 ⇒ **`上传 ⇒ 解析 ⇒ 嵌入（真上游）⇒ 写 Chroma ⇒ READY` 全链路在真实 compose 上成立**（B 档缺口清零）。
-仍待补的两件事（都不影响 A/B 档结论）：① `FAILED` 行的**重试入口**（见上）；② `KbEmbeddingClient` 的 **`api-key` 支持**
-（现在靠一次性反代注入密钥；原生支持后就不用反代了）。
+原先登记的两件事**都已补上**（2026-10-05）：
+**① `FAILED` 行现在可以重试** —— 消费端的带条件迁移放宽为 `PENDING|PARSING|FAILED`，并在重入时清掉 `error_msg`
+（判据：`KbEmbedIntegrationTest#aFailedDocumentIsReDrivenByAReplayedParseMessage` —— 造出 `FAILED` 现场后重放
+`parse:{id}`，必须回到 `READY`；**先看它红过**：`status=FAILED` 卡住不动）。
+⇒ **`FAILED` 文档重传同一份内容即重跑**，"重复上传 = 重试手势"现在对所有非 `READY` 状态都成立。
+**② `KbEmbeddingClient` 原生支持 `api-key`** —— 新增 `aihub.kb.embedding.api-key`（env `AIHUB_KB_EMBEDDING_API_KEY`），
+非空才加 `Authorization: Bearer …`，**空值行为与加该特性之前逐字相同**
+（判据：`KbEmbeddingClientTest#aConfiguredApiKeyIsSentAsABearerTokenAndABlankOneSendsNothing`）。
+⇒ 接真实带鉴权上游**不再需要任何反代**，compose 里填 `AIHUB_KB_EMBEDDING_API_KEY` 即可。
 
 **跨语言向量契约**（检索侧那个仓库的 Python 必须照它写）见 `docs/CONVENTIONS.md` **§6.8**：
 

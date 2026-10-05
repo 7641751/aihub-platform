@@ -10,6 +10,8 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
+import org.springframework.beans.factory.annotation.Autowired;
+
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
@@ -47,14 +49,25 @@ public class KbEmbeddingClient {
     private final String model;
     private final Duration timeout;
     private final HttpClient httpClient;
+    private final String apiKey;
 
+    /** 不带鉴权的便捷构造（等价于 {@code api-key} 为空）：不需要密钥的部署与单测用它。 */
+    public KbEmbeddingClient(String baseUrl, String model, int timeoutSeconds) {
+        this(baseUrl, model, timeoutSeconds, "");
+    }
+
+
+    @Autowired
     public KbEmbeddingClient(@Value("${aihub.kb.embedding.base-url:}") String baseUrl,
                              @Value("${aihub.kb.embedding.model:kb-embedding}") String model,
                              @Value("${aihub.kb.embedding.timeout-seconds:" + DEFAULT_TIMEOUT_SECONDS + "}")
-                             int timeoutSeconds) {
+                             int timeoutSeconds,
+                             @Value("${aihub.kb.embedding.api-key:}") String apiKey) {
         this.baseUrl = baseUrl == null ? "" : baseUrl.trim();
         this.model = model;
         this.timeout = Duration.ofSeconds(timeoutSeconds);
+        // 空白 = 没配（与"这个特性存在之前"逐字相同的行为：一个鉴权头都不加）。
+        this.apiKey = apiKey == null ? "" : apiKey.trim();
         // 与 KbVectorStoreClient 同因：明文 http:// 下 JDK HttpClient 默认走 HTTP/2 的 h2c 升级前奏，
         // 而多数自建/容器化的 OpenAI 兼容上游是 HTTP/1.1-only（h11/uvicorn、nginx 等）
         // ⇒ 钉死 HTTP/1.1，避免"请求发出去了、对方说没收到体"这类隐晦失败。
@@ -86,10 +99,16 @@ public class KbEmbeddingClient {
 
         HttpResponse<String> response;
         try {
-            HttpRequest httpRequest = HttpRequest.newBuilder()
+            HttpRequest.Builder builder = HttpRequest.newBuilder()
                     .uri(URI.create(baseUrl + "/v1/embeddings"))
                     .timeout(timeout)
-                    .header("Content-Type", "application/json")
+                    .header("Content-Type", "application/json");
+            // 真实上游（DashScope / OpenAI 等）要鉴权。**只在配了密钥时才加头** ——
+            // 空值路径必须与加这个特性之前逐字相同（否则既有部署的行为会被静默改变）。
+            if (!apiKey.isEmpty()) {
+                builder.header("Authorization", "Bearer " + apiKey);
+            }
+            HttpRequest httpRequest = builder
                     .POST(HttpRequest.BodyPublishers.ofString(request.toString(), StandardCharsets.UTF_8))
                     .build();
             response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
