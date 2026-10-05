@@ -21,6 +21,10 @@ import java.nio.charset.StandardCharsets;
  * <p><b>本类是"薄适配器"</b>：真正的嵌入流水线在 {@code aihub-service} 的 {@link KbEmbedSink} 实现里。
  * 注意：每个 Spring 上下文都会订阅 {@code kb.embed}，因此**测试断言不要抢这个队列**，要读数据库状态
  * （{@code kb_chunk.embedded_at} / {@code kb_document.status}）—— 见 {@code KbParseIntegrationTest} 的同类说明。
+ *
+ * <p><b>容器工厂是"专用"的</b>（M5 Task 6）：{@code containerFactory = "kbListenerContainerFactory"} ⇒
+ * 走 {@link KbTopologyConfig#kbListenerContainerFactory} —— 重试 3 次耗尽后由 {@link KbMessageRecoverer}
+ * 置 FAILED + 清理 + 审计，再把消息拒绝进 DLQ。**计量链路仍用默认工厂，不受影响**（裁定 #2）。
  */
 @Component
 public class KbEmbedConsumer {
@@ -33,7 +37,7 @@ public class KbEmbedConsumer {
         this.sink = sink;
     }
 
-    @RabbitListener(queues = KbTopology.EMBED_QUEUE)
+    @RabbitListener(queues = KbTopology.EMBED_QUEUE, containerFactory = "kbListenerContainerFactory")
     public void onMessage(Message message) {
         String payload = new String(message.getBody(), StandardCharsets.UTF_8);
         KbEmbedBatch batch;

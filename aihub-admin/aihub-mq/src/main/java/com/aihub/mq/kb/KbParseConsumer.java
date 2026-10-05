@@ -23,6 +23,10 @@ import java.nio.charset.StandardCharsets;
  * （{@code mq} 看不到 {@code dao}/{@code service}）。这样每个 Spring 上下文都会订阅 {@code kb.parse}
  * —— {@code KbPublishIntegrationTest} 那种"从队列收消息"的断言到 Task 4 起会被本消费者抢走，
  * 因此 Task 4+ 的断言一律走**数据库状态**。
+ *
+ * <p><b>容器工厂是"专用"的</b>（M5 Task 6）：{@code containerFactory = "kbListenerContainerFactory"} ⇒
+ * 走 {@link KbTopologyConfig#kbListenerContainerFactory}（挂了失败终态恢复器 {@link KbMessageRecoverer}），
+ * 而不是框架默认工厂 ⇒ **计量链路的死信行为不受影响**（裁定 #2）。
  */
 @Component
 public class KbParseConsumer {
@@ -35,7 +39,7 @@ public class KbParseConsumer {
         this.sink = sink;
     }
 
-    @RabbitListener(queues = KbTopology.PARSE_QUEUE)
+    @RabbitListener(queues = KbTopology.PARSE_QUEUE, containerFactory = "kbListenerContainerFactory")
     public void onMessage(Message message) {
         String payload = new String(message.getBody(), StandardCharsets.UTF_8);
         long docId;

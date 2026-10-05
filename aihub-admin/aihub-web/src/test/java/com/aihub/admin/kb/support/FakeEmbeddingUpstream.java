@@ -37,7 +37,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       （所以测试能独立算出期望值，而不是"看起来像个数组"）；</li>
  *   <li>{@link #neverRespond()} —— 收到请求后**挂住不答**（客户端必须靠**自己的超时**逃出来，
  *       这就是"超时有界"的判别形式）；</li>
- *   <li>{@link #failOnCall(int)} —— 第 {@code n} 次调用回 500（Task 6 用来注入"第 N 批才失败"）。</li>
+ *   <li>{@link #failOnCall(int)} —— **只**第 {@code n} 次调用回 500（用于单测里"一次失败"的形状）；</li>
+ *   <li>{@link #failFromBatch(int)} —— **从第 {@code n} 次调用起一直**回 500（Task 6 用）。
+ *       ⚠️ 它与 {@code failOnCall} 的区别是本质的：{@code failOnCall} 只失败一次，**容器一重试就会成功**，
+ *       于是永远到不了失败终态（D7 的 {@code MessageRecoverer} 根本不会被调用）；本任务要的是
+ *       "重试 3 次全失败 ⇒ 恢复器接管 ⇒ 置 FAILED + 清理 + 进 DLQ"，所以需要"起了就一直失败"。</li>
  * </ul>
  *
  * <p>请求体只读 {@code input} 数组的**长度**（要生成几条向量），不关心模型名 ——
@@ -62,8 +66,11 @@ public final class FakeEmbeddingUpstream {
     /** 是否挂住不答（客户端只能靠自己的超时逃出来）。 */
     private static volatile boolean neverRespond;
 
-    /** 第 n 次调用回 500（0 = 不注入失败）。 */
+    /** 第 n 次调用回 500（0 = 不注入失败）。**只失败那一次**，重试会成功。 */
     private static volatile int failOnCall;
+
+    /** 从第 n 次调用**起一直**回 500（0 = 不注入失败）。与 {@link #failOnCall} 互斥。 */
+    private static volatile int failFromBatch;
 
     /** 已收到的调用次数（用例可断言"确实打到了上游"）。 */
     private static final AtomicInteger CALLS = new AtomicInteger();
@@ -82,6 +89,7 @@ public final class FakeEmbeddingUpstream {
         dimension = DEFAULT_DIMENSION;
         neverRespond = false;
         failOnCall = 0;
+        failFromBatch = 0;
         CALLS.set(0);
     }
 
@@ -89,6 +97,7 @@ public final class FakeEmbeddingUpstream {
         dimension = dim;
         neverRespond = false;
         failOnCall = 0;
+        failFromBatch = 0;
     }
 
     public static void neverRespond() {
@@ -97,6 +106,19 @@ public final class FakeEmbeddingUpstream {
 
     public static void failOnCall(int n) {
         failOnCall = n;
+        failFromBatch = 0;
+        neverRespond = false;
+    }
+
+    /**
+     * 从第 {@code n} 次调用起**一直**失败（{@code n <= 0} = 不注入）。
+     *
+     * <p>与 {@link #failOnCall(int)} 互斥（后者只失败一次）。Task 6 的失败终态用例必须用它 ——
+     * 用 {@code failOnCall} 的话，容器重试第二次就成功，{@code MessageRecoverer} 永远不被调用。
+     */
+    public static void failFromBatch(int n) {
+        failFromBatch = n;
+        failOnCall = 0;
         neverRespond = false;
     }
 
@@ -140,6 +162,11 @@ public final class FakeEmbeddingUpstream {
             }
             if (failOnCall > 0 && call == failOnCall) {
                 write(exchange, 500, "{\"error\":\"injected failure on call " + call + "\"}");
+                return;
+            }
+            if (failFromBatch > 0 && call >= failFromBatch) {
+                // 从这一批起一直 500：重试 3 次全失败 ⇒ MessageRecoverer 接管（Task 6 的失败终态路径）。
+                write(exchange, 500, "{\"error\":\"injected failure from call " + call + "\"}");
                 return;
             }
             JsonNode request = MAPPER.readTree(requestBody.length == 0 ? "{}" : new String(requestBody, StandardCharsets.UTF_8));

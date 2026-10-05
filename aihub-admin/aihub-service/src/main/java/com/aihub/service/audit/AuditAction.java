@@ -56,6 +56,17 @@ public final class AuditAction {
     //      审计**绝不记**原件内容、chunk 文本、向量，也绝不记任何密钥。
     public static final String KB_DOCUMENT_UPLOAD = "KB_DOCUMENT_UPLOAD";
 
+    /**
+     * 文档进入**失败终态**（M5 Task 6，D7/D13）。由**系统**写（{@code actor_type=SYSTEM}），来源只有两处：
+     * <ul>
+     *   <li>{@code KbMessageRecoverer}：消费重试耗尽、消息被路由到 DLQ **之前**（D7："进 DLQ"与"置 FAILED"必须同一处）；</li>
+     *   <li>{@code KbParseService.markNoText}：切出 0 段（空 / 全空白文档、无文本层 PDF，D14）——
+     *       这条路**不是异常**，因此它自己写这条审计（裁定 #6②）。</li>
+     * </ul>
+     * detail 只放**非敏感**的失败原因摘要（异常类名 + 截断后的消息），**绝不记**原件内容 / chunk 文本 / 向量。
+     */
+    public static final String KB_DOCUMENT_FAILED = "KB_DOCUMENT_FAILED";
+
     private AuditAction() {
     }
 }

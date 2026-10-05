@@ -5,9 +5,13 @@ import com.aihub.common.exception.BizException;
 import com.aihub.common.kb.KbStatus;
 import com.aihub.dao.entity.KbDocumentEntity;
 import com.aihub.dao.mapper.KbDocumentMapper;
+import com.aihub.mq.kb.KbMessageRecoverer;
 import com.aihub.service.audit.AuditAction;
 import com.aihub.service.audit.AuditService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -38,10 +42,21 @@ import java.util.Set;
  * 重复上传**也写审计**（"有人又传了一次同一个文件"是有运维价值的事实）。
  */
 @Service
-public class KbDocumentService {
+public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(KbDocumentService.class);
 
     /** 审计的 {@code target_type}；测试按它 + {@code target_id} 定向查（{@code audit_log} 是共享表）。 */
     public static final String AUDIT_TARGET_TYPE = "KB_DOCUMENT";
+
+    /** 终态失败是**系统**产生的（D13）：{@code actor_type=SYSTEM}，actor id 标明是 kb 流水线。 */
+    private static final AuditService.Actor SYSTEM_ACTOR = new AuditService.Actor("SYSTEM", "kb-pipeline");
+
+    /**
+     * {@code error_msg} 列是 {@code VARCHAR(1024)}；本类派生的原因**有界**（远小于列宽，
+     * 留足余量给"清理未完成"等后缀），免得一条超长异常把列写爆（严格模式下是硬失败）。
+     */
+    private static final int MAX_ERROR_MSG_CHARS = 512;
 
     /** 资源列表的缺省/上界（Task 2 的接口契约）。 */
     public static final int DEFAULT_PAGE_SIZE = 20;
@@ -54,13 +69,16 @@ public class KbDocumentService {
     private final KbFileStore fileStore;
     private final AuditService auditService;
     private final KbDocumentPublisher publisher;
+    private final KbDocumentCleanup cleanup;
 
     public KbDocumentService(KbDocumentMapper kbDocumentMapper, KbFileStore fileStore,
-                             AuditService auditService, KbDocumentPublisher publisher) {
+                             AuditService auditService, KbDocumentPublisher publisher,
+                             KbDocumentCleanup cleanup) {
         this.kbDocumentMapper = kbDocumentMapper;
         this.fileStore = fileStore;
         this.auditService = auditService;
         this.publisher = publisher;
+        this.cleanup = cleanup;
     }
 
     /**
@@ -175,6 +193,112 @@ public class KbDocumentService {
         detail.put("duplicate", duplicate);
         auditService.record(tenantId, actor, AuditAction.KB_DOCUMENT_UPLOAD, AUDIT_TARGET_TYPE,
                 String.valueOf(row.getId()), detail);
+    }
+
+    // ---------------------------------------------------------------- 失败终态（M5 Task 6，D7/D8/D13）
+
+    /**
+     * 消息重试耗尽时的终态处置（D7）：**清理 → 置 FAILED → 审计**，且这一切发生在
+     * {@code KbMessageRecoverer} 把消息拒绝进 DLQ **之前**（恢复器调完本方法才抛
+     * {@code AmqpRejectAndDontRequeueException}）⇒ "死信"与"失败终态"永远同时发生。
+     *
+     * <p>{@code @Transactional}：让"删 {@code kb_chunk}（清理的第二步）+ 置 FAILED + 审计"落在**一个**事务里。
+     * 清理的第一、二步之间隔一次 Chroma 网络调用，把整个清理都放进事务会占住连接 —— 但**失败路径**不以
+     * 吞吐为目标，这里选"原子"而不是"连接占用"（与 {@code KbEmbedService} 的取舍相反，理由不同：
+     * 那边是**热路径**、每条消息都会走）。
+     *
+     * @param docId {@code kb_document.id}
+     * @param stage 失败阶段（{@code "parse"} / {@code "embed"}），进 {@code error_msg} 便于定位是哪一段
+     * @param cause 重试耗尽时的最后一个异常（据此派生失败原因）
+     */
+    @Override
+    @Transactional
+    public void onTerminalFailure(long docId, String stage, Throwable cause) {
+        KbDocumentCleanup.Result result = cleanup.cleanup(docId);
+        String reason = buildFailureReason(stage, cause, result);
+        boolean marked = markFailed(docId, reason);
+        if (marked) {
+            log.warn("文档 {} 进入终态 FAILED（stage={}，清理{}）：{}",
+                    docId, stage, result.clean() ? "干净" : "未完成", reason);
+        } else {
+            log.info("文档 {} 无需再置 FAILED（已是终态 / 行不存在），ack 丢弃", docId);
+        }
+    }
+
+    /**
+     * 把文档条件迁移到 {@code FAILED} 并写 {@code error_msg}；**命中一行才写** {@code KB_DOCUMENT_FAILED} 审计。
+     *
+     * <p>条件 {@code status IN (PENDING, PARSING, EMBEDDING)}：只有**非终态**才能转 FAILED ——
+     * 已经是 {@code READY}/{@code FAILED} 的行既不改也不重复记账（幂等、可重入；也避免一条迟到的
+     * 死信消息把 {@code READY} 的文档"救死"）。与 D14 的 0 段出口共用本方法（裁定 #6②）。
+     *
+     * @return 是否**真的**迁移了（{@code true} = 命中一行并写了审计）
+     */
+    @Transactional
+    public boolean markFailed(long docId, String reason) {
+        String safeReason = reason == null ? "" : reason;
+        KbDocumentEntity doc = kbDocumentMapper.selectById(docId);
+        if (doc == null) {
+            // 行不存在（可能已被清理）：无处可标记，如实返回 false 而不是抛 —— 恢复器仍会拒绝进 DLQ。
+            return false;
+        }
+        int updated = kbDocumentMapper.update(null, new LambdaUpdateWrapper<KbDocumentEntity>()
+                .eq(KbDocumentEntity::getId, docId)
+                .in(KbDocumentEntity::getStatus, KbStatus.PENDING, KbStatus.PARSING, KbStatus.EMBEDDING)
+                .set(KbDocumentEntity::getStatus, KbStatus.FAILED)
+                .set(KbDocumentEntity::getErrorMsg, safeReason));
+        if (updated == 0) {
+            return false;
+        }
+        // 审计与状态迁移在同一事务（AuditService 的纪律）⇒ "改了但没审计"不可能。
+        // detail 只放非敏感摘要（失败原因）；审计**绝不记**原件内容 / chunk 文本 / 向量。
+        auditService.record(doc.getTenantId(), SYSTEM_ACTOR, AuditAction.KB_DOCUMENT_FAILED,
+                AUDIT_TARGET_TYPE, String.valueOf(docId), Map.of("reason", safeReason));
+        return true;
+    }
+
+    /** 有界地派生失败原因：能看出**哪一段**失败（stage）+ 异常类名 + 摘要；清理未完成时如实追加。 */
+    private static String buildFailureReason(String stage, Throwable cause, KbDocumentCleanup.Result cleanup) {
+        StringBuilder reason = new StringBuilder();
+        reason.append(stage).append(" 阶段失败：").append(summarize(cause));
+        if (cleanup != null && !cleanup.clean()) {
+            reason.append("；清理未完成：").append(cleanup.detail());
+        }
+        return truncate(reason.toString(), MAX_ERROR_MSG_CHARS);
+    }
+
+    /**
+     * 异常摘要：沿 {@code cause} 链（有界深度）拼接"类名 + 消息"。
+     *
+     * <p><b>为什么要走整条链而不是只看最外层</b>：监听容器抛出的可能是包装异常
+     * （{@code ListenerExecutionFailedException}），真正的根因（如
+     * {@code embeddings 上游返回 500}）在更深的一层；只看最外层会让 {@code error_msg} 失去诊断价值。
+     */
+    private static String summarize(Throwable cause) {
+        if (cause == null) {
+            return "<无异常>";
+        }
+        StringBuilder text = new StringBuilder();
+        Throwable current = cause;
+        int depth = 0;
+        while (current != null && depth < 6) {
+            if (text.length() > 0) {
+                text.append(" ← ");
+            }
+            text.append(current.getClass().getSimpleName());
+            String message = current.getMessage();
+            if (message != null && !message.isBlank()) {
+                text.append(": ").append(message);
+            }
+            Throwable next = current.getCause();
+            current = (next == current) ? null : next;
+            depth++;
+        }
+        return text.toString();
+    }
+
+    private static String truncate(String text, int maxChars) {
+        return text.length() <= maxChars ? text : text.substring(0, maxChars) + "…";
     }
 
     /**

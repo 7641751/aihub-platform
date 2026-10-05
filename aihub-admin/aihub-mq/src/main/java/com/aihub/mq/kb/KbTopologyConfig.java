@@ -5,6 +5,10 @@ import org.springframework.amqp.core.BindingBuilder;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.amqp.core.TopicExchange;
+import org.springframework.amqp.rabbit.config.RetryInterceptorBuilder;
+import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
+import org.springframework.boot.autoconfigure.amqp.RabbitProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -68,5 +72,50 @@ public class KbTopologyConfig {
     public Binding kbDeadLetterBinding(Queue kbDeadLetterQueue, TopicExchange kbDeadLetterExchange) {
         return BindingBuilder.bind(kbDeadLetterQueue).to(kbDeadLetterExchange)
                 .with(KbTopology.DEAD_LETTER_ROUTING_KEY);
+    }
+
+    /**
+     * 失败终态恢复器（M5 Task 6，D7）。它的处置动作（cleanup + 置 FAILED + 审计）由 service 侧的
+     * {@link com.aihub.mq.kb.KbMessageRecoverer.TerminalFailureHandler} 实现（{@code KbDocumentService}）
+     * 提供 —— 本类只按**接口**注入，因此 {@code aihub-mq} 不必（也不能）看到 {@code aihub-service}。
+     */
+    @Bean
+    public KbMessageRecoverer kbMessageRecoverer(KbMessageRecoverer.TerminalFailureHandler handler) {
+        return new KbMessageRecoverer(handler);
+    }
+
+    /**
+     * kb 流水线**专用**的监听容器工厂（M5 Task 6）—— 只有 {@code KbParseConsumer} / {@code KbEmbedConsumer}
+     * 走它，计量链路（{@code MeteringConsumer}）仍用框架默认工厂、行为**一点不改**。
+     *
+     * <p><b>为什么必须"专用"而不是改默认工厂</b>（裁定 #2）：本仓的
+     * {@code spring.rabbitmq.listener.simple.retry.*} 与 {@code default-requeue-rejected} 是**全局**的；
+     * 把自定义 {@link KbMessageRecoverer} 设到默认工厂上，会**一起改掉计量链路的死信行为**
+     * （它有自己的 DLQ 用例）。
+     *
+     * <p><b>四个重试数从注入的 {@link RabbitProperties} 派生</b>（max-attempts / initial-interval /
+     * multiplier / max-interval）—— **不把 yml 里的数抄成字面量**：抄死之后 yml 改了这里不会跟着改，
+     * "重试策略只有一份真相源"就没了。恢复器只在重试**耗尽后**被调用（见 {@link KbMessageRecoverer}）。
+     */
+    @Bean
+    public SimpleRabbitListenerContainerFactory kbListenerContainerFactory(
+            ConnectionFactory connectionFactory,
+            RabbitProperties rabbitProperties,
+            KbMessageRecoverer kbMessageRecoverer) {
+        RabbitProperties.SimpleContainer simple = rabbitProperties.getListener().getSimple();
+        RabbitProperties.ListenerRetry retry = simple.getRetry();
+
+        SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
+        factory.setConnectionFactory(connectionFactory);
+        // 与全局同值（取自 properties，不是字面量）：非 AmqpRejectAndDontRequeue 的异常也不 requeue。
+        factory.setDefaultRequeueRejected(simple.getDefaultRequeueRejected());
+        // 只要这一条差别：恢复器换成"先处置失败终态，再拒绝进 DLQ"的那个。其余重试参数与全局一致。
+        factory.setAdviceChain(RetryInterceptorBuilder.stateless()
+                .maxAttempts(retry.getMaxAttempts())
+                .backOffOptions(retry.getInitialInterval().toMillis(), retry.getMultiplier(),
+                        retry.getMaxInterval().toMillis())
+                .recoverer(kbMessageRecoverer)
+                .build());
+        return factory;
     }
 }

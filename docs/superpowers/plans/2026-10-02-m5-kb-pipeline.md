@@ -903,6 +903,22 @@ git commit -m "feat(kb): roll back written chunks on terminal failure and route 
 **验收判据：** 失败终态时 **Chroma 干净 + `kb_chunk` 干净 + 消息在 DLQ + 一条 `KB_DOCUMENT_FAILED` 审计**（四处**同时**断言，不许只断言其一）；0 段 ⇒ `FAILED("无可提取文本")`；`cleanup` 幂等；清理失败**如实登记**。
 **RED 证据：** ① 删 `cleanup` ⇒ Chroma 残留 ⇒ 核心用例红；② 把置 `FAILED` 从 `MessageRecoverer` 挪进 `catch` ⇒ "重试期间状态自相矛盾"（第 2 次重试成功后状态已是 FAILED）⇒ 用例红；③ 把 `cleanup` 顺序改成"先删 `kb_chunk` 再删 Chroma"⇒ 清理失败用例红（坐标丢了、残留无法定位）。
 
+**（2026-10-05 控制器复核与收尾 —— 子代理写完实现后被中止，控制器接手跑验收）**
+- 子代理已完成实现（10 文件、`test-compile` **BUILD SUCCESS**、`STATUS.txt` 规范）后**被中止**（`code=10003`），只差"跑测试 → 回归 → 变异 → 提交"；控制器按它的 `STATUS.txt` 接手。
+- **Docker 又一次停了**（跨两天），而且第一次"启动成功"是**假象**（端口在听、API 不答）⇒ 头两次运行**全部红在 `Could not find a valid Docker environment`**（不是代码问题）。
+  受控重启（`Stop-Process` + 重新 `Start-Process`）后 **20 秒内就绪**。**教训**：Docker 的可用性必须**在跑测试的同一条命令里**验证（见 `CONVENTIONS.md` §8）。
+- **⚠️ 测试的前置条件写错了一处（实现是对的，别改实现）**：`cleanupIsIdempotentAndReportsIncompleteCleanupHonestly` 拿一个
+  **已经 `READY`** 的行去调 `onTerminalFailure` ⇒ 被 `markFailed` 的**故意守卫**（只允许 `PENDING/PARSING/EMBEDDING → FAILED`，
+  免得一条**迟到**的死信消息把已 READY 的文档"救死"）**正确地**拒绝 ⇒ 红在 `expected FAILED but was READY`。
+  控制器改为**先把行推回 `EMBEDDING`** 再调，并在用例里写明理由。
+- **验收**：`KbFailureIntegrationTest` **3/0**；全量 `aihub-common` **68/0**、`aihub-web` **306/0**、**`Tomcat started on port` = 7**、`BUILD SUCCESS`。
+- **变异体 3 条**（干净纪律 + 三重验证，红点原文见 `.m5t6-logs/M{1,2,3}.log`）：**M1** 清理不删 Chroma ⇒ `:116 expected 0 but was 20`（★ 全清）；
+  **M2** 恢复器改成"正常返回" ⇒ 红在 `:123` 的等待超时（诊断行 `status=FAILED chunks=0 vectors=0` ⇒ 失败与清理都对了、**只是消息没进 DLQ**，即"必须抛出"那条机制）；
+  **M3** 清理未完成仍删坐标 ⇒ `:189 expected 25L but was 0L`（D8）。还原后全仓 `MUTANT` 残留 **0**、`clean` 回绿 **3/0**。
+- ⚠️ **工作区里有一处不属于任何任务、且是破坏性的改动**（控制器**未动、未提交**，已上报用户）：
+  `aihub-gateway/src/main/java/com/aihub/gateway/relay/ModelsController.java` **删掉了 `@GetMapping("/v1/models")` 整个方法**（12 行）
+  —— 那是一个**生产端点**，不是格式化。⇒ 本轮所有 commit 一律用**显式路径**以排除它。
+
 ---
 
 ## Task 7: PDF 支持（PDFBox）

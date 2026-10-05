@@ -55,6 +55,7 @@ public class KbParseService implements KbParseSink {
     private final KbFileStore fileStore;
     private final KbTextExtractor textExtractor;
     private final KbDocumentPublisher publisher;
+    private final KbDocumentService kbDocumentService;
     private final int sizeChars;
     private final int overlapChars;
     private final int batchSize;
@@ -64,6 +65,7 @@ public class KbParseService implements KbParseSink {
                           KbFileStore fileStore,
                           KbTextExtractor textExtractor,
                           KbDocumentPublisher publisher,
+                          KbDocumentService kbDocumentService,
                           @Value("${aihub.kb.chunk.size-chars:800}") int sizeChars,
                           @Value("${aihub.kb.chunk.overlap-chars:100}") int overlapChars,
                           @Value("${aihub.kb.embed.batch-size:10}") int batchSize) {
@@ -72,6 +74,7 @@ public class KbParseService implements KbParseSink {
         this.fileStore = fileStore;
         this.textExtractor = textExtractor;
         this.publisher = publisher;
+        this.kbDocumentService = kbDocumentService;
         this.sizeChars = sizeChars;
         this.overlapChars = overlapChars;
         this.batchSize = batchSize;
@@ -135,14 +138,21 @@ public class KbParseService implements KbParseSink {
                 docId, chunkCount, (chunkCount + batchSize - 1) / batchSize, batchSize);
     }
 
-    /** D14：0 段 ⇒ 终态失败。只用一次条件更新（此刻状态必为 PARSING），不写审计（Task 6 统一补）。 */
+    /**
+     * D14：0 段 ⇒ 终态失败（{@link #NO_TEXT_REASON}）。
+     *
+     * <p><b>这条路不是异常</b>（它只是"切出来 0 段"），所以它不会经过 {@code MessageRecoverer} ⇒
+     * 它必须**自己**把 {@code KB_DOCUMENT_FAILED} 审计写出来（裁定 #6②）。为避免两处各写一份审计逻辑，
+     * 委托到 {@link KbDocumentService#markFailed}（同一路径也保证"只在条件更新命中了行时写"、
+     * 且 {@code error_msg} 的写法与失败终态一致）。本方法在 {@link #parse} 的事务里被调用 ⇒ 更新与审计同事务。
+     */
     private void markNoText(long docId) {
-        kbDocumentMapper.update(null, new LambdaUpdateWrapper<KbDocumentEntity>()
-                .eq(KbDocumentEntity::getId, docId)
-                .eq(KbDocumentEntity::getStatus, KbStatus.PARSING)
-                .set(KbDocumentEntity::getStatus, KbStatus.FAILED)
-                .set(KbDocumentEntity::getErrorMsg, NO_TEXT_REASON));
-        log.warn("解析无文本可切：doc {} 置 FAILED(\"{}\")（D14，不做 OCR）", docId, NO_TEXT_REASON);
+        boolean marked = kbDocumentService.markFailed(docId, NO_TEXT_REASON);
+        if (marked) {
+            log.warn("解析无文本可切：doc {} 置 FAILED(\"{}\")（D14，不做 OCR）", docId, NO_TEXT_REASON);
+        } else {
+            log.info("解析无文本可切：doc {} 无需再置 FAILED（已是终态 / 行不存在），ack 丢弃", docId);
+        }
     }
 
     /** {@code doc.md -> md}；无扩展名 ⇒ 空串（交给 {@link KbTextExtractor} 快速失败）。 */
