@@ -397,6 +397,18 @@ MQ 计量事件 ──▶ admin consumer
 **B 档**（上传 ⇒ `READY` 且从 Chroma 取回）需要**一个真实可用的 `/v1/embeddings` 上游** —— 本机没有，
 因此**不在 compose 上声称验过**，该现象由 `KbEmbedIntegrationTest`（真 Chroma 容器 + 进程内假上游）覆盖。
 
+**（2026-10-06 实现状态）M6 已完成**（`docs/superpowers/plans/2026-10-05-m6-load-and-hardening.md`，T1–T7）：
+- **压测**（本机桩上游：固定 120ms 首字 / 64 token）：非流式 50 VU ⇒ **397.5 QPS / P95 129.6ms / P99 133.3ms / 失败 0%**；
+  流式 20 VU ⇒ 41.8 QPS、**TTFT 127.4ms**（TTFT ≪ 整条流 478ms ⇒ **流未被缓冲**，即本文件 §8.1 那条"流式转发"的机器证据）。
+- **限流开/关**（同负载只切策略）：关 ⇒ `rate_limited=0`；开（`qps=50/burst=100`）⇒ 拒绝 759,036、
+  **通过 53.3/s 与配置吻合**；429 形状（OpenAI 形状 + `Retry-After`/`RateLimit-*`，**无 `RateLimit-Reset`**）与 §4 口径逐字一致。
+- **故障注入**：**RabbitMQ 挂 = 业务无感 + 计量零丢失**（恢复后精确回补 370 条，spool 补偿生效）；
+  **Redis 挂 = 不误拒（无 401）但吞吐塌 ~100 倍**（每请求 ~10s）—— 后者**只登记现象、根因未查**，
+  已写进 `README.md` 的「M6 新增已知边界」，是后续打磨的首要候选。
+- **部署硬化**：`restart: unless-stopped` + 健康检查（admin/gateway 实测 `(healthy)`）+ `deploy.resources.limits`
+  + 必填变量校验（缺失 ⇒ 拒绝启动并**点名变量**）。
+  完整数据、逐字证据与探针教训：`.superpowers/sdd/m6-load-report.md`（git-ignored）。
+
 每个里程碑完成后打 git tag，并写一篇短技术笔记，作为面试话术底稿。
 
 **实施计划的粒度说明**：本设计覆盖 7 个里程碑，规模超出单份实施计划的范围。实施计划**按里程碑分别产出**，先做 M0（地基），M0 验收通过后再为 M1 写计划，依此类推。这样每份计划都可在一次迭代内执行完毕并验收。
