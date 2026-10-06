@@ -642,3 +642,23 @@ M4 的控制台是**平台运营台**，**不是**租户自助台。依据（都
 **已评估并否决的方案**：MyBatis-Plus 的 `TenantLineInnerInterceptor` / `TenantLineHandler`（全局租户拦截器）。**否决理由（可复核）**：控制面**不是**唯一的数据访问方 —— `ApiKeyService.resolve` 由 gateway 经内部 HTTP 调用（**无租户上下文**）、`MeteringConsumer` 在 MQ 消费者线程里、`@Scheduled` 的分区维护与对账任务**必须跨租户**；再加上要维护忽略表清单（`tenant` / `channel` / `model_route` / `config_version` / `audit_log`）与 `ThreadLocal` 泄漏面，收益远小于风险。**要做租户隔离时，在控制器/服务层显式带 `tenantId`，不要靠拦截器。**
 
 **实现现状（诚实登记，2026-09-30）**：Task 9 的 `GET /api/api-keys` 按**令牌的 `tenantId`** 过滤（= R3.2 的缺省语义），`POST /api/api-keys` 的 `tenantId` 来自**请求体**（= R2，合法）。⇒ 因此"**读按租户、写不限租户**"是**有意的不对称**，不是遗漏。Task 9 的集成测试类注释里"令牌租户与请求体租户必须一致才看得到"就是这条规则的副作用。
+
+### R3.1 的时间范围参数契约（2026-10-06 实测补记）
+
+R3.1 那三个运营查询（`/api/logs`、`/api/audit`、`/api/billing/daily`）的 `from` / `to` **必须是 ISO-8601 时刻**
+（**带时区**，推荐 `Z`）——**不接受**日期串，也**不接受** epoch 毫秒。此前这条只存在于代码与前端注释里，
+第三方接 `/api/logs` **必踩**；现按实测原文成文：
+
+| 传入 | 实测结果 |
+|---|---|
+| `from=2026-10-06&to=2026-10-07` | **400** `{"code":"INVALID_PARAM","message":"from 不是合法的 ISO-8601 时刻","data":null}` |
+| `from=1791244800000&to=1791331200000`（epoch 毫秒）| **400** 同上 |
+| `from=2026-10-06T00:00:00Z&to=2026-10-07T00:00:00Z` | **200**（实测 `{"total":55400,"page":0,…}`）|
+
+⚠️ **同一个 `INVALID_PARAM` 有两个因**：缺 `tenantId` 是"防无界扫描"（R3.1），格式不对是这条 —— **看 `message` 才能区分**。
+**前端一侧是被正确处理了的**（`console.js` 用 `utcInstant()` 把 `<input type="datetime-local">` 的值转成 UTC 瞬时，
+缺省"最近 24 小时"）⇒ 第三方接入**照它写**，别自己拍格式。
+
+⚠️ **配套工装提醒**：PS 5.1 的 `Invoke-RestMethod`/`Invoke-WebRequest` 在 4xx 时 `ErrorDetails` **常为空**，
+必须用 `$_.Exception.Response.GetResponseStream()` + `StreamReader` 才读得到 `INVALID_PARAM` 的原文
+（否则只会看到"400"而查不出因）。本次实测的完整原文与逐条结果见 `.superpowers/sdd/console-integration.md`（git-ignored）。
