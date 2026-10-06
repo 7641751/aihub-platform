@@ -103,43 +103,34 @@
   `进入终态 FAILED（stage=embed）`；实测 `GET /api/kb/documents?tenantId=1` 返回
   `{id:2, filename:"12.4-power-series.pdf", sizeBytes:813280, status:"FAILED", chunkCount:9}`（与 `md` 的
   `{id:1, sizeBytes:2777, chunkCount:4}` 并列，`total:2`）。
-  ⚠️ **A 档仍无法在 Chroma 侧做向量清理的对照**（没有上游 ⇒ 向量从未写入）：这条**如实登记为缺口**，
-  Chroma 侧的"写进去 → 失败 → 清理掉"由 `KbEmbedIntegrationTest`（真 Chroma 容器）覆盖。
+  ⚠️ **A 档（当轮无上游）做不了 Chroma 侧的向量清理对照** —— 那是**当轮**的局限（那时向量从未写入）。
+  上游现已接上（见 `## B 档已验`），但"**写进去 → 失败 → 清理掉**"这条**仍未在 compose 上单独做过对照**：
+  目前仍由 `KbEmbedIntegrationTest`（真 Chroma 容器 + 假上游）覆盖 —— **如实登记为仍未补的缺口**。
   ⚠️ **`docker compose up --build` 在本机可能构建失败**：M5 引入的 PDFBox 不在构建容器的 Maven 缓存里，
   而**构建容器解析不了 DNS**（`repo.maven.apache.org: No address associated with hostname`）⇒ 用
   `docker build --network=host -t aihub-platform-admin -f aihub-admin/aihub-web/Dockerfile .` 再
   `docker compose up -d --no-build admin chroma`（**不改 Dockerfile / compose**）。**新增 Maven 依赖的里程碑都会踩这一下。**
-- **B 档：`READY` + 从 Chroma 取回，需要**一个真实可用的 OpenAI 兼容 `/v1/embeddings` 上游**。
-  本机**没有**这个上游（网关**不转发** `/v1/embeddings`：实测 `POST /v1/embeddings` ⇒ 404），
-  因此**不在 compose 上声称验过**；该现象由集成测试 `KbEmbedIntegrationTest` 覆盖 —— **真 Chroma 容器** + 进程内假上游，
-  断言"直接查 Chroma：25 条向量、`seq` 可从 id 反推、metadata 的 `tenant_id` 正确"。要跑 B 档，把
-  `AIHUB_KB_EMBEDDING_BASE_URL` 指向你自己的上游即可（代码一行不改）。
-  ⚠️ **两个真陷阱**（2026-10-05 由代码实测得到）：
-  **① base-url 里不要带 `/v1`** —— 客户端是 `URI.create(baseUrl + "/v1/embeddings")`，
+- **B 档：`READY` + 从 Chroma 取回 —— ✅ 已验（2026-10-05 首次、2026-10-06 复验）**，见下方专节 `## B 档已验`。
+  ⚠️ 离线（**没有**可用上游）时验到的是**失败路径**与"全清"，**那不再代表现状**；接真上游只改配置、代码一行不改。
+  ⚠️ **一个仍然成立的陷阱**：**base-url 里不要带 `/v1`** —— 客户端是 `URI.create(baseUrl + "/v1/embeddings")`，
   所以官方那种 `https://dashscope.aliyuncs.com/compatible-mode/v1` 要写成
-  `https://dashscope.aliyuncs.com/compatible-mode`（带 `/v1` 会 404）；模型名走
-  `AIHUB_KB_EMBEDDING_MODEL`（默认 `kb-embedding` 只是占位；真实上游必须给对，如 `text-embedding-v3`）。
-  **② `KbEmbeddingClient` 目前不发 `Authorization` 头**（只有 `Content-Type`，也没有 api-key 配置项）⇒
-  **需要密钥的真实上游（DashScope 之类）目前接不上**（会 401）。这是 M5 的**已知缺口**：要接真上游，
-  得加 `aihub.kb.embedding.api-key`（非空时加 `Authorization: Bearer …`）、把它加进 compose 的 env 白名单，
-  并补测试；在此之前，B 档要么走"本机假上游"（集成测试那条路），要么在验收时用一次性反代注入密钥。
+  `https://dashscope.aliyuncs.com/compatible-mode`（带 `/v1` 会 404）；模型名走 `AIHUB_KB_EMBEDDING_MODEL`，
+  **必须与上游一致**（实测可用 `qwen3.7-text-embedding`，维度 **1024**；默认 `kb-embedding` 只是占位）。
+  **鉴权已原生支持**：`aihub.kb.embedding.api-key`（env `AIHUB_KB_EMBEDDING_API_KEY`）—— 非空才加
+  `Authorization: Bearer …`，空值行为与加该特性之前**逐字相同** ⇒ 接 DashScope 这类带鉴权上游**不需要任何反代**。
 
-  **B 档实测受阻（2026-10-05，如实登记）**：用一次性的本机反代（JDK `HttpServer` 单文件，密钥只经环境变量、
-  **不落盘**）接阿里云 DashScope 的 `https://dashscope.aliyuncs.com/compatible-mode`，上游返回
-  **`400`（而不是 `401`）** ⇒ **鉴权通过**、base-url 拼法正确；但响应体是
+  **（历史，保留以示来路）B 档第一次尝试受阻于上游配额**：用一次性本机反代（JDK `HttpServer` 单文件，密钥只经环境变量、
+  **不落盘**）接 DashScope，上游返回 **`400`（而不是 `401`）** ⇒ **鉴权通过**、base-url 拼法正确；但响应体是
   `"Free quota exhausted ... type: AllocationQuota.FreeTierOnly"`（`text-embedding-v3` / `-v4` 都一样）
-  ⇒ **该账号的免费额度已耗尽、无法调用任何模型**。**B 档因此仍未验**，且**原因在上游配额、不在本仓库**
-  （网关上 `/v1/embeddings` 仍是 404，也不提供 embeddings 上游）。配额恢复（控制台关闭"仅免费额度"或换一把可用 Key）后，
-  把 `AIHUB_KB_EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode` +
-  `AIHUB_KB_EMBEDDING_MODEL=text-embedding-v3` 指过去即可复跑（脚本已备好：`.m5t8-logs/accept-b.ps1`）。
+  ⇒ 该账号免费额度耗尽。**当时 B 档仍未验**，原因在上游配额、不在本仓库；换成可用模型后即跑通（见下方专节）。
 
-  **⚠️ 复跑时又抓到一个真缺陷（2026-10-05，纠正 Task 3 的一处结论）**：换成可用模型后重传同一份 pdf，
-  日志是 `KbParseService: 解析跳过：doc 2 不在 PENDING/PARSING（别人已推进 / 已 READY/FAILED），ack 丢弃`
-  ⇒ **重复上传这条"重试手势"只对仍处 `PENDING` 的行有效**（那种情形正是 Task 3 要救的"发布丢失"），
-  而对 **`FAILED` 行完全无效** —— 消费端的**带条件状态迁移**会把重发的消息 **ack 丢掉**。
-  ⇒ **`FAILED` 目前是"只能看、不能重试"的终态**：既没有重试端点，重复上传也是空操作。
-  **绕法（仅验收可用）**：换一个租户上传同一份文件 ⇒ 新行、`PENDING` ⇒ 流水线照常跑；
-  **正路**（待做）：加一个"重试"入口（STM 允许 `FAILED → PARSING`）或允许 `FAILED` 行被重发的消息推进。
+  **（历史，保留以示来路）同一轮复跑还抓到一个真缺陷**：换模型后重传同一份 pdf，日志是
+  `KbParseService: 解析跳过：doc 2 不在 PENDING/PARSING（别人已推进 / 已 READY/FAILED），ack 丢弃`
+  ⇒ 当时 **"重复上传 = 重试手势"只对仍处 `PENDING` 的行有效**（那正是 Task 3 要救的"发布丢失"），
+  对 **`FAILED` 行完全无效** —— 消费端的**带条件状态迁移**会把重发的消息 **ack 丢掉** ⇒ `FAILED` 曾是
+  "只能看、不能重试"的终态。**✅ 该缺陷已修（2026-10-05）**：迁移放宽为 `PENDING|PARSING|FAILED` 并在重入时清 `error_msg`
+  （判据 `KbEmbedIntegrationTest#aFailedDocumentIsReDrivenByAReplayedParseMessage`）；compose 复验：
+  两个早已 `FAILED` 的文档重传同一份内容 ⇒ 都回到 `READY`、`errorMsg` 为空（见下方专节）。
 
 ## B 档已验（2026-10-05，真实 compose + 真实上游）
 
@@ -171,6 +162,15 @@ Chroma 直查：kb_chunks count=9、VECTORS_FOR_DOC_3=9
 Chroma 直查 `count=22`：`doc 1` 4 条（`1:0..1:3`，`tenant_id=1`）、`doc 4` 9 条（`4:0..4:8`，`tenant_id=3`）。
 ⚠️ 过程中踩到一次**旧镜像**：改完代码没重建 ⇒ 两条修复都"看起来没生效"（症状与未修一模一样）——
 **改完代码必须先 `docker build --network=host` 重建镜像**，否则 compose 验收验的是旧行为。
+
+**✅ 复验（2026-10-06，原生鉴权、无反代、真实 compose）**：`md`（2,777 字符）传 **tenant 2** ⇒
+`200 / id=5 / PENDING` ⇒ **约 3 秒 `READY`（`chunkCount=4`）**；Chroma 直查
+`kb_chunks`（`dimension=1024`，**总数 26** = `doc1` 4 + `doc3` 9 + `doc4` 9 + `doc5` 4）、
+`get where={"doc_id":5}` ⇒ 记录 id **`5:0..5:3`**（`"{docId}:{seq}"` 可反推）、`metadata tenant_id=2`、`seq=0..3`。
+**并首次验证了检索侧契约**：`POST /api/v1/collections/<id>/query`（`n_results=3`、`where={"tenant_id":2}`）
+⇒ 返回 `5:0, 5:1, 5:2`，距离 `≈0 / 1.14 / 1.21` ⇒ **记录 id、metadata 租户隔离、`where` 过滤与距离都在真库上成立**。
+⚠️ **如实标注**：这次 query 的 `query_embeddings` 取自**库里已存的向量**（不是把一句自然语言真正编码），
+所以它证明的是**检索契约**，**不**证明语义检索质量；真实检索必须用**同一个模型**把用户问题编码后再查。
 
 **跨语言向量契约**（检索侧那个仓库的 Python 必须照它写）见 `docs/CONVENTIONS.md` **§6.8**：
 
@@ -247,7 +247,8 @@ error while interpolating services.mysql.environment.MYSQL_ROOT_PASSWORD:
    **不会**让已提交的业务写失败；DLQ 只覆盖**消费端**失败 ⇒ 这类行**没有自动重试**。
    **现成的补救 = 重新上传同一份内容**（幂等路径也会重发一条 `parse:{id}`）；否则只能**手工投一条** `parse:{id}`。
    代价：对已 `READY` 的文档重传会多做一次解析（有界、幂等收敛）。
-9. **compose 上的 `READY` 需要真实 embeddings 上游**（见上「A 档 / B 档」）—— 离线环境验到的是失败路径与"全清"。
+9. **compose 上的 `READY` 需要真实 embeddings 上游**（见上「A 档 / B 档」）—— **✅ 已验过两次**（2026-10-05、2026-10-06，见 `## B 档已验`）；
+   离线（无上游）时验到的是**失败路径**与"全清"，那是**无上游**时的行为，**不是**能力的上限。
 
 
 **M4 新增（每一条都有对应的代码 / 测试，不是"以后再说"）**
