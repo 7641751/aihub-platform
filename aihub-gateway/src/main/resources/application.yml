@@ -8,7 +8,18 @@ spring:
     redis:
       host: ${SPRING_DATA_REDIS_HOST:127.0.0.1}
       port: ${SPRING_DATA_REDIS_PORT:6379}
-      timeout: 2s
+      # ⚠️ 这是**每条 Redis 命令**按住调用线程的上界。调用方跑在 WebFlux 过滤器链上，而
+      #    StringRedisTemplate 是 Lettuce 的**同步**驱动 ⇒ 这个值就是「这个线程被按住多久」，
+      #    且 `catch` 救不了一个正在阻塞的线程（见 RateLimitFilter 的线程模型注释）。
+      # 2026-10-06 compose 实测（`docker compose stop redis`）：2 s 时单请求
+      #    10.157 / 10.153 / 12.160 秒 —— 请求路径上有 5–6 个**串行**的阻塞式触点
+      #    （配置版本探测 / ApiKeyResolver 读 / 限流 Lua / 配额预扣 Lua + 校正 / 渠道熔断读），
+      #    每个各付满一次 2 秒（日志原文 `RedisCommandTimeoutException: Command timed out after 2 second(s)`）。
+      # 300 ms 的理由与 admin 侧 D1 修复**逐字相同**（那边当时从 2 s 收到 500 ms：缓存读 + 回写
+      #    各等一次超时会把答案拖过网关给内部跳的 3 s）；网关这一端当轮漏改，本轮补上。
+      # 守卫：`RedisTimeoutBudgetTest`（直接读**出厂** application.yml，> 1 s 即红）。
+      # 部署侧仍可用 SPRING_DATA_REDIS_TIMEOUT 覆盖 —— 那是显式的运维决定，不是默认值。
+      timeout: 300ms
   rabbitmq:
     host: ${SPRING_RABBITMQ_HOST:127.0.0.1}
     port: ${SPRING_RABBITMQ_PORT:5672}

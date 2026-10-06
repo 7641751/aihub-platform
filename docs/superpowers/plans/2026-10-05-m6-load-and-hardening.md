@@ -132,7 +132,40 @@
   （取够 N 条即终止上游管道，会连带杀掉 `docker run`）⇒ 先落盘再读。
   ⚠️ 如实登记：只有**抽测**量级、且**未覆盖上游错误路径**（配额/限流/中途断流）⇒ **不可当容量规划依据**。
   产物：`.m6t2-logs/k6-real-nonstream.log`、`k6-real-stream.log`、`S9-real-upstream.log`。
-- **M6 结论：T1–T7 全部完成**（2026-10-06）。唯一仍未补的观察：**Redis 降级时 ~10s/请求的根因**（见上 T5 与 README 的 M6 边界）。
+- **M6 结论：T1–T7 全部完成**（2026-10-06）。当时唯一"只登记现象、根因未查"的一条 = **Redis 降级时 ~10s/请求** ——
+  该项于同日**查清并修复**，记录见下。
+- **（2026-10-06 追加）Redis 降级 ~10s/请求：根因查清 + 修复 + compose 复验**
+  - **取证（Phase 1，多组件路径按边界取证）**：静态 —— `spring.data.redis.timeout = 2s`（**每条命令**的上界，
+    而 `StringRedisTemplate` 是 Lettuce **同步**驱动、调用方在 WebFlux 过滤器链上）+ 请求路径 5–6 个阻塞式触点
+    （配置版本探测 / `ApiKeyResolver` 读 / 限流 Lua / 配额预扣 Lua + 校正 / 渠道熔断读）；
+    动态 —— `stop redis` 前后各 3 次真实 chat 请求：`0.258 / 0.136 / 0.136 s` → **`10.157 / 10.153 / 12.160 s`**（**全 200，不误拒**）；
+    日志原文 `Caused by: io.lettuce.core.RedisCommandTimeoutException: INFO. Command timed out after 2 second(s)`
+    + `RedisRateLimiter: Redis 限流失败，降级为本地令牌桶` + `ConfigCache: 写入配置快照缓存失败，忽略`
+    + `ConnectionWatchdog: Cannot reconnect`（线程 `or-http-epoll-*` ⇒ 事件循环上）。
+  - **根因**：`5 × 2 s = 10.157`、`6 × 2 s = 12.160` ⇒ **每请求 5–6 条串行命令各付满一次 2 s**；
+    竞争假设「单次 10 s 连接超时」**被否**（原文明确是"2 second(s)"一次）。
+    **另一处纠正**：**无并发放大** —— 6 并发实测 `WALL 10.2 s`、六条均 ~10.2 s（并行完成）
+    ⇒ 吞吐"塌 ~100 倍"≈**延迟比**，不是"服务接近停摆"。
+  - **修复（TDD 先红后绿）**：新增 `RedisTimeoutBudgetTest`（读**出厂** `application.yml`、沿用
+    `ConfigSubscriberTest` 的口径、**不起 Spring 上下文**）。**RED 原文**：`Tests run: 1, Failures: 1`，
+    `…必须 ≤ PT1S（实测：2 s × 5–6 条串行 = 单请求 10–12 s）。当前出厂值 = PT2S`；
+    GREEN：`spring.data.redis.timeout` **2 s → 300 ms**（与 admin 侧 D1 修复同口径）。
+    **全量**：`aihub-common` **68/0**、`aihub-gateway` **392/0**（391 + 新增 1）、`BUILD SUCCESS`。
+  - **真实 compose 复验**：重建网关镜像（`--network=host` 构建 + `--no-build` 起——配置在 jar 里 ⇒ **必须重建**）⇒
+    Redis 挂时单请求 **1.655 / 1.652 / 1.647 s**（原 10.157 / 10.153 / 12.160）、**全 200**；
+    Redis 正常 **0.140–0.337 s 无回归**；日志原文 `Command timed out after 300 millisecond(s)`。
+    `1.65 ÷ 0.3 ≈ 5.5` 与"5–6 条触点"**自洽** —— 这是"根因判断正确"的直接检验。
+  - ⚠️ **修复点 2 的形态与最初设想不同（未做，待定口径）**：原计划「把阻塞调用挪到 `boundedElastic`」
+    **不适用于** `ConfigClient.current()` —— 它是**同步** API、被 `ChatRelayController` / `ModelsController`
+    在 event loop 上调用，`.block()` 式的 offload 只会把事件循环按得更久（类注释自己写明彻底修法是**异步接口改动**）。
+    真正的残留是 `resolve()` **每请求读一次 Redis 版本**（与类注释"只在本地缓存 miss 时"**不符**）。
+    候选口径：**(a)** 给版本探测加最小间隔（默认 1 s；收敛改由 M4 的主动失效 + 本地 TTL 承担，会让若干
+    "本地命中而 Redis 前进"的既有断言需要重钉）；**(b)** 把 `current()` 改成 `Mono<ConfigSnapshot>`
+    （跨任务接口改动）。**两者都改语义 ⇒ 先定口径再动手。**
+  - 产物：`.m6t2-logs/S10-redis-down.log`（修复前）、`S12-redis-conc2.log`（并发）、`S14-fix1-verify-b.log`（复验）、
+    `R1-red.log`（RED）、`R2-green.log`、`R3-gateway-full.log`。
+  - ⚠️ **工装教训**：首轮复验时 **admin 恰好在测量中途重启** ⇒ 拿到空 key，测出的是 `401 / 0.003 s`（**已作废**）；
+    重做后才是有效数据 ⇒ **测量前必须先自证凭据有效**（本次脚本已加"login/key 重试 + 有效性断言"）。
 
 ## 6. 风险与如实登记
 
