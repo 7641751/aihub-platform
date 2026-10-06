@@ -62,7 +62,21 @@
   —— 对 SSE 而言首字节就是第一块，**但它不是"上游的首 token"**，报告必须写清这层区别。
   **阈值刻意松**（基线只负责**记录**数字，不替尚未存在的 SLO 背书）。
 
-**T2 执行清单（下一轮照做）**
+**T2 已就绪的现场（2026-10-06 实测，接着做即可）**
+
+- **栈已起**：`docker compose up -d --no-build` ⇒ 6 容器 `Started`；**`http://127.0.0.1:8080/healthz` = 200**（网关）、
+  `:8081`（admin）= 200、`:8089`（宿主桩）= 200。桩已跑：`java load/stub/ChatStub.java 8089`
+  （日志：`tokens=64 firstTokenDelayMs=120 tokenDelayMs=5 abortAfterTokens=-1`）。
+- **DB 现状（省掉造租户/渠道的猜测）**：`tenant=1`、`channel=2`、`model_route=5`、`api_key=13`、`sys_user=1`
+  ⇒ **夹具基本齐全**，T2 只需：把某个渠道的 base_url 指向宿主桩（或新建一个）＋把压测用的 `model` 映射到它＋取一把 `api_key`。
+- ⚠️ **限流表名是 `rate_limit_policy`**（不是草案里写的 `ratelimit_rule`）；`SHOW TABLES` 全表：
+  `api_key audit_log billing_daily channel config_version flyway_schema_history kb_chunk kb_document model_route quota rate_limit_policy request_log sys_user tenant`。
+- ⚠️ **两条 SQL 取数写法（已实测）**：
+  ① 直连一行式 **能用**（SQL 里不要夹双引号）：`docker exec aihub-platform-mysql-1 sh -c 'mysql -uaihub -p"$MYSQL_PASSWORD" -D aihub -N -B -e "SHOW TABLES"'`；
+  ② SQL 里**必须**夹引号（如 `INSERT … VALUES('x')`）时，**不要**走 `sh -c` —— 用 `docker cp x.sql <容器>:/tmp/` 再
+  `docker exec … sh -c 'mysql … < /tmp/x.sql'`（PS 管道给 mysql 会带 BOM，`sh -c` 传参会被引号咬 —— 两者都已踩过）。
+
+**T2 执行清单（接着做）**
 
 1. 起栈：`docker compose up -d --no-build`（**不要 `--build`**；只有改过代码才先重建镜像）。
 2. **桩怎么接（不新增镜像）**：桩跑在**宿主**上 —— `java load/stub/ChatStub.java 8089`；渠道 `base_url` 指向
