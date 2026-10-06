@@ -73,10 +73,20 @@ import java.util.concurrent.atomic.AtomicReference;
  * 「版本比对 + TTL」仍然保留。
  *
  * <p><b>线程模型</b>：{@link #current()} 会被 event loop（过滤器/控制器）调用，而
- * {@code AdminClient} 是 WebClient（异步，不阻塞）；Redis 侧只有一次同步 get/set，因此这里
- * **不引入额外的调度器** —— 与 M1 的 {@code ApiKeyResolver} 不同，本类的 Redis 调用只发生在
- * 「本地缓存 miss」时（30 秒一次那一档），代价可接受。若将来把这里改回逐请求调用，
- * 必须像 {@code ApiKeyResolver} 那样切到 {@code boundedElastic}。
+ * {@code AdminClient} 是 WebClient（异步，不阻塞）；Redis 侧是**同步** get/set，因此这里
+ * **不引入额外的调度器**，代价的上界就是「每次同步 Redis 调用的 {@code spring.data.redis.timeout}」
+ * （2026-10-06 已从 2 s 收到 300 ms —— 2 s 时"每条命令一次超时"会在请求路径上串行累加成 10–12 s，
+ * 见 {@code RedisTimeoutBudgetTest} 与 README 的 M6 边界）。
+ *
+ * <p><b>「本地命中时到底读不读 Redis」取决于主动失效通道有没有接上</b>（2026-10-06）：
+ * {@link #probeRedisVersionOnLocalHit} 为 {@code false}（通道已接上，**生产默认**）时，本地命中
+ * **一次都不读** —— 本类因此真的回到「Redis 调用只发生在本地缓存 miss 时（30 秒那一档）」这个原始设计，
+ * 收敛交给 M4 的主动失效广播；为 {@code true}（M3 形态 / 本仓库的测试环境）时保留**逐请求**版本探测，
+ * 那是那种部署下**唯一**的跨实例收敛手段（拿掉会让收敛上界退回最长 10 分钟）。
+ *
+ * <p>⚠️ 若将来把**本地 miss** 那条路也做成逐请求（今天不是），必须像 {@code ApiKeyResolver} 那样
+ * 把 Redis I/O 切到 {@code boundedElastic}。({@link #current()} 是**同步** API：直接
+ * {@code .block()} 式的 offload 只会把事件循环按得更久，彻底解法是异步接口改动。)
  */
 public class ConfigClient {
 
@@ -150,6 +160,30 @@ public class ConfigClient {
     private final AtomicLong visibleVersion = new AtomicLong();
 
     /**
+     * <b>本地命中时要不要再读一次 Redis 版本</b>（2026-10-06）。由**主动失效通道有没有真的接上**
+     * 决定，而不是由"哪条实现更省"决定：
+     *
+     * <ul>
+     *   <li><b>{@code false}（通道已接上，生产默认形态）</b>：本地命中直接服务本地。收敛由
+     *       M4 的主动失效广播（{@code aihub:config:invalidate}）承担 —— 跨实例的最新版本**必然**
+     *       源于一次控制面变更，而那次变更的失效消息已经发给了本实例，用不着逐请求去探。
+     *       这同时让 {@link #current()} 的 Redis 开销降为「本地 miss 时那一次」，与本节
+     *       「只发生在本地缓存 miss 时」的原始设计**重新一致**。</li>
+     *   <li><b>{@code true}（通道没接上：M3 形态 / 本仓库的测试环境）</b>：保留逐请求版本探测 ——
+     *       此时它是**唯一的**跨实例收敛手段（{@code ConfigCacheTest} 里那段刻意偏离的说明就是它），
+     *       拿掉会让收敛上界退回**最长 10 分钟**。</li>
+     * </ul>
+     *
+     * <p><b>为什么这条在故障期尤其值钱</b>：Redis 挂掉时**失效通道同时也不可用**，探测既拿不到结论、
+     * 又各付满一次 {@code spring.data.redis.timeout}（2026-10-06 实测：2 s 时单请求 10–12 s，
+     * 收到 300 ms 后 ~1.65 s）—— 省掉的那一次是**纯粹的等待**。
+     *
+     * <p><b>默认值的方向是刻意的</b>：旧构造函数（测试与旧装配）一律取 {@code true}，即**保持**
+     * 逐请求探测 —— 装配漏传这个参数时的后果是"多读一次 Redis"，而不是"静默丢掉收敛手段"。
+     */
+    private final boolean probeRedisVersionOnLocalHit;
+
+    /**
      * 不带注册表的便捷重载：计数进 Micrometer 的**全局复合注册表**
      * （Spring Boot 默认把各注册表挂在它上面，没有注册表时是安全空操作）。
      *
@@ -159,12 +193,12 @@ public class ConfigClient {
      */
     public ConfigClient(ConfigCache cache, AdminClient adminClient, UpstreamProperties upstream,
                         GatewayConfigProperties properties) {
-        this(cache, adminClient, upstream, properties, Metrics.globalRegistry, Clock.systemUTC());
+        this(cache, adminClient, upstream, properties, Metrics.globalRegistry, Clock.systemUTC(), true);
     }
 
     public ConfigClient(ConfigCache cache, AdminClient adminClient, UpstreamProperties upstream,
                         GatewayConfigProperties properties, MeterRegistry registry) {
-        this(cache, adminClient, upstream, properties, registry, Clock.systemUTC());
+        this(cache, adminClient, upstream, properties, registry, Clock.systemUTC(), true);
     }
 
     /**
@@ -180,11 +214,25 @@ public class ConfigClient {
      */
     ConfigClient(ConfigCache cache, AdminClient adminClient, UpstreamProperties upstream,
                  GatewayConfigProperties properties, MeterRegistry registry, Clock clock) {
+        this(cache, adminClient, upstream, properties, registry, clock, true);
+    }
+
+    /**
+     * 全量接缝（**装配点**用）：再多一个「本地命中时要不要探一次 Redis 版本」，语义见字段注释。
+     *
+     * <p><b>为什么用独立构造器而不是给 {@link GatewayConfigProperties} 加一个分量</b>：后者是 record，
+     * 加一个分量会让**每一个** {@code new GatewayConfigProperties(...)} 的调用点编译失败 ——
+     * 这条顾虑与实测处数已记在 {@code ConfigInvalidateProperties} 的 javadoc 上（评审核实 8 处）。
+     */
+    ConfigClient(ConfigCache cache, AdminClient adminClient, UpstreamProperties upstream,
+                 GatewayConfigProperties properties, MeterRegistry registry, Clock clock,
+                 boolean probeRedisVersionOnLocalHit) {
         this.cache = cache;
         this.adminClient = adminClient;
         this.upstream = upstream;
         this.properties = properties;
         this.clock = clock;
+        this.probeRedisVersionOnLocalHit = probeRedisVersionOnLocalHit;
         this.refreshedCounter = registry.counter(REFRESHED_METRIC);
         this.refreshFailuresCounter = registry.counter(REFRESH_FAILURES_METRIC);
         // 版本号是「两级缓存是否收敛」唯一的对外信号：本地命中而 Redis 已经前进（或反之）
@@ -307,7 +355,12 @@ public class ConfigClient {
      */
     private ConfigSnapshot resolve() {
         ConfigSnapshot local = cache.local().orElse(null);
-        ConfigSnapshot fromRedis = cache.readRedis().orElse(null);
+        // 本地命中时的这一读是「版本探测」，不是二级缓存的正读 —— 它是本方法**每个请求**的固定开销。
+        // 主动失效通道已接上时（生产默认）它多余，跳过（见 probeRedisVersionOnLocalHit 的字段注释）；
+        // 本地为空时**必须**读：那一次才是真的在找二级缓存。
+        ConfigSnapshot fromRedis = (local != null && !probeRedisVersionOnLocalHit)
+                ? null
+                : cache.readRedis().orElse(null);
         ConfigSnapshot resolved;
         if (fromRedis != null && (local == null || fromRedis.version() > local.version())) {
             // Redis 是跨实例的收敛点：它更新就说明别的实例已经改过配置，本地副本必须让位。

@@ -155,13 +155,24 @@
     Redis 挂时单请求 **1.655 / 1.652 / 1.647 s**（原 10.157 / 10.153 / 12.160）、**全 200**；
     Redis 正常 **0.140–0.337 s 无回归**；日志原文 `Command timed out after 300 millisecond(s)`。
     `1.65 ÷ 0.3 ≈ 5.5` 与"5–6 条触点"**自洽** —— 这是"根因判断正确"的直接检验。
-  - ⚠️ **修复点 2 的形态与最初设想不同（未做，待定口径）**：原计划「把阻塞调用挪到 `boundedElastic`」
-    **不适用于** `ConfigClient.current()` —— 它是**同步** API、被 `ChatRelayController` / `ModelsController`
-    在 event loop 上调用，`.block()` 式的 offload 只会把事件循环按得更久（类注释自己写明彻底修法是**异步接口改动**）。
-    真正的残留是 `resolve()` **每请求读一次 Redis 版本**（与类注释"只在本地缓存 miss 时"**不符**）。
-    候选口径：**(a)** 给版本探测加最小间隔（默认 1 s；收敛改由 M4 的主动失效 + 本地 TTL 承担，会让若干
-    "本地命中而 Redis 前进"的既有断言需要重钉）；**(b)** 把 `current()` 改成 `Mono<ConfigSnapshot>`
-    （跨任务接口改动）。**两者都改语义 ⇒ 先定口径再动手。**
+  - **修复点 2：口径定为「按主动失效通道分档」（用户裁定 c），已实现并复验** —— 原先设想的
+    「把阻塞调用挪到 `boundedElastic`」**不适用**：`ConfigClient.current()` 是**同步** API、被
+    `ChatRelayController` / `ModelsController` 在 event loop 上调用，`.block()` 式 offload 只会把事件循环按得更久
+    （类注释自己写明彻底修法是**异步接口改动**）。真正的残留是 `resolve()` **每请求读一次 Redis 版本**
+    （与类注释"只在本地缓存 miss 时（30 秒那一档）"**不符**），而它存在的理由——"决策 16 之下唯一的跨实例收敛手段"——
+    **已被 M4 的主动失效广播取代**（{@code ConfigCacheTest} 里那段刻意偏离的说明正是这条）。
+    实现：`ConfigClient` 新增**独立构造器**（第七参 `probeRedisVersionOnLocalHit`；**旧构造函数一律取 `true`**
+    ⇒ 旧语义不变、8 处 `new GatewayConfigProperties(...)` 一处未动，照 `ConfigInvalidateProperties` 的 javadoc 口径），
+    `ConfigConfig` 用 `ObjectProvider<ConfigInvalidateProperties>.getIfAvailable() != null` 判断"通道是否真的接上"
+    （绑**装配事实**而不是读一遍属性值，typo 改不了 bean 的装配结果）。
+    **RED 是编译级的**（7 参构造不存在，与本项目 M5 的 api-key 支持同一形状，已如实登记）；测试**双向**：
+    接上时"本地命中一次都不读 Redis"、没接上时"恰好读一次"（后者防止把它删成"谁都不读"）。
+    **GREEN**：新用例 2/0；**网关全量 394/0**（392 + 2），`aihub-common` 68/0，**失败用例文件 0**
+    ⇒ 「零既有断言改动」的预测**被全量证明**（测试环境 `invalidate-subscription=false` ⇒ 探测保留 ✓）。
+    **compose 复验**（重建镜像；停机三次请求）：**0.747 / 0.459 / 0.441 s** —— 相对"只修超时"的 1.65 s 再快 ~2–3×，
+    相对最初 10.157 s 共 **~20×**；Redis 正常路径 0.137–0.440 s **无回归**，全 200。
+    （⚠️ 本轮 `docker logs --tail 120` 里没抓到 `Command timed out` 行 —— 那 120 行被网关重启的启动日志占满，
+    **不作为反证**；延迟数据本身是判据。）
   - 产物：`.m6t2-logs/S10-redis-down.log`（修复前）、`S12-redis-conc2.log`（并发）、`S14-fix1-verify-b.log`（复验）、
     `R1-red.log`（RED）、`R2-green.log`、`R3-gateway-full.log`。
   - ⚠️ **工装教训**：首轮复验时 **admin 恰好在测量中途重启** ⇒ 拿到空 key，测出的是 `401 / 0.003 s`（**已作废**）；

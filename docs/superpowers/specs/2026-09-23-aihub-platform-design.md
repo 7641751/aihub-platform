@@ -406,8 +406,9 @@ MQ 计量事件 ──▶ admin consumer
   **Redis 挂 = 不误拒（无 401）但每请求 ~10s | ~100× 延迟比** —— 该现象已于 2026-10-06 **查清并修复**：
   根因是**每请求 5–6 个串行的阻塞式 Redis 命令、各付满一次 2 s 超时**（原文 `Command timed out after 2 second(s)`；
   非单次连接超时），把网关 `spring.data.redis.timeout` 收到 **300 ms** 后 compose 复验 **~1.65 s**
-  （守卫 `RedisTimeoutBudgetTest`）。吞吐"塌 100 倍"≈**延迟比**，实测 6 并发无额外放大；
-  残留（每请求一次的 Redis 版本探测）已登记在 `README.md` 的「M6 新增已知边界」。
+  （守卫 `RedisTimeoutBudgetTest`）；再按"主动失效通道是否接上"给**逐请求版本探测**分档（接上则本地命中一次都不读，
+  守卫 `RedisVersionProbeTest` 双向钉住）⇒ 复验 **0.44–0.75 s**，相对最初 **~20×**。
+  吞吐"塌 100 倍"≈**延迟比**，实测 6 并发无额外放大。
 - **部署硬化**：`restart: unless-stopped` + 健康检查（admin/gateway 实测 `(healthy)`）+ `deploy.resources.limits`
   + 必填变量校验（缺失 ⇒ 拒绝启动并**点名变量**）。
 - **缓存冷/热对照**（2026-10-06 补测，20 把全新 key、探针 `/v1/models` 不经上游）：`FLUSHDB` + 重启网关后 Redis **0 键**，

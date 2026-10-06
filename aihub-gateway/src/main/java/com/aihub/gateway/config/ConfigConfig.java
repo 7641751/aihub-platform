@@ -6,11 +6,14 @@ import com.aihub.gateway.admin.AdminClient;
 import com.aihub.gateway.relay.ChannelKeyDecryptor;
 import com.aihub.gateway.upstream.UpstreamProperties;
 import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.StringRedisTemplate;
+
+import java.time.Clock;
 
 /**
  * 配置层的装配点。**注意调用者可能没有配置可读**：所有 bean 都必须能在
@@ -33,10 +36,25 @@ public class ConfigConfig {
         return new ConfigCache(redis, properties);
     }
 
+    /**
+     * 配置读取入口。
+     *
+     * <p><b>「本地命中时要不要探一次 Redis 版本」由这里的装配结论决定</b>（2026-10-06）：
+     * 主动失效通道**真的接上**（{@code aihub.config.invalidate-subscription=true} —— 此时
+     * {@link ConfigInvalidateProperties} 才是 bean，见 {@code ConfigInvalidateSubscriptionConfig} 的
+     * 条件与 {@code ConfigSubscriberTest} 钉住的"开关为真时容器 bean 才存在"）时，逐请求的版本探测是
+     * **多余**的（收敛已由广播承担）；通道没接上时必须保留它（那是 M3 形态下唯一的跨实例收敛手段）。
+     *
+     * <p>用 {@link ObjectProvider#getIfAvailable()} 而不是读一遍属性值：这样做绑定的是
+     * **"通道到底有没有被装配"**这个事实，而不是"某个键写成了什么"—— 一个 typo 改不了 bean 的装配结果。
+     */
     @Bean
     public ConfigClient configClient(ConfigCache cache, AdminClient adminClient, UpstreamProperties upstream,
-                                     GatewayConfigProperties properties, MeterRegistry registry) {
-        return new ConfigClient(cache, adminClient, upstream, properties, registry);
+                                     GatewayConfigProperties properties, MeterRegistry registry,
+                                     ObjectProvider<ConfigInvalidateProperties> invalidateProperties) {
+        boolean invalidationWired = invalidateProperties.getIfAvailable() != null;
+        return new ConfigClient(cache, adminClient, upstream, properties, registry,
+                Clock.systemUTC(), !invalidationWired);
     }
 
     /**
