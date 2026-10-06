@@ -407,6 +407,13 @@ MQ 计量事件 ──▶ admin consumer
   已写进 `README.md` 的「M6 新增已知边界」，是后续打磨的首要候选。
 - **部署硬化**：`restart: unless-stopped` + 健康检查（admin/gateway 实测 `(healthy)`）+ `deploy.resources.limits`
   + 必填变量校验（缺失 ⇒ 拒绝启动并**点名变量**）。
+- **缓存冷/热对照**（2026-10-06 补测，20 把全新 key、探针 `/v1/models` 不经上游）：`FLUSHDB` + 重启网关后 Redis **0 键**，
+  冷轮 p50 **14.0ms** / max **268.5ms**，冷轮结束 `aihub:apikey:*` **正好 20**（"真的回源了"的机器证据）；
+  热轮 p50 **5.3ms** / max **6.9ms** ⇒ **p99 差 38.9×**，且热轮 ~5ms 与压测反推的"网关自身开销 ≈ 5ms"互证。
+- **真上游抽测**（2026-10-06，DashScope `compatible-mode` + `qwen-turbo`，2 VU × 20s，**单列不与桩混列**）：
+  非流式 **0% 失败**（avg 4.41s / p95 5.58s）、流式 **0% 失败**（**TTFT avg 243ms / p95 301ms**、总 avg 3.74s ⇒ 真上游上流式同样未被缓冲）；
+  单次人工调用 **0.32s / 200**，渠道密钥为网关本地解密的密文。
+  ⚠️ 只有"抽测"量级、且未覆盖上游错误路径 ⇒ **不可当容量规划依据**。
   完整数据、逐字证据与探针教训：`.superpowers/sdd/m6-load-report.md`（git-ignored）。
 
 每个里程碑完成后打 git tag，并写一篇短技术笔记，作为面试话术底稿。

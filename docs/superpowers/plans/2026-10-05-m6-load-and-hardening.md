@@ -105,6 +105,34 @@
   把 `docker run` 一起杀掉（表现为日志停在 22 秒、没有摘要）⇒ **先落盘、跑完再读**。
   ⚠️ 另一条：**内联令牌签发要用逐句显式写法**；把 base64url 包成 scriptblock（`{ param($x) … }`）签出来的令牌会被
   网关判 401（已定性；`load/setup-fixture.ps1` 与 `.m5t8-logs/accept-b4.ps1` 用的都是显式写法 ✓）。
+- **T3 ✅ 限流开/关对照**（2026-10-06）：同脚本同负载只切 DB 策略 —— 关 ⇒ `rate_limited=0`；开（`qps=50/burst=100`）
+  ⇒ 拒绝 **759,036**、通过 **53.3/s**（与配置吻合）⇒ 观测点有判别力。
+- **T4 ✅ 缓存冷/热对照**（2026-10-06 补测；这是先前唯一缺证据的一项）：用 **20 把全新** API Key
+  （同一把 key 只有第一个请求是冷的，测不出差）+ `redis-cli FLUSHDB` + `docker compose restart gateway`（清本地 Caffeine）
+  ⇒ Redis **DBSIZE=0**。**冷轮**（每把 key 各打一次 `/v1/models`）：p50 **14.0ms** / max **268.5ms**；
+  冷轮结束 **DBSIZE=41、`aihub:apikey:*`=20** ⇒ **"真的回源了"**（不是压测噪声）。**热轮**：p50 **5.3ms** / max **6.9ms**
+  ⇒ **p99 差 38.9×**。冷轮的双峰可解释：第 1 条 268.5ms 含**配置快照回源**+连接/类加载，前几条 30–56ms 是冷 JIT/连接池下的
+  admin 回源，其余 ~12–14ms 是稳态回源；热轮 ~5.2ms **与 T2 反推的"网关自身开销 ≈ 5ms"互证**。
+  **口径**：探针不走上游 ⇒ 测的是网关自身 + 鉴权/配置缓存的冷热差；20 样本下 p99 ≈ max，故按 max 报。
+  产物：`.m6t2-logs/t4-cold-warm.ps1`、`.m6t2-logs/S8-t4-coldwarm.log`。
+- **T5 ✅ 故障注入**：**MQ 挂 = 业务无感 + 计量零丢失**（恢复后精确回补 **370** 条，spool 补偿生效）；
+  **Redis 挂 = 不误拒（无 401）但吞吐塌 ~100 倍**（每请求 ~10s）—— 后者**根因未查**、只登记现象。
+- **T6 ✅ 部署硬化**：`restart: unless-stopped` + 健康检查（admin/gateway 实测 `(healthy)`；探针用**实测存在**的 `/usr/bin/curl`）
+  + `deploy.resources.limits` + `.env` **11 处 `${VAR:?}`** 校验（缺失 ⇒ 拒绝启动并**点名变量**）。
+  ⚠️ 坑：`${VAR:?}` 对"**已设置但为空**"的 shell 变量**不报错** ⇒ 自测要用 `--env-file <另一份不完整 env>` 换插值来源（别动 `.env`）。
+- **T7 ✅ 收口**：README「部署与上线（M6）」+ 设计文档 §12 的 M6 完成标注 + 两份报告引用；
+  README 的 **M6 勾选**与「属于 M6」那句将来时**已同步**（2026-10-06，本次一并做掉）。
+- **真上游抽测 ✅**（2026-10-06；DashScope `compatible-mode` + `qwen-turbo`，2 VU × 20s，**单列、不与桩数据混列**）：
+  先建渠道 `id=6 dashscope-real-t6`（`apiKey` 由 admin 加密、**网关本地解密**）+ 路由 `qwen-turbo`（`id=16`）；
+  非流式 10 req **0% 失败**（avg 4.41s / p95 5.58s）；流式 12 req **0% 失败**（**TTFT avg 243ms / p95 301ms**、总 avg 3.74s
+  ⇒ 真上游上**流式同样未被缓冲**）；单次人工调用 **0.32s / `200`**，带 `x-request-id` 与 `ratelimit-*`，`usage` 为上游真实值。
+  ⚠️ k6 报 `http_req_duration` **阈值越界** —— 阈值是**为桩设的**（基线只记录数字、**不是 SLO**），真上游必然越过，**不算失败**。
+  ⚠️ **两条工装教训**：① PS 5.1 把**带内嵌双引号**的参数传给 `curl.exe` 会拆坏 JSON（表现为网关收到 `model=null`
+  ⇒ `404 不提供该模型: null`）⇒ 用 `--data-binary @文件`；② **长跑命令绝不要管道给 `Select-Object -First N`**
+  （取够 N 条即终止上游管道，会连带杀掉 `docker run`）⇒ 先落盘再读。
+  ⚠️ 如实登记：只有**抽测**量级、且**未覆盖上游错误路径**（配额/限流/中途断流）⇒ **不可当容量规划依据**。
+  产物：`.m6t2-logs/k6-real-nonstream.log`、`k6-real-stream.log`、`S9-real-upstream.log`。
+- **M6 结论：T1–T7 全部完成**（2026-10-06）。唯一仍未补的观察：**Redis 降级时 ~10s/请求的根因**（见上 T5 与 README 的 M6 边界）。
 
 ## 6. 风险与如实登记
 
