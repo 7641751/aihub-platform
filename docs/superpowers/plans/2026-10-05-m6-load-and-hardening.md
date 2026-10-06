@@ -57,6 +57,26 @@
   **中途断流注入（收不到 `[DONE]`，这正是"流中断"的机器特征）**。
   **全量**：`aihub-common` **68/0**、`aihub-web` **315/0**（= 310 + 新增 5）、**`Tomcat` = 7**。
   ⚠️ 期间 Docker 掉线一次 ⇒ 全量报 `306 run / 214 errors / Tomcat=0`（**环境级**，与代码无关）；拉起后同一条命令回绿。
+- **T2 判据工具已就绪**：`load/chat-baseline.js`（k6；`STREAM=1` 切流式；**内置 `rate_limited` 计数器** ⇒ T3 的"限流开/关"两轮天然可比）。
+  **指标定义写在脚本头部**：QPS = `http_reqs` 速率；P95/P99 = `http_req_duration`；**TTFT = `http_req_waiting`（首字节）**
+  —— 对 SSE 而言首字节就是第一块，**但它不是"上游的首 token"**，报告必须写清这层区别。
+  **阈值刻意松**（基线只负责**记录**数字，不替尚未存在的 SLO 背书）。
+
+**T2 执行清单（下一轮照做）**
+
+1. 起栈：`docker compose up -d --no-build`（**不要 `--build`**；只有改过代码才先重建镜像）。
+2. **桩怎么接（不新增镜像）**：桩跑在**宿主**上 —— `java load/stub/ChatStub.java 8089`；渠道 `base_url` 指向
+   `http://host.docker.internal:8089`（M5 已实测容器能连宿主 `host.docker.internal`）。
+3. **造压测凭据**（全走控制台 API；`AIHUB_CONSOLE_SECRET` 用 shell env 覆盖、**不碰 `.env`**）：
+   自签令牌（JWT：`sub/tenantId/role=ADMIN/iat/exp`）→ `POST /api/channels`（base_url = 宿主桩）→
+   `POST /api/api-keys`（**明文只回一次** ⇒ 这就是 k6 的 `API_KEY`）。
+4. **先给压测租户配宽限流**（`qps=10000/burst=10000`），否则测的是限流器不是网关。
+   ⚠️ PS 把字符串**管道**给 `mysql` 会带 BOM（已踩）⇒ 用 `docker cp` 把 `.sql` 拷进容器再 `sh -c 'mysql … < /tmp/x.sql'`。
+5. 拉 k6：`docker pull docker.m.daocloud.io/grafana/k6`（Docker Hub 直连不通）。
+6. 跑两轮：非流式 `-e VUS=50 -e DURATION=2m`；流式 `-e STREAM=1 -e VUS=20 -e DURATION=2m`。
+7. **对账**：`request_log` 当日行数 ≈ k6 的 `http_reqs`；`latency_ms` / `ttft_ms` 分布与 k6 的 p95/p99 **同量级**。
+8. **真上游抽测一次**（小样本 `VUS=2 / DURATION=20s`）：渠道 base_url 换 `https://dashscope.aliyuncs.com/compatible-mode`
+   + key 取自 `.env`（**不打印**）⇒ **单列一张表**并标注"受上游支配，不可与桩数据混列"。
 
 ## 6. 风险与如实登记
 
