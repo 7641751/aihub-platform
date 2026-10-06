@@ -182,6 +182,56 @@ Chroma 直查 `count=22`：`doc 1` 4 条（`1:0..1:3`，`tenant_id=1`）、`doc 
 | 文本 | **不进** Chroma（回查 `kb_chunk.text`）|
 | 删除 | `where={"doc_id": id}` 全删 |
 
+## 部署与上线（M6）
+
+**一条命令起全栈**（首次或**改过代码**时先手动构建镜像，见下）：
+
+```bash
+docker build --network=host -t aihub-platform-admin -f aihub-admin/aihub-web/Dockerfile .
+docker build --network=host -t aihub-platform-gateway -f aihub-gateway/Dockerfile .   # 若网关也改过
+docker compose up -d --no-build                                                        # 全部服务
+```
+
+⚠️ **为什么是 `--network=host` + `--no-build`**：本机实测 `docker compose up --build` 会**构建失败** ——
+新增的 Maven 依赖不在构建容器的缓存里，而**构建容器解析不了 DNS**（`repo.maven.apache.org: No address associated with hostname`）。
+`--network=host` 让构建走宿主网络即可；**改完代码必须重建镜像**，否则 compose 验收验的是**旧行为**（这条已踩过一次：
+代码改完没重建，两条修复"看起来都没生效"）。
+
+**健康检查语义**（`docker compose ps` 会显示 `(healthy)`）：
+
+| 服务 | 探针 | 备注 |
+|---|---|---|
+| mysql / redis / rabbitmq | 各自自带 CLI 的 ping | 镜像自带 ✓ |
+| **admin** / **gateway** | `curl -fsS http://127.0.0.1:{8081,8080}/healthz` | **探针工具先实测过**：这三个镜像里都有 `/usr/bin/curl`（**别凭空编**一个镜像里不存在的探针 —— 那会让 `service_healthy` 永不满足）|
+| chroma | **暂无**（`condition: service_started`）| 探针可用性已确认（有 `curl`），可作为后续补项 |
+
+**必填变量**：`.env` 里 **11 处** `${VAR:?…}` 校验。缺失时 compose **拒绝启动并点名变量**（实测）：
+
+```
+error while interpolating services.mysql.environment.MYSQL_ROOT_PASSWORD:
+  required variable MYSQL_ROOT_PASSWORD is missing a value: set MYSQL_ROOT_PASSWORD in .env
+```
+
+⚠️ 注意一个坑：`${VAR:?}` **对"已设置但为空"的 shell 变量不报错**（compose 回落 `.env`）⇒ 要自测这条，
+必须用 `docker compose --env-file <另一份不完整的 env 文件> up -d` 替换插值来源（**不要**去动 `.env`）。
+
+**资源限制**：admin / gateway 各有 `deploy.resources.limits`（`cpus: "1.0"` / `memory: 768M`）+ `restart: unless-stopped`
+（崩溃或宿主重启后自动回来；手工 `stop` 过的不会自己起来）。
+
+**M6 的量化结论**（完整报告见 `.superpowers/sdd/m6-load-report.md`，git-ignored）：
+
+- 桩上游（固定 120 ms 首字 / 64 token）：**非流式 50 VU** ⇒ **397.5 QPS / P95 129.6 ms / P99 133.3 ms / 失败 0%**；
+  **流式 20 VU** ⇒ 41.8 QPS、P95 490.9 ms、**TTFT 127.4 ms**（**流未被缓冲**：TTFT ≪ 总耗时 478 ms）。
+- 限流开/关（同负载只切策略）：关 ⇒ `rate_limited=0`；开（`qps=50/burst=100`）⇒ 拒绝 759,036、**通过 53.3/s 与配置吻合**。
+- 故障注入：**RabbitMQ 挂 = 无感 + 计量零丢失**（恢复后精确回补 370 条）；**Redis 挂 = 不误拒（无 401）但吞吐塌 ~100 倍**。
+
+**M6 新增的已知边界**：
+
+1. **Redis 降级接近停摆**：Redis 挂时请求仍被正确处理（**不误拒**），但实测每请求 ~10 秒（吞吐 0.34/s vs 35.6/s）
+   ⇒ **根因未查**（只登记现象），是后续打磨的首要候选。
+2. **真上游抽测未做**：报告里的数字都来自**本机桩**，说明的是**网关自身开销**；真实模型端到端数据待补。
+3. **chroma 没有健康检查**（`service_started` 足够目前使用）。
+
 ## M0/M1/M2/M3/M4/M5 已知边界
 
 **M5 新增**（每一条都有对应的代码/测试，或明确写着"没有证据"）
