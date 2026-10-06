@@ -107,6 +107,22 @@ services:
       - admin-files:/app/data/kb
     ports:
       - "8081:8081"
+    # ── M6 T6 部署硬化 ──
+    # 崩溃/宿主重启后自动回来（`unless-stopped`：手工 stop 过的不会自己起来，符合运维直觉）。
+    restart: unless-stopped
+    # 健康检查用 curl：**镜像里确实有 `/usr/bin/curl`**（已实测，三个服务都有）——
+    # 这正是"先探再写"的教训：编一个镜像里不存在的探针，会让 service_healthy 永不满足。
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
 
   gateway:
     build:
@@ -136,6 +152,19 @@ services:
       - gateway-spool:/app/data
     ports:
       - "8080:8080"
+    # ── M6 T6 部署硬化（同 admin：healthcheck 用实测存在的 curl）──
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
 
 volumes:
   mysql-data:
