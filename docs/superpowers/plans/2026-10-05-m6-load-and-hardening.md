@@ -43,7 +43,20 @@
 - **真上游（DashScope）**：key 在 `.env`（`AIHUB_KB_EMBEDDING_API_KEY` 已存在；chat 用哪把由 T2 定），`base-url = https://dashscope.aliyuncs.com/compatible-mode`（**不带尾部 `/v1`**）。**配额/限速会被触发** ⇒ 真上游抽测必须小样本并在报告里标注"受上游支配"。
 - **压测自身会撞限流**（M3 默认 `qps=10/burst=20`）⇒ 基线轮必须先给压测租户配一条足够宽的策略，否则测的是限流器不是网关。**这一点必须写进报告口径**。
 - **绝不同时跑两个 Maven / 避免同时跑两个 k6**（共享宿主资源会污染数据）。
+- **`docker compose up --build` 可能因构建容器解析不了 DNS 而失败** ⇒ 用 `docker build --network=host -t <img> -f <dockerfile> .` 再 `docker compose up -d --no-build`。**改完代码必须先重建镜像**，否则验收验的是旧行为（M5 已踩过一次）。
+- **Docker Desktop 会自己停（已发生两次）**：特征是全量套件报**大量 errors + `Tomcat started on port` = 0**（一个 Spring 上下文都没起）⇒ **先查 Docker**（`docker -H tcp://127.0.0.1:2375 version`），别怀疑代码。拉起：`Start-Process "$env:LOCALAPPDATA\Programs\DockerDesktop\Docker Desktop.exe"`，等 `version` 通即可（本次 12 秒）。
 - 密钥类文件一律**不落盘、不打印**；`.env` 不读。
+
+## 7. 进度
+
+- **T1 ✅（2026-10-05，TDD 先红后绿）**：`load/stub/ChatStub.java`（JDK **单文件**程序，`java ChatStub.java <port>`，全 ASCII ——
+  单文件模式按平台编码读源码，中文注释在 GBK 控制台会编译失败）+ `aihub-web/src/test/java/com/aihub/admin/load/ChatStubContractTest.java`
+  （**不起 Spring**、不占上下文预算；把桩当子进程起起来做 HTTP 黑盒断言 ⇒ 同时验证了 compose 要用的那条启动命令）。
+  **RED**：`IllegalStateException: 找不到 load/stub/ChatStub.java`（桩还不存在，失败原因正确）；
+  **GREEN**：5/0 —— 健康检查 / 非流式形状+`usage` / **逐块 SSE + `[DONE]`** / **首字延迟可控（250ms 配了就必须 ≥200ms）** /
+  **中途断流注入（收不到 `[DONE]`，这正是"流中断"的机器特征）**。
+  **全量**：`aihub-common` **68/0**、`aihub-web` **315/0**（= 310 + 新增 5）、**`Tomcat` = 7**。
+  ⚠️ 期间 Docker 掉线一次 ⇒ 全量报 `306 run / 214 errors / Tomcat=0`（**环境级**，与代码无关）；拉起后同一条命令回绿。
 
 ## 6. 风险与如实登记
 
