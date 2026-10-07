@@ -258,6 +258,18 @@ error while interpolating services.mysql.environment.MYSQL_ROOT_PASSWORD:
 2. **真上游只有"抽测"量级**：2 VU × 20 s、单一上游单一模型，且**未覆盖上游错误路径**（配额 / 限流 / 中途断流）
    ⇒ **不可当容量规划依据**；桩数据说明的是**网关自身开销**，两者**口径不同、不可混列**。
 3. **chroma 没有健康检查**（`service_started` 足够目前使用）。
+4. **`restart: unless-stopped` 没有覆盖「Docker Desktop 自己退出」这个场景**（2026-10-07 实测）：
+   本机 Docker Desktop 自行停止 **21 小时**，期间 6 个容器全都停在 `Exited (143)` / `Exited (0)`
+   （admin / gateway 是 **143 = 被 SIGTERM 优雅停止**），**没有一个自动回来**；按 M6 记的路径
+   `docker compose up -d --no-build` **一条命令**即恢复（实测 6 容器起来、`admin` / `gateway` 均 `healthz=200`）。
+   ⚠️ 这与上文「**崩溃或宿主重启后自动回来**」的表述**不符**，且 **机制未查**：
+   `unless-stopped` 的语义是「除非**被停止过**」，而「守护进程停机时的优雅停止算不算被停止」在
+   Docker 文档里是模糊的（原文把 *manually or otherwise* 并列），本机观察到的是**不重启**。
+   **这里只登记现象、不声称根因。**
+   运维含义：**别把 `restart` 策略当成「宿主机重启后一定自愈」的保证** —— 自愈的判据是
+   `docker ps` 里有 6 个容器 **且** 两个 `healthz` 都 200，或者干脆跑一遍上面那条启动命令。
+   另注：**`restart` 只配在 admin / gateway 上**，mysql / redis / rabbitmq / chroma 本来就没有
+   ⇒ 它们不自动回来是**预期行为**，不属于本条问题。
 
 ## M0/M1/M2/M3/M4/M5 已知边界
 
