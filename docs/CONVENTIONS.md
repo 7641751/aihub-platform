@@ -612,6 +612,16 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
   查询用例只声明 `aihub.console.secret` 且不加 `@Import` ⇒ 与 `ConsoleLoginIntegrationTest` 共用上下文。
   上面第 4 条的集成类计数在 2026-10-01 复测为 **23**（Task 11 **未**新增集成类：探测用例并进既有的 `ChannelAdminIntegrationTest`，查询用例并进既有的属性集）。
 
+- **测覆盖率时，直接调 `jacoco:prepare-agent` 在本仓库会「静默不测量」**（2026-10-07 实测，第一次跑正是这样）：
+  `.mvn/maven.config` 里的 `-DargLine=...` 是**命令行用户属性**，优先级高于插件去设置的那个 `argLine` 项目属性
+  ⇒ 日志里 `prepare-agent` 明明打印了 `argLine set to -javaagent:…`，但 surefire fork 出来的 JVM 用的是**命令行那一个**（不含 agent），
+  于是随后 `jacoco:report` 打印 `Skipping JaCoCo execution due to missing execution data file` ——
+  **一条覆盖率数据都没有，而 `mvn` 依旧 `BUILD SUCCESS`**。
+  ⇒ **纪律**：① 覆盖率运行要把 agent **自己拼进 `-DargLine`**，并保留本机必需的
+  `-Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading -Xshare:off`；② `-javaagent` 的 jar 用**绝对路径**
+  （surefire 的工作目录是**模块**目录，不是仓库根）；③ 判据不是 `BUILD SUCCESS`，而是 **`jacoco.exec` 存在且非空 + 报告里覆盖行数 > 0**。
+  可复现的两条命令与实测数字见 `README.md` 的「测试」一节（六条核心链路 91.07%，2026-10-07）。
+
 ## 9. 提交约定
 
 - conventional commits：`feat:` / `fix:` / `test:` / `chore:` / `docs:` / `refactor:`。

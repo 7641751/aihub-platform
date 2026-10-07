@@ -543,7 +543,43 @@ docker -H tcp://127.0.0.1:2375 compose exec -T mysql sh -c 'mysql -uroot -p"$MYS
 mvn -B clean test
 ```
 
-当前实测（**D1 修复之后**，`DOCKER_HOST=tcp://127.0.0.1:2375`，从 `clean` 开始）：`mvn -B clean test` → `BUILD SUCCESS`，**Tests run: 497, Failures: 0, Errors: 0, Skipped: 0**（aihub-common 56、aihub-web 95、aihub-gateway 346；Testcontainers 的 MySQL 8.4 / Redis 7 / RabbitMQ 3.13 真的起了容器，Flyway `Successfully applied 1 migration`）。相对 M3 收口的 491（56 / 92 / 343），增量是 D1 的 7 条新用例：`ApiKeyResolveRedisOutageTest` 3 条（admin 侧 resolve 时延）+ `ApiKeyRedisOutageAuthTest` 4 条（网关侧故障不缓存 / 权威否定仍负缓存 / 限流可达 / 有效 key 打到上游）。**对账说明（诚实登记）**：仓库里保存的最后一份全量日志 `.superpowers/sdd/_m3fix-full.log` 自身合计是 **490**（56 / 92 / 342），比上面那个 491 少 1 —— 逐类比对显示除上述两条新类之外**没有任何类的用例数发生变化**（即没有既有断言被削弱或删除）。再往前：M3 的 Task 15 是 **490**（56 / 92 / 342，差额 1 条是收口时新增的「主配置的生产默认值」断言）；M3 的 Task 14 收口时 481，481→490 是 M3 的验收测试（WireMock 多渠道故障注入 8 条 + 一条「测试跑在 Netty 上」的守卫）；**M2 收口时是 200**（aihub-common 21、aihub-web 47、aihub-gateway 132）。注意 Maven 的**进程退出码不可信**（本机见过 `BUILD SUCCESS` 却给出 `[exit code: 1]`），判定以 surefire 汇总 + `BUILD SUCCESS` 为准；另外 Surefire 对含 `@Nested` 的外层类会打印 `Tests run: 0`（`ModelsControllerTest` 就是这种），那种情况下以 XML / 合计为准。
+**当前实测（2026-10-07，控制器复核）**：`BUILD SUCCESS`，**Tests run: 777, Failures: 0, Errors: 0, Skipped: 0**
+（`aihub-common` **68**、`aihub-web` **315**、`aihub-gateway` **394**），8 个模块全 `SUCCESS`。
+产物 = `.superpowers/sdd/handoff-progress3-fullsuite.log`（git-ignored；判据是 surefire 模块汇总行 + `BUILD SUCCESS`，不是退出码）。
+
+**核心链路行覆盖率（2026-10-07 首次实测 —— 回应设计文档 §10 的「≥70%」目标）：六条核心链路合计 `91.07%`。**
+
+口径：JaCoCo **0.8.14**，把这 **777** 条用例全部跑在 agent 下，`includes=com.aihub.*`（只统计本项目 main 的类，测试类不计），
+再逐模块出报告、按包前缀汇总。**行覆盖**（JaCoCo 的 LINE 计数器）。
+
+| 设计文档列的六条核心链路 | 行覆盖 | 统计行数 |
+|---|---|---|
+| 鉴权 auth | **89.22%** | 529 |
+| 限流 ratelimit | **96.84%** | 285 |
+| 配额 quota | **89.97%** | 379 |
+| 路由 route | **98.26%** | 230 |
+| 计量 meter | **92.80%** | 542 |
+| 流水线 pipeline | **86.04%** | 566 |
+| **六条合计** | **91.07%** | 2531 |
+
+全仓 `com.aihub.*`（**227** 个类 / **5038** 行）**92.48%**；`aihub-admin` 子树 91.80%（152 类）、`aihub-gateway` 93.79%（75 类）。
+覆盖率最低的类也都在 67% 以上（`KbFileStore` 67.35%、`QuotaEstimator` 77.14%、`GlobalExceptionHandler` 77.50%、`InternalQuotaController` 78.38%、`AuditController` 78.79%）。
+汇总脚本与原始表：`.superpowers/sdd/coverage-summary.txt`（git-ignored）。
+
+```powershell
+# 复现（两条命令；先把 agent 放进 argLine —— 直接调 jacoco:prepare-agent 在本仓库**无效**，原因见 CONVENTIONS §8）
+$repo  = (Get-Location).Path
+$agent = "$repo\.m2repo\org\jacoco\org.jacoco.agent\0.8.14\org.jacoco.agent-0.8.14-runtime.jar"
+$exec  = "$repo\.m4coverage\jacoco.exec"
+New-Item -ItemType Directory -Force $repo\.m4coverage | Out-Null
+mvn -B clean test "-DargLine=-javaagent:$agent=destfile=$exec,includes=com.aihub.* -Djdk.attach.allowAttachSelf=true -XX:+EnableDynamicAgentLoading -Xshare:off"
+mvn -B org.jacoco:jacoco-maven-plugin:0.8.14:report "-Djacoco.dataFile=$exec" "-Djacoco.includes=com.aihub.*"
+```
+
+⚠️ **口径与残余（诚实登记）**：报告由**命令行的 goal** 生成，**没有**写进 `pom.xml`（该文件的改动清单是封闭的，见 Global Constraints）
+⇒ 常规构建**不会**自动产生覆盖率，要测就照上面两条命令跑。覆盖率的绝对值也取决于套件是否包含 Testcontainers 容器用例（本次包含，Docker 在跑）。
+
+**历史记录（M3/D1 时代，保留以便对账）**：`DOCKER_HOST=tcp://127.0.0.1:2375`，从 `clean` 开始 —— `mvn -B clean test` → `BUILD SUCCESS`，**Tests run: 497, Failures: 0, Errors: 0, Skipped: 0**（aihub-common 56、aihub-web 95、aihub-gateway 346；Testcontainers 的 MySQL 8.4 / Redis 7 / RabbitMQ 3.13 真的起了容器，Flyway `Successfully applied 1 migration`）。相对 M3 收口的 491（56 / 92 / 343），增量是 D1 的 7 条新用例：`ApiKeyResolveRedisOutageTest` 3 条（admin 侧 resolve 时延）+ `ApiKeyRedisOutageAuthTest` 4 条（网关侧故障不缓存 / 权威否定仍负缓存 / 限流可达 / 有效 key 打到上游）。**对账说明（诚实登记）**：仓库里保存的最后一份全量日志 `.superpowers/sdd/_m3fix-full.log` 自身合计是 **490**（56 / 92 / 342），比上面那个 491 少 1 —— 逐类比对显示除上述两条新类之外**没有任何类的用例数发生变化**（即没有既有断言被削弱或删除）。再往前：M3 的 Task 15 是 **490**（56 / 92 / 342，差额 1 条是收口时新增的「主配置的生产默认值」断言）；M3 的 Task 14 收口时 481，481→490 是 M3 的验收测试（WireMock 多渠道故障注入 8 条 + 一条「测试跑在 Netty 上」的守卫）；**M2 收口时是 200**（aihub-common 21、aihub-web 47、aihub-gateway 132）。注意 Maven 的**进程退出码不可信**（本机见过 `BUILD SUCCESS` 却给出 `[exit code: 1]`），判定以 surefire 汇总 + `BUILD SUCCESS` 为准；另外 Surefire 对含 `@Nested` 的外层类会打印 `Tests run: 0`（`ModelsControllerTest` 就是这种），那种情况下以 XML / 合计为准。
 
 只跑 M3 的验收类（进程内 WireMock，**不需要 Docker**）：
 
