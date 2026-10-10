@@ -42,7 +42,7 @@ M0–M6 七个里程碑全部完成并打 tag，控制面配置 → 数据面**�
 | API Key（**明文只在创建那一次出现**；支持停用/启用/删除）| `POST/GET /api/api-keys`、`POST /api/api-keys/{id}/disable|enable`、`DELETE /api/api-keys/{id}` |
 | 渠道（含**真实连通性探测**与密钥轮换）| `POST/GET /api/channels`、`GET/PUT/DELETE /api/channels/{id}`、`POST /api/channels/{id}/rotate-key`、`POST /api/channels/{id}/probe` |
 | 模型路由 | `POST/GET /api/routes`、`PUT/DELETE /api/routes/{id}` |
-| 配额 / 限流策略 | `GET/PUT /api/quotas`、`POST/GET /api/rate-limits`、`PUT/DELETE /api/rate-limits/{id}` |
+| 配额 / 限流策略 | `GET/PUT /api/quotas`、**`GET /api/quotas/usage`（只读用量：限额 + 数据面预扣桶 + 剩余量）**、`POST/GET /api/rate-limits`、`PUT/DELETE /api/rate-limits/{id}` |
 | 运营查询（**必须显式 `tenantId` + 时间范围**）| `GET /api/logs`、`GET /api/audit`、`GET /api/billing/daily` |
 | 知识库（上传/列表）| `POST/GET /api/kb/documents` |
 | **零构建管理台**（`console.js`，无 npm、无打包、无第三方脚本）| `GET /console/index.html` |

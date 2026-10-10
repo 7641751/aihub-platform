@@ -7,6 +7,7 @@ import com.aihub.common.quota.QuotaPeriod;
 import com.aihub.service.audit.AuditService;
 import com.aihub.service.console.ConsoleClaims;
 import com.aihub.service.quota.QuotaAdminService;
+import com.aihub.service.quota.QuotaUsageService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
@@ -34,6 +35,10 @@ import java.time.Clock;
  *   <li><b>PUT = R2（写）</b>：写是平台级，{@code tenantId} 来自请求体（运营必须能对任一租户设额度）。</li>
  * </ul>
  *
+ * <p><b>{@code GET /api/quotas/usage}（补的只读用量出口）</b>：额度看 {@code GET /api/quotas}，
+ * 已用量看**数据面预扣的 Redis 桶** —— 这个端点把两者合成一个"用了多少、还剩多少"的答案，
+ * 且**一个字节都不写**（口径与三条不变量见 {@code QuotaUsageService} 的类注释）。
+ *
  * <p>错误一律走 {@link BizException} → {@code GlobalExceptionHandler}
  * （{@code INVALID_PARAM} 400），本类不写任何自定义错误体。
  */
@@ -42,12 +47,13 @@ import java.time.Clock;
 public class QuotaController {
 
     private final QuotaAdminService quotaAdminService;
+    private final QuotaUsageService quotaUsageService;
     private final Clock clock;
 
     /** Spring 注入用的构造器：时钟默认 {@code Clock.systemUTC()}（与 {@code QuotaAdminService} 同款）。 */
     @Autowired
-    public QuotaController(QuotaAdminService quotaAdminService) {
-        this(quotaAdminService, Clock.systemUTC());
+    public QuotaController(QuotaAdminService quotaAdminService, QuotaUsageService quotaUsageService) {
+        this(quotaAdminService, quotaUsageService, Clock.systemUTC());
     }
 
     /**
@@ -57,8 +63,9 @@ public class QuotaController {
      * 要求时间基准**写在代码里**、可被判据替代 —— 与 {@code QuotaAdminService} / {@code AuditService}
      * 保持同一条纪律（缺省 {@code Clock.systemUTC()} 不依赖 JVM 默认时区，也便于用例钉固定瞬时）。
      */
-    public QuotaController(QuotaAdminService quotaAdminService, Clock clock) {
+    public QuotaController(QuotaAdminService quotaAdminService, QuotaUsageService quotaUsageService, Clock clock) {
         this.quotaAdminService = quotaAdminService;
+        this.quotaUsageService = quotaUsageService;
         this.clock = clock;
     }
 
@@ -73,6 +80,21 @@ public class QuotaController {
         ConsoleClaims claims = claims(http);
         return ResponseEntity.ok(ApiResponse.ok(
                 quotaAdminService.getOrCreate(claims.tenantId(), resolvePeriod(period))));
+    }
+
+    /**
+     * 只读用量出口（R3.2）：额度取自 {@code quota} 行、已用量取自**数据面预扣的 Redis 桶**，
+     * 剩余量由服务端按 {@code QuotaScript} 同款规则算好（{@code -1} = 该维不限，D15）。
+     *
+     * <p>与 {@code GET /api/quotas} 的**关键差别**：本端点**不惰性物化**任何行、也不写任何东西
+     * （配额表的已用量列是预留未接线的；真实用量只在桶里）。桶缺失 ⇒ 200 + {@code bucketMissing=true}；
+     * Redis 不可用 ⇒ {@code INTERNAL_ERROR}，**绝不用 0 冒充**。
+     */
+    @GetMapping("/usage")
+    public ResponseEntity<ApiResponse<QuotaUsageService.UsageView>> usage(
+            @RequestParam(required = false) String period, HttpServletRequest http) {
+        ConsoleClaims claims = claims(http);
+        return ResponseEntity.ok(ApiResponse.ok(quotaUsageService.read(claims.tenantId(), resolvePeriod(period))));
     }
 
     @PutMapping
