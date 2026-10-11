@@ -45,11 +45,11 @@ M0–M6 七个里程碑全部完成并打 tag，控制面配置 → 数据面**�
 | 配额 / 限流策略 | `GET/PUT /api/quotas`、**`GET /api/quotas/usage`（只读用量：限额 + 数据面预扣桶 + 剩余量）**、`POST/GET /api/rate-limits`、`PUT/DELETE /api/rate-limits/{id}` |
 | 运营查询（**必须显式 `tenantId` + 时间范围**）| `GET /api/logs`、`GET /api/audit`、`GET /api/billing/daily` |
 | 知识库（上传/列表）| `POST/GET /api/kb/documents` |
-| **零构建管理台**（`console.js`，无 npm、无打包、无第三方脚本）| `GET /console/index.html` |
+| **零构建管理台**（`console.js`，无 npm、无打包、无第三方脚本；4 个 Tab：渠道 / API Key / 请求日志 / **用量**）| `GET /console/index.html` |
 
 > **租户模型（`docs/CONVENTIONS.md` §10）**：控制面是**平台运营台**，不是租户自助台 ——
 > 「**读按租户、写不限租户**」是**有意的不对称**；出现第一个非平台方账号 / 对非可信网络暴露 / 引入租户自助之前，必须先落地租户隔离。
-> **已知缺口**：管理台只接了 **5 个端点**（登录 / ping / 渠道 / Key / 日志），其余 20+ 个端点只有 API、没有界面。
+> **已知缺口**：管理台只接了 **6 个端点**（登录 / ping / 渠道 / Key / 日志 / **用量**），其余 20+ 个端点只有 API、没有界面。
 
 ### 1.3 知识库（写入侧）
 

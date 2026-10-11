@@ -32,6 +32,7 @@
         <button id="tab-channels" type="button">渠道</button>
         <button id="tab-keys" type="button">API Key</button>
         <button id="tab-logs" type="button">请求日志</button>
+        <button id="tab-usage" type="button">用量</button>
         <span id="session-info" class="muted"></span>
       </nav>
 
@@ -95,6 +96,21 @@
           <tbody id="logs-body"></tbody>
         </table>
         <p id="logs-message" class="message" role="status"></p>
+      </section>
+
+      <!-- 用量视图：只读、无参（= 当前 UTC 周期；租户由服务端从令牌取，R3.2） -->
+      <section id="usage-panel" class="card" hidden>
+        <h2>用量（本周期）</h2>
+        <p id="usage-meta" class="muted"></p>
+        <table>
+          <thead>
+            <tr><th>维度</th><th>上限</th><th>已用</th><th>剩余</th></tr>
+          </thead>
+          <tbody id="usage-body"></tbody>
+        </table>
+        <p id="usage-note" class="message" role="status"></p>
+        <p id="usage-message" class="message" role="status"></p>
+        <button id="usage-refresh" type="button">刷新</button>
       </section>
     </div>
   </main>

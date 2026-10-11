@@ -95,7 +95,7 @@
   }
 
   function selectTab(name) {
-    ["channels", "keys", "logs"].forEach(function (tab) {
+    ["channels", "keys", "logs", "usage"].forEach(function (tab) {
       byId("tab-" + tab).classList.toggle("active", tab === name);
       byId(tab + "-panel").hidden = tab !== name;
     });
@@ -103,6 +103,8 @@
       loadChannels();
     } else if (name === "keys") {
       loadKeys();
+    } else if (name === "usage") {
+      loadUsage();
     }
   }
 
@@ -295,6 +297,61 @@
       });
   }
 
+  // --- 用量视图（只读）-------------------------------------------------------
+
+  /*
+   * GET /api/quotas/usage（无参 = 当前 UTC 周期；租户由服务端从令牌取，R3.2 不接受显式覆盖）。
+   * 后端把三个语义写进了响应，UI **不许抹平**：
+   *  - unlimited: true      ⇒ 上限/剩余显示「不限」；`-1` 是协议值，永远不许出现在页面上（D15）；
+   *  - bucketMissing: true  ⇒ 提示「本周期尚无预扣记录」—— 那两个 0 是"没有记录"，不是"没花钱"；
+   *  - source / estimate    ⇒ 口径行常显（redis-bucket 的**预扣估算**，不是账单数字）。
+   * 读失败（例如 Redis 不可用 ⇒ 500 INTERNAL_ERROR）时**清空数字与口径行**：
+   * 把失败渲染成 0 会比不显示更糟 —— 那是"看起来成功"。
+   */
+  function limitText(limit) {
+    return limit > 0 ? String(limit) : "不限";
+  }
+
+  function remainingText(remaining) {
+    return remaining < 0 ? "不限" : String(remaining);
+  }
+
+  function renderUsage(view) {
+    setText(byId("usage-meta"), "周期 " + view.period + " · 数据源 " + view.source
+      + (view.estimate ? "（预扣估算，不是账单口径）" : ""));
+    var body = byId("usage-body");
+    setText(body, "");
+    [
+      ["token", view.tokenLimit, view.tokenUsed, view.tokenRemaining],
+      ["请求数", view.requestLimit, view.requestUsed, view.requestRemaining]
+    ].forEach(function (dimension) {
+      var row = document.createElement("tr");
+      cell(row, dimension[0]);
+      cell(row, limitText(dimension[1]));
+      cell(row, dimension[2]);
+      cell(row, remainingText(dimension[3]));
+      body.appendChild(row);
+    });
+    setMessage(byId("usage-note"),
+      view.bucketMissing ? "本周期尚无预扣记录 —— 这里的 0 不代表用了 0。" : "", false);
+  }
+
+  function loadUsage() {
+    setMessage(byId("usage-message"), "", false);
+    setMessage(byId("usage-note"), "", false);
+    byId("usage-refresh").disabled = true;
+    api("/api/quotas/usage")
+      .then(function (view) {
+        renderUsage(view);
+        byId("usage-refresh").disabled = false;
+      }, function (error) {
+        setText(byId("usage-body"), "");
+        setText(byId("usage-meta"), "");
+        setMessage(byId("usage-message"), describe(error), true);
+        byId("usage-refresh").disabled = false;
+      });
+  }
+
   // --- 启动 -----------------------------------------------------------------
 
   function init() {
@@ -303,9 +360,11 @@
     byId("tab-channels").addEventListener("click", function () { selectTab("channels"); });
     byId("tab-keys").addEventListener("click", function () { selectTab("keys"); });
     byId("tab-logs").addEventListener("click", function () { selectTab("logs"); });
+    byId("tab-usage").addEventListener("click", function () { selectTab("usage"); });
     byId("channel-form").addEventListener("submit", submitChannel);
     byId("key-form").addEventListener("submit", submitKey);
     byId("logs-form").addEventListener("submit", submitLogs);
+    byId("usage-refresh").addEventListener("click", loadUsage);
 
     var existing = window.sessionStorage.getItem(TOKEN_KEY);
     if (existing) {

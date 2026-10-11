@@ -36,11 +36,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p><b>RED 的自然形态（裁定 2）</b>：这三个文件在实现之前不存在 ⇒ 三条用例都红在**资源不存在 / 404**，
  * **没有判别力**。判别力**由变异体提供**（报告中的 4 条变异），**不**把 404 式的红当成"断言有效"。
  *
- * <p><b>本任务唯一无法由 JUnit 覆盖的验收（裁定 3）</b>：「登录后能完成『建渠道 / 建 Key / 查日志』」
+ * <p><b>本任务唯一无法由 JUnit 覆盖的验收（裁定 3）</b>：「登录后能完成『建渠道 / 建 Key / 查日志 / 看用量』」
  * —— 页面逻辑是**客户端 JS**，本套件**没有 JS 引擎** ⇒ 报告里明写"未由测试覆盖、只能人工核对"，
- * **不**写成"已验证"。可覆盖的部分已折成**可证伪的结构断言**：{@code console.js} 必须含五个端点
+ * **不**写成"已验证"。可覆盖的部分已折成**可证伪的结构断言**：{@code console.js} 必须含**六个**端点
  * （{@code /api/auth/login}、{@code /api/channels}、{@code /api/api-keys}、{@code /api/logs}、
- * {@code /api/ping}）＋ {@code sessionStorage} ＋ {@code textContent} ＋ {@code plaintextKey}。
+ * {@code /api/ping}、{@code /api/quotas/usage}）＋ {@code sessionStorage} ＋ {@code textContent} ＋
+ * {@code plaintextKey}；第 4 个 Tab（用量）的结构与两个"非正常态"标记（{@code unlimited} /
+ * {@code bucketMissing}）另由 {@code theUsageTabIsWiredAndHandlesTheNonNormalStates} 钉住。
  */
 class ConsoleStaticResourceTest extends AbstractIntegrationTest {
 
@@ -88,9 +90,9 @@ class ConsoleStaticResourceTest extends AbstractIntegrationTest {
                     .doesNotContain("localStorage");          // D9：令牌只许在 sessionStorage
         }
         // 结构引用（删掉任一视图即红 —— 本任务唯一有判别力的部分，裁定 2/5/6）
-        assertThat(read("console.js")).as("五个端点必须都在（含 /api/ping：日志视图要靠它拿 tenantId）")
+        assertThat(read("console.js")).as("六个端点必须都在（含 /api/ping：日志视图要靠它拿 tenantId）")
                 .contains("/api/auth/login").contains("/api/channels").contains("/api/api-keys")
-                .contains("/api/logs").contains("/api/ping")
+                .contains("/api/logs").contains("/api/ping").contains("/api/quotas/usage")
                 .contains("sessionStorage").contains("textContent").contains("plaintextKey");
     }
 
@@ -104,6 +106,35 @@ class ConsoleStaticResourceTest extends AbstractIntegrationTest {
         assertThat(js).as("原缺陷形状：只在输入非空时才带 from/to（空输入 ⇒ 必然 400）—— 不许回来")
                 .doesNotContain("if (byId(\"logs-from\").value)")
                 .doesNotContain("if (byId(\"logs-to\").value)");
+    }
+
+    /**
+     * 第 4 个 Tab（**用量**，只读）的结构守卫：新视图必须存在，且后端写进响应的两个"非正常态"标记
+     * 必须**真的被页面处理**，而不是把数字直接打印给运维。
+     *
+     * <p><b>为什么这两条标记值得单独立断言</b>：
+     * <ul>
+     *   <li>{@code remaining = -1} 是 {@code QuotaScript} / {@code QuotaUsageService} 的**协议值**
+     *       （该维度不限，D15）—— 页面上出现"-1"就是把协议泄给用户；</li>
+     *   <li>{@code bucketMissing = true} 表示"这个周期还没有任何预扣记录"，那两个 0 **不代表**用了 0 ——
+     *       UI 若不提示，运维会把"没有记录"读成"没花钱"（这正是后端把它做成显式标记的原因）。</li>
+     * </ul>
+     * <b>判别力</b>：删掉 Tab 按钮或面板 ⇒ 前两条红；把 {@code unlimited}/{@code bucketMissing} 的处理拿掉
+     * （改成直接渲染数字）⇒ 后两条红。**不**覆盖的：JS 的交互行为（本套件没有 JS 引擎，只能人工核对）。
+     */
+    @Test
+    void theUsageTabIsWiredAndHandlesTheNonNormalStates() {
+        assertThat(get("/console/index.html").getBody())
+                .as("第 4 个 Tab 与它的面板必须存在（结构锚：删掉任一即红）")
+                .contains("id=\"tab-usage\"")
+                .contains("id=\"usage-panel\"");
+
+        String js = read("console.js");
+        assertThat(js).as("必须真的调那个只读端点").contains("/api/quotas/usage");
+        assertThat(js)
+                .as("unlimited / bucketMissing 必须被处理（-1 = 不限是协议值；桶缺失的 0 不是“用了 0”）")
+                .contains("unlimited")
+                .contains("bucketMissing");
     }
 
     // --- 助手（裁定 1：项目同款形状 + 自建的 read）----------------------------
