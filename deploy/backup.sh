@@ -35,7 +35,6 @@ cat <<'EOF'
 
 恢复（概要；细节见 README「回滚与恢复」）：
   1) mysql：  docker compose ... exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" aihub' < aihub.sql
-  2) 原件卷： docker run --rm -v aihub-prod_admin-files:/data -v "$PWD":/backup alpine \
-                sh -c 'cd /data && tar xzf /backup/admin-files.tgz'
+  2) 原件卷： docker compose ... exec -T admin sh -c 'cd /app/data/kb && tar xzf -' < admin-files.tgz
   3) 重启 admin 让 Flyway/缓存回到一致状态；Chroma 若为空，需重传原件让向量重建。
 EOF
