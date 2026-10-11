@@ -14,6 +14,11 @@ target/
 .env.local
 *.pem
 
+# Production deploy（deploy/ 下的编排与模板**要**进仓库；真实密钥与证书**不许**进）
+deploy/.env.production
+deploy/certs/
+deploy/backups/
+
 # Runtime data
 logs/
 data/

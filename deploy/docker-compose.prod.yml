@@ -1,0 +1,233 @@
+# ============================================================================================
+# 生产编排 —— **自包含**，刻意**不是**对 docker-compose.yml 的 override。
+#
+# 为什么自包含：Compose 对 `ports` 这类多值字段在 override 里是**追加**（官方 merge 规则），
+# 所以 override 里写 `ports: []` **清不掉**基线里的 `3307:3306` —— 那正是最危险的一处
+# （MySQL 会随基线映射被发布到公网）。自包含让**暴露面一眼可审**：
+#   ⇒ 全文件**只有一个服务发布宿主端口**（nginx）；MySQL / Redis / RabbitMQ / Chroma / admin / gateway
+#     一律只在 compose 网络内可达。
+#
+# 与开发编排（docker-compose.yml）的逐条差异：
+#   1. 只发布 nginx 的 TLS 端口（默认 8443）：/v1/** → gateway；/console/** 与 /api/** → admin（**带 IP 白名单**）
+#   2. **Redis 启用 requirepass**（两侧注入 SPRING_DATA_REDIS_PASSWORD）。开发编排刻意没做
+#      （README 已知边界），但生产必须做：**Redis 是鉴权的信任源** —— 能写 aihub:apikey:<sha256>
+#      的人就能伪造任意 API Key。
+#   3. 全部服务加 json-file 日志轮转（生产最容易被日志写满盘）
+#   4. gateway 用 extra_hosts 显式给 host.docker.internal 一个地址（**Linux 上它默认不解析**，
+#      那是 Docker Desktop 的特性；不修会让"渠道 baseUrl 指向宿主"的调用直接解析失败）
+#   5. 镜像默认走 daocloud 代理（Docker Hub 直连在大陆节点通常不通）；可用 AIHUB_IMAGE_* 覆盖
+#   6. chroma **挂卷**（与开发编排刻意相反，见 deploy/README.md 的说明）
+#
+# 用法（**密钥全部来自 --env-file，本文件不含任何密钥**）见同目录 README.md。
+# ============================================================================================
+name: aihub-prod
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  mysql:
+    image: ${AIHUB_IMAGE_MYSQL:-docker.m.daocloud.io/library/mysql:8.4}
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env.production}
+      MYSQL_DATABASE: aihub
+      MYSQL_USER: aihub
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env.production}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    # ⚠️ 刻意**没有** ports：开发编排里的 "3307:3306" 是绑在 0.0.0.0 上的，直接照搬等于把 MySQL 发给全网。
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1G
+
+  redis:
+    image: ${AIHUB_IMAGE_REDIS:-docker.m.daocloud.io/library/redis:7-alpine}
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.production}
+    # 取舍（明写）：口令经环境变量进容器命令行 ⇒ `docker inspect` / `ps` 可见。能读这两处的人
+    # 本就有宿主权限；换来的是"口令不必落成一个可能被误提交的配置文件"。
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    logging: *default-logging
+
+  rabbitmq:
+    image: ${AIHUB_IMAGE_RABBITMQ:-docker.m.daocloud.io/library/rabbitmq:3.13-management-alpine}
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-aihub}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env.production}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    # management（15672）只在 compose 网络内可达 ⇒ 要看它在本地开 SSH 隧道，别发布到公网。
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+    logging: *default-logging
+
+  chroma:
+    image: ${AIHUB_IMAGE_CHROMA:-docker.m.daocloud.io/chromadb/chroma:0.5.23}
+    # ⚠️ 与开发编排**刻意相反**：开发不挂卷，为的是不掩盖"向量到底能不能重建"；
+    # 生产挂卷，因为"重建工具"在本仓库**并不存在**（重传原件不等于重建同一 collection）。
+    # 这条差异与理由写在 deploy/README.md，别照抄开发编排。
+    volumes:
+      - chroma-data:/chroma/chroma
+    restart: unless-stopped
+    logging: *default-logging
+
+  admin:
+    image: ${AIHUB_IMAGE_ADMIN:-aihub-platform-admin:latest}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      # 与开发编排同款：chroma 镜像里有没有 curl/wget 没实测过 ⇒ 用 service_started，
+      # 编一个不存在的探针会让 service_healthy 永不满足 ⇒ admin 永不启动。
+      chroma:
+        condition: service_started
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/aihub?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: aihub
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env.production}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.production}
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER:-aihub}
+      SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env.production}
+      AIHUB_INTERNAL_SECRET: ${AIHUB_INTERNAL_SECRET:?set AIHUB_INTERNAL_SECRET in .env.production}
+      AIHUB_CHANNEL_MASTER_KEY: ${AIHUB_CHANNEL_MASTER_KEY:?set AIHUB_CHANNEL_MASTER_KEY in .env.production}
+      AIHUB_CONSOLE_SECRET: ${AIHUB_CONSOLE_SECRET:?set AIHUB_CONSOLE_SECRET in .env.production}
+      # 演示 seeder 在生产**默认关闭**：它会建演示租户/渠道/Key。要建"第一个控制台用户"见
+      # deploy/README.md 的「第一步：造一个控制台账号」（没有它，控制台登不进去）。
+      AIHUB_DEMO_SEED_ENABLED: "false"
+      # 首次上线用来**铸第一把 API Key**（admin 启动时执行一次；明文只出现在它自己的日志里）。
+      # 造完把 AIHUB_MINT_KEY_ENABLED 改回 false 并重启 admin。见 deploy/README.md「第一步」。
+      AIHUB_MINT_KEY_ENABLED: ${AIHUB_MINT_KEY_ENABLED:-false}
+      AIHUB_MINT_KEY_TENANT_NAME: ${AIHUB_MINT_KEY_TENANT_NAME:-}
+      AIHUB_MINT_KEY_NAME: ${AIHUB_MINT_KEY_NAME:-}
+      AIHUB_MINT_KEY_VALID_DAYS: ${AIHUB_MINT_KEY_VALID_DAYS:-}
+      AIHUB_KB_STORAGE_ROOT: /app/data/kb
+      AIHUB_KB_EMBEDDING_BASE_URL: ${AIHUB_KB_EMBEDDING_BASE_URL:-}
+      AIHUB_KB_EMBEDDING_MODEL: ${AIHUB_KB_EMBEDDING_MODEL:-kb-embedding}
+      AIHUB_KB_EMBEDDING_API_KEY: ${AIHUB_KB_EMBEDDING_API_KEY:-}
+      AIHUB_KB_CHROMA_BASE_URL: ${AIHUB_KB_CHROMA_BASE_URL:-http://chroma:8000}
+    volumes:
+      - admin-files:/app/data/kb
+    # ⚠️ 刻意**没有** ports：控制台（/console/**）与 /api/** 一律经 nginx（带 IP 白名单）；
+    # /internal/** 只对 compose 网络内的 gateway 开放。
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  gateway:
+    image: ${AIHUB_IMAGE_GATEWAY:-aihub-platform-gateway:latest}
+    depends_on:
+      admin:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    extra_hosts:
+      # Linux 上 host.docker.internal **默认不解析**（那是 Docker Desktop 的特性）。
+      - "host.docker.internal:host-gateway"
+    environment:
+      AIHUB_UPSTREAM_BASE_URL: ${AIHUB_UPSTREAM_BASE_URL:-http://host.docker.internal:11434}
+      AIHUB_UPSTREAM_API_KEY: ${AIHUB_UPSTREAM_API_KEY:-}
+      AIHUB_UPSTREAM_DEFAULT_MODEL: ${AIHUB_UPSTREAM_DEFAULT_MODEL:-default}
+      AIHUB_ADMIN_BASE_URL: http://admin:8081
+      AIHUB_INTERNAL_SECRET: ${AIHUB_INTERNAL_SECRET:?set AIHUB_INTERNAL_SECRET in .env.production}
+      AIHUB_CHANNEL_MASTER_KEY: ${AIHUB_CHANNEL_MASTER_KEY:?set AIHUB_CHANNEL_MASTER_KEY in .env.production}
+      AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION: "true"
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.production}
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER:-aihub}
+      SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env.production}
+      AIHUB_METERING_SPOOL_DIR: /app/data/metering-spool
+    volumes:
+      - gateway-spool:/app/data
+    # ⚠️ 刻意**没有** ports：数据面经 nginx 的 TLS 端口（api key 不该明文过公网）。
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  # ── 唯一对公网暴露的服务 ──────────────────────────────────────────────────────────────
+  nginx:
+    image: ${AIHUB_IMAGE_NGINX:-docker.m.daocloud.io/library/nginx:1.27-alpine}
+    depends_on:
+      admin:
+        condition: service_started
+      gateway:
+        condition: service_started
+    environment:
+      # 允许访问 /api/** 与 /console/** 的来源（单个 IP 或 CIDR，例如 "1.2.3.4" 或 "1.2.3.0/24"）。
+      # 官方镜像的 entrypoint 会用 envsubst 渲染 templates/*.template（只替换**真实存在的环境变量**，
+      # 所以模板里的 $host / $uri 这类 nginx 变量不受影响）。
+      CONSOLE_ALLOW_CIDR: ${CONSOLE_ALLOW_CIDR:?set CONSOLE_ALLOW_CIDR in .env.production}
+    volumes:
+      - ./nginx/aihub.conf.template:/etc/nginx/templates/aihub.conf.template:ro
+      - ./certs:/etc/nginx/certs:ro
+    ports:
+      - "${PUBLIC_TLS_PORT:-8443}:8443"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- --no-check-certificate https://127.0.0.1:8443/nginx-health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: *default-logging
+
+volumes:
+  mysql-data:
+  redis-data:
+  rabbitmq-data:
+  chroma-data:
+  gateway-spool:
+  admin-files:
