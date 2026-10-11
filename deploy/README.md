@@ -151,6 +151,45 @@ curl -k -N https://$IP:$PORT/v1/chat/completions -H "Authorization: Bearer <ak_.
   跨迁移版本回滚前先想清楚，或先恢复备份。
 - **恢复**：见 `backup.sh` 末尾打印的三步。
 
+### 7.1 定时备份（cron）
+
+两个文件就是全部：`backup-cron.sh`（包装脚本，**唯一来源**）与 `cron/aihub-backup`（cron 定义）。
+
+```sh
+install -m 755 deploy/backup-cron.sh /usr/local/bin/aihub-backup.sh
+install -m 644 deploy/cron/aihub-backup /etc/cron.d/aihub-backup
+# 立刻验一次（不必等定时；`env -i` 是为了模拟 cron 那个很窄的环境）
+env -i /bin/sh /usr/local/bin/aihub-backup.sh && tail -5 /var/log/aihub-backup.log
+```
+
+**为什么不让 cron 直接调 `backup.sh`**：包装脚本多做三件事 —— ① **备份可用性最小校验**
+（dump 非空 / `>1KiB` / 含 `CREATE TABLE`、tgz 能被 `tar tzf` 读出，任一不过就 `RESULT=FAIL` 并退非零
+—— 免得留一个空壳目录冒充成功）；② **保留期清理**（`KEEP_DAYS`，默认 14 天，**只**删 `backups/20*`
+且 `-mtime +14` 的目录）；③ **落戳**（`/var/lib/aihub-backup/{last-ok,last-dir,last-pruned}`）。
+
+**定时点为什么是 03:30**：按**服务器本地时区**解释；控制面每日对账是 **02:00 UTC**（= 10:00 CST），
+03:30 CST = 19:30 UTC 同时避开对账与业务高峰。
+
+**新鲜度一眼可查**：`cat /var/lib/aihub-backup/last-ok`；出问题时看 `/var/log/aihub-backup.log`
+（每次一行 `RESULT=OK/FAIL`，FAIL 带原因：`dump_empty` / `dump_has_no_create_table` / `backup_sh_nonzero` …）。
+⚠️ cron **没有 MTA 就不会给你发信** —— 别指望"失败了会有人通知我"，要盯就盯那两处证据，或接个外部巡检。
+
+### 7.2 阿里云快照（第二层备份，控制台侧）
+
+逻辑备份（上面那套）能恢复到**表/卷**粒度；快照是**整盘块级**、能恢复到**整机**。两者互补，都别省：
+
+1. **先打一个基线快照**（部署完成这一刻）：ECS 控制台 → 实例 → 「云盘」→ 系统盘 → **创建快照**
+   （首次较慢；本机系统盘数据量约 8–9 GiB）。
+2. **建自动快照策略并应用到系统盘**：「存储与快照 → 快照 → **自动快照策略**」→ 新建
+   （建议：每天 **04:00**（本地 CST，避开 03:30 的逻辑备份）、**保留 7 天**）→ **应用到云盘**选系统盘。
+   > 若控制台里找不到入口：策略与云盘**必须同地域**，先在快照页建策略、再"应用到云盘"。
+3. ⚠️ **三条必须知道的**：① 快照是**整盘**、恢复要**停机**（不是"恢复一张表"）；
+   ② 快照是 **crash-consistent**（相当于拔电源那一刻），恢复后建议再跑一次逻辑备份校验；
+   ③ **不要把快照当唯一备份** —— 同账号同地域，误删实例/欠费会一起没；要异地就把逻辑备份推到 OSS。
+
+> 想让快照也自动化：给实例绑**一个含快照权限的 RAM 角色**，再在服务器上用 `aliyun` CLI 定时建快照
+> —— 这样**不需要把 AK/SK 落到服务器上**（比发一对 AccessKey 干净得多）。本目录不做这件事。
+
 ## 8. ⚠️ 这套编排**没有**解决的（如实登记）
 
 1. **控制台只对白名单开放** ⇒ 不命中 `CONVENTIONS.md` §10 的硬门槛②。

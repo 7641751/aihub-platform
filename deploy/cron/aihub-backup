@@ -1,0 +1,14 @@
+# aihub 逻辑备份（MySQL dump + KB 原件卷）—— 交给 /usr/local/bin/aihub-backup.sh
+#
+# 安装：
+#   install -m 755 deploy/backup-cron.sh /usr/local/bin/aihub-backup.sh
+#   install -m 644 deploy/cron/aihub-backup /etc/cron.d/aihub-backup
+#   # 立刻验一次（不必等定时）：env -i /bin/sh /usr/local/bin/aihub-backup.sh && tail -5 /var/log/aihub-backup.log
+#
+# 时区：按**服务器本地时区**解释（本机 Asia/Shanghai, CST）。03:30 CST = 19:30 UTC，
+# 刻意避开控制面的每日对账（02:00 UTC = 10:00 CST）与业务高峰。
+# 保留期：KEEP_DAYS=14（改包装脚本里的默认值，或用 `KEEP_DAYS=30` 覆盖）。
+# 证据：/var/log/aihub-backup.log（每次一行 RESULT=OK/FAIL）；最后一次成功：/var/lib/aihub-backup/last-ok
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 3 * * * root /usr/local/bin/aihub-backup.sh
