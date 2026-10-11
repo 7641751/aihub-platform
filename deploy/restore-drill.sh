@@ -43,9 +43,12 @@ docker run -d --name "$CONTAINER" \
   "${AIHUB_IMAGE_MYSQL:-mysql:8.4}" >/dev/null
 
 echo "=== 等就绪（最多 120 秒）==="
+# ⚠️ **不要用 `mysqladmin ping` 当就绪探针**：它在 "Access denied" 时**也返回 0**（"服务器活着"就算通），
+# 于是会在镜像 entrypoint 的 **init 阶段**就判定"就绪" —— 而那时 root 口令还没生效 ⇒ 后面全是 1045。
+# 真正该验的是"**能认证并查询**"。（实测踩过：`READY_AFTER_SEC=8` 但紧接着全部 access denied。）
 i=0
 while [ "$i" -lt 60 ]; do
-  if docker exec "$CONTAINER" sh -c 'mysqladmin ping -uroot -p"$MYSQL_ROOT_PASSWORD" --silent' >/dev/null 2>&1; then
+  if docker exec "$CONTAINER" sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "SELECT 1"' >/dev/null 2>&1; then
     echo "READY_AFTER_SEC=$((i * 2))"
     break
   fi
