@@ -15,8 +15,10 @@ package com.aihub.common.config;
  *
  * <p><b>这是「控制面写、数据面读」的镜像</b>：{@code tokenLimit} / {@code requestLimit} 由控制面
  * （{@code QuotaAdminService}）写；数据面（网关）**只读**它们。已用量（{@code token_used} /
- * {@code request_used}）是 Redis 预扣 + 每日对账的账，**不进快照**（配额判定不许依赖控制面的已用量，
- * 那是数据面的内部状态）。
+ * {@code request_used}）**不进快照** —— 配额判定不许依赖控制面的已用量，那是数据面的内部状态：
+ * 真实的预扣累计在**数据面的 Redis 桶**里（{@code aihub:quota:{tenantId}:{YYYYMM}} 的 {@code tok}/{@code req}），
+ * 而 {@code quota} 表上那两列是**"预留但未接线"**的（无任何生产写入方，恒为 0；D12 的对账只读不改账）——
+ * 用量的只读出口见 {@code GET /api/quotas/usage}（CONVENTIONS §6.7）。
  *
  * @param tenantId     租户 id
  * @param period       UTC 的 {@code YYYYMM}

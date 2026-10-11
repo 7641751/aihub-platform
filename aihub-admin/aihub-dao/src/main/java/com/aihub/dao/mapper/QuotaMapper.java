@@ -24,8 +24,10 @@ public interface QuotaMapper extends BaseMapper<QuotaEntity> {
      * 更新周期额度（手写乐观锁）：{@code token_limit} / {@code request_limit} 一起写，
      * {@code version} 自增 1，**且仅当** {@code version} 仍等于调用方读到的值。
      *
-     * <p>{@code token_used} / {@code request_used} 刻意**不在这里写**：它们是数据面（Redis 预扣 +
-     * 每日对账写回）的账，控制面改额度不该碰已用量。
+     * <p>{@code token_used} / {@code request_used} 刻意**不在这里写** —— 而且**本仓库没有任何生产代码写它们**
+     * （2026-10-11 实测：全仓库唯一的 {@code UPDATE quota} 就是本方法；每日对账按 D12 只读不改账）。
+     * 这两列是**"预留但未接线"**的，生产环境恒为 0；真实已用量在**数据面的 Redis 桶**里，
+     * 只读出口见 {@code GET /api/quotas/usage}（{@code QuotaUsageService}，口径见 CONVENTIONS §6.7）。
      *
      * <p>调用方必须检查返回值：**0 ⇒ 并发冲突**（另一个请求在「读 version」与「写」之间提交了），
      * 此时**不许静默覆盖**，要抛异常让调用方重试。

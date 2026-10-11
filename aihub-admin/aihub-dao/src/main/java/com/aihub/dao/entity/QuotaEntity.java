@@ -12,8 +12,12 @@ import java.time.LocalDateTime;
  *
  * <p><b>字段与 V1 的 10 列逐字对应</b>：{@code id / tenant_id / period / token_limit / token_used /
  * request_limit / request_used / version / created_at / updated_at}。其中
- * {@code tokenUsed} / {@code requestUsed} 由**数据面**（Redis 预扣 + 每日对账写回）维护，控制面
- * **不写**它们，但实体要能读出来（对账/巡检要看）。{@code version} 是控制面**手写乐观锁**的计数列
+ * {@code tokenUsed} / {@code requestUsed} 是**"预留但未接线"的列**：控制面不写（只读），而**数据面也不写它们** ——
+ * 真实的预扣累计在数据面的 **Redis 桶**里（{@code aihub:quota:{tenantId}:{YYYYMM}} 的 {@code tok}/{@code req}），
+ * 每日对账按 D12 **只读、不改账**，全仓库唯一的 {@code UPDATE quota}（{@code QuotaMapper.compareAndSwapLimits}）
+ * 也不碰这两列 ⇒ 它们在**生产环境恒为 0**。
+ * ⇒ **要看用量请用只读出口 {@code GET /api/quotas/usage}**（{@code QuotaUsageService}，口径见 CONVENTIONS §6.7），
+ * 别拿本实体的已用量字段做看板或计费。{@code version} 是控制面**手写乐观锁**的计数列
  * （本仓库不注册 {@code MybatisPlusInterceptor}，{@code @Version} 不生效 —— 见
  * {@code QuotaAdminService.update}）。
  *
@@ -35,11 +39,12 @@ public class QuotaEntity {
     private String period;
     /** 周期 token 预算；{@code 0} 表示**不限**（决策 D15）。控制面写。 */
     private Long tokenLimit;
-    /** 周期内已用 token 估算累计；由数据面（Redis 预扣 + 对账）维护，控制面**不写**，只读。 */
+    /** 周期内已用 token；**"预留但未接线"**（无任何生产写入方，恒为 0）。真实用量在数据面 Redis 桶里，
+     * 只读出口见 {@code GET /api/quotas/usage}。 */
     private Long tokenUsed;
     /** 周期请求数上限；{@code 0} 表示**不限**（决策 D15）。控制面写。 */
     private Long requestLimit;
-    /** 周期内已用请求数；由数据面维护，控制面**不写**，只读。 */
+    /** 周期内已用请求数；**"预留但未接线"**（无任何生产写入方，恒为 0）。真实用量在数据面 Redis 桶里。 */
     private Long requestUsed;
     /** 控制面手写乐观锁的计数列（每次配置更新 +1）。 */
     private Long version;

@@ -347,6 +347,11 @@ tag `m0`–`m6` 均已打（`m6` = M6 收口点；其后另有若干文档与网
 6. **控制面不隔离租户**（平台运营台的有意设计；升级门槛见 `CONVENTIONS.md` §10）。
 7. **KB**：不做 OCR；`kb_chunk` 存了一份文本；换嵌入模型 = 重建 collection；**检索侧不在本仓库**。
 8. **真上游只有抽测量级**（2 VU × 20s、单模型、未覆盖上游错误路径）⇒ 不可当容量规划依据。
+9. **`quota.token_used` / `request_used` 是"预留但未接线"的列**（无任何生产写入方 ⇒ **生产恒为 0**）：
+   `GET /api/quotas` 的 `tokenUsed` 因此**永远不是真实用量**（实测并列：`PUT` 回 `tokenUsed:0`，
+   同一时刻 `GET /api/quotas/usage` 回 `tokenUsed:73`）。**真实用量只在数据面的 Redis 桶里** ⇒
+   看用量用 `GET /api/quotas/usage`（只读、桶口径），别拿 `GET /api/quotas` 的已用量做看板或计费。
+   同类还有 `api_key.last_used_at`（恒为 `null`）。
 
 ---
 

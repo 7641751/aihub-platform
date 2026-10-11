@@ -281,13 +281,24 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
    并**只报告**偏差（偏差超过 `toleranceRatio` 才计一次 Micrometer 计数 + 一条审计）。
    ⚠️ **对账绝不改账（D12）**：它**不写** `quota.token_used` / `quota.request_used`；偏差如何处置是**人的决定**。
 
-两条必记的边界：
+三条必记的边界：
 
 - **`0` 限额 = 不限（D15）**：`token_limit = 0`（或 `request_limit = 0`）表示**该维度不限制**，不是"额度为零"。
   升级是惰性的：没有配额行 ⇔ 零额度 ⇔ 不限。
 - **Redis 不可用时配额**放行**（D7，fail-open）**：这与限流「降级**仍拒绝**」是**相反**的取向 ——
   配额判的是"这个周期用了多少"，放行只可能造成超额；限流判的是"现在多快"，放行会直接压垮上游。
   想在 Redis 故障期间仍如实拒绝超预算租户，靠 `QuotaFallback`（admin 兜底权威判余额）；关掉它 = 回到纯 fail-open。
+- **`quota.token_used` / `request_used` 是"预留但未接线"的列（2026-10-11 实测补记）**：它们**没有任何生产写入方** ——
+  全仓库唯一的 `UPDATE quota`（`QuotaMapper.compareAndSwapLimits`，见 §7）只写限额与 `version`；
+  第 3 段的对账按 **D12 从不写**它们；建行（`insertZeroRowIfAbsent`）写的是 0 ⇒ **生产环境恒为 0**。
+  因此 **`GET /api/quotas` 的 `tokenUsed` 永远不是真实用量**（它只是那两列的镜像），
+  真实用量**只在数据面的 Redis 桶**里（`aihub:quota:{tenantId}:{YYYYMM}` 的 `tok`/`req`）。
+  **要看用量用 `GET /api/quotas/usage`**（`QuotaUsageService`）：只读、桶口径、**不改账** ——
+  它不物化配额行、不写已用量列、不刷桶 TTL；桶缺失报 `used=0 + bucketMissing=true`，
+  **Redis 不可用则报错（绝不用 0 冒充）**。
+  > 实测并列（2026-10-10，真 compose、真网关）：`PUT /api/quotas` 回 `tokenUsed: 0`，**同一时刻**
+  > 用量出口回 `tokenUsed: 73`（= 那次补全的真实 `total_tokens`），桶 `tok=73 / req=1` 与出口**逐位一致**。
+  ⚠️ **同类**（"列在、写入方不在"）：`api_key.last_used_at`（`ApiKeySummary` 的注释里已明说它恒为 `null`）。
 
 > **设计文档 §6.2 写的 `429 QUOTA_EXCEEDED` 已被本节的 `insufficient_quota` 取代**（数据面契约以 §4 的表为准）。
 > 注意 **admin 信封**里的 `ErrorCode.QUOTA_EXCEEDED` **仍然存在**，那是 **admin 侧的码**（`/api/**` 的 `code`），
