@@ -92,6 +92,10 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - 客户端 bearer 的值是 `<key_id>.<secret>`：`key_id` 形如 `ak_` + 16 位小写字母/数字（总长 19），`secret` 是 32 字节随机数的 URL-safe Base64（无填充）。只有 `secret` 参与哈希。
 - 库中只存 `SHA-256(secret)` 的小写十六进制（64 字符，`key_hash CHAR(64)`），**永不存明文**；用 `ApiKeyHasher.hash` 计算，admin 与 gateway 共用这一份实现。
 - **明文只在铸造时打印一次**，之后无法取回；丢了只能重新铸一把。
+- ⚠️ **`api_key.last_used_at` 没有写入方（"预留但未接线"的列）**：列存在（`V1__init_schema.sql:36`），但**全仓库
+  没有任何代码写它** ⇒ 列表里的 `lastUsedAt` **恒为 `null`**，别拿它当"最近使用时间"。**不为了让它有值而在
+  读路径写库**（那会给只读接口引入副作用）。同类事实一次看全：`quota.token_used` / `quota.request_used`
+  见 §6.7 的第三条边界；**要看真实用量**用 `GET /api/quotas/usage`（只读桶口径）。
 - 铸造走 `ApiKeyMintRunner`（本地 CLI 路径，默认关闭）：`--aihub.mint-key.enabled=true`（容器里是 `AIHUB_MINT_KEY_ENABLED=true`）配合 `--aihub.mint-key.tenant-name` / `--aihub.mint-key.name` / `--aihub.mint-key.valid-days`。**它不是 HTTP 接口** —— 公网上不存在造密钥的入口。
 - gateway 侧的解析顺序是 Caffeine（本地，30s）→ Redis（5m，key 用 `ApiKeyCacheCodec.CACHE_KEY_PREFIX`）→ admin 内部接口；任何一级故障都降级到下一级，**绝不能因为缓存故障而拒绝请求**（2026-09-26 的全栈验收实测这条在 Redis 停机时不成立：admin 的回源撞上 3 秒内部跳预算，请求在鉴权处就 fail-closed 成 `401` —— **该缺陷（D1）本轮已修**，见第 5 节最后两条；残余是 admin 自身真的不可达时客户端拿到 `503 service_unavailable` 而不是 401（D4 起的对客口径），并且**仍然不被负缓存**、控制面一恢复即自动恢复）。「是否可用」的判据只有一处：`ApiKeyView.usable()`。
 - **Redis 是鉴权的信任源，不只是缓存**：gateway 把 Redis 的命中当作**权威结果**，命中即放行、不再回查 MySQL；因此任何能写 `aihub:apikey:<sha256(secret)>` 的对端都能伪造出一把可用的 API Key。Redis 必须与控制面同等级隔离保护（网络、凭据、访问审计）。同样的原因，密钥的**吊销 / 停用不会立刻生效**，要等缓存过期：本机 Caffeine ≤30s、集群 Redis ≤5m。

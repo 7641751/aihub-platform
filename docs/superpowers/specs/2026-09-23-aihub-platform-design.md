@@ -394,10 +394,18 @@ MQ 计量事件 ──▶ admin consumer
 
 **（2026-10-05 实现状态）M5 已完成并推送**（`docs/superpowers/plans/2026-10-02-m5-kb-pipeline.md`，Task 1–8；
 `docker-compose.yml` 增加真 `chroma` 服务 + `admin-files` 卷 + 三个 env）。
-**验收分两档如实登记**（详见 `README.md` 的「M5 到底做了什么」与「已知边界」）：
+**验收分两档如实登记**（逐条原文见 `docs/archive/README-2026-10-09.md` 的「B 档已验」与「已知边界」章节 ——
+README 于 2026-10-09 重写为"功能/用法/技术栈/运行流程"正文后，**逐条验收证据统一收在归档件里**，正文只留摘要与指针）：
 **A 档**（真实 compose，离线可复现）= 失败路径 + **"中断上传不留脏数据"**（本行那句验收标准）+ 一条反证对照；
-**B 档**（上传 ⇒ `READY` 且从 Chroma 取回）需要**一个真实可用的 `/v1/embeddings` 上游** —— 本机没有，
-因此**不在 compose 上声称验过**，该现象由 `KbEmbedIntegrationTest`（真 Chroma 容器 + 进程内假上游）覆盖。
+**B 档**（上传 ⇒ `READY` 且从 Chroma 取回）**✅ 已验过两次**（2026-10-05 首次、2026-10-06 复验）：真实 compose +
+真实 DashScope 上游（`qwen3.7-text-embedding`，**1024 维**）⇒ 813,280 字节 PDF 在 **t=5s `READY`**
+（`chunkCount=9`，Chroma `count=9`、记录 id `3:0..3:8` = `"{docId}:{seq}"` 可反推、`tenant_id` 正确），
+2026-10-06 复验（`md` ⇒ **约 3 秒 `READY`**）并首次验证**检索侧契约**（`query` + `where={"tenant_id":…}`）⇒
+**B 档缺口清零**；原先登记的两件事（**`FAILED` 行可被重传重新驱动**、**`KbEmbeddingClient` 原生 `Authorization`**）
+**都已实现并在真实 compose 上复验**（2026-10-05，原生鉴权、无反代）。
+⚠️ **仍登记为缺口的一条**：Chroma 侧「**写进去 → 失败 → 清理掉**」**未在 compose 上单独做过对照**
+（那需要真实上游先写进去再制造失败），目前仍由 `KbEmbedIntegrationTest`（真 Chroma 容器 + 进程内假上游）覆盖。
+使用侧现状另见 `README.md` §1.3 / §4.4（上传、状态机、检索契约）。
 
 **（2026-10-06 实现状态）M6 已完成**（`docs/superpowers/plans/2026-10-05-m6-load-and-hardening.md`，T1–T7）：
 - **压测**（本机桩上游：固定 120ms 首字 / 64 token）：非流式 50 VU ⇒ **397.5 QPS / P95 129.6ms / P99 133.3ms / 失败 0%**；
