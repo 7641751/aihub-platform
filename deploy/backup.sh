@@ -24,12 +24,10 @@ $COMPOSE exec -T mysql sh -c \
   'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" --single-transaction --routines --triggers --default-character-set=utf8mb4 aihub' \
   > "$OUT/aihub.sql"
 
-echo "==> KB originals (volume aihub-prod_admin-files)"
-docker run --rm \
-  -v aihub-prod_admin-files:/data:ro \
-  -v "$(pwd)/$OUT":/backup \
-  "${AIHUB_IMAGE_ALPINE:-docker.m.daocloud.io/library/alpine:3.20}" \
-  tar czf /backup/admin-files.tgz -C /data .
+echo "==> KB originals（从**已在运行的 admin 容器**里打包它自己挂的卷）"
+# 刻意不用一次性容器：那样要额外拉一个镜像（大陆节点上镜像站不稳定，实测 502），
+# 而 admin 容器本来就挂着这个卷、自带 tar。
+$COMPOSE exec -T admin sh -c 'tar czf - -C /app/data/kb .' > "$OUT/admin-files.tgz"
 
 echo "==> written to $OUT"
 ls -lh "$OUT"
