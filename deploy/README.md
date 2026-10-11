@@ -260,6 +260,17 @@ docker compose --env-file .env.production -f docker-compose.prod.yml config | gr
 > `docker compose --env-file .env.production -f docker-compose.prod.yml -f override-*.yml up -d <svc>`；
 > 验证完删掉 override 即可（本目录的 `override-redis-timeout.yml` 就是这么来的）。
 
+6. **服务器上 `git pull` 偶发失败**（升级时最常见）——两种典型报错与处置：
+   - `error: RPC failed; curl 16 Error in the HTTP2 framing layer` ⇒ 用 HTTP/1.1 重试：
+     `git -c http.version=HTTP/1.1 pull --ff-only`；
+   - `Failed to connect to github.com port 443 ... Connection timed out` ⇒ 这是**链路抖动**（同一台机器首次
+     `git clone` 是通的，几分钟后可能就超时）。**不要**在这里反复重试去卡住升级：`deploy/` 下那几个文件都很小，
+     直接 `scp` 过去 `install -m 755/644`（见 §7.1），并用 `sha256sum` 与本地仓库版本对一下即可。
+   > 判据：`git rev-parse --short HEAD` 对上、`sha256sum` 对上 ⇒ 装的就是仓库那份，与"能不能连 GitHub"无关。
+7. **`chmod +x` 会让 `git pull` 拒绝**：git 把**权限位**当改动（`Please commit your changes or stash them before you merge`）。
+   本仓库已把两个脚本的可执行位**写进索引**（`deploy/backup.sh` / `deploy/backup-cron.sh` / `deploy/gen-cert.sh`
+   均为 `100755`）⇒ 正常 `git pull` 不会再有这个冲突；若你在服务器上手工 `chmod` 过，先 `git checkout -- <path>` 再 pull。
+
 ---
 
 ## 11. 本机实测记录（2026-10-11，**同一份编排**，非 ECS）
