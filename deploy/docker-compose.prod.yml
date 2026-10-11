@@ -176,6 +176,12 @@ services:
       AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION: "true"
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env.production}
+      # ⚠️ **冷启动必须放宽**（2026-10-11 在 2 vCPU ECS 上实测）：出厂值是 300ms（M6 为本机热路径的
+      # 降级预算而收的），但**冷 JVM** 上 Lettuce 建连握手（含 AUTH）会超过 300ms ⇒ 订阅容器启动失败
+      # ⇒ **整个网关上下文起不来**：`Failed to start bean 'configInvalidateListenerContainer'`
+      # （实测崩溃循环：Netty 已监听 8080，随后 refresh 被取消）。实测 **1s 足够**冷启动
+      # （35 秒的启动里 Redis 握手只占很小一段），降级路径仍是有界的 5–6×1s。
+      SPRING_DATA_REDIS_TIMEOUT: ${AIHUB_REDIS_TIMEOUT:-1s}
       SPRING_RABBITMQ_HOST: rabbitmq
       SPRING_RABBITMQ_USERNAME: ${RABBITMQ_USER:-aihub}
       SPRING_RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env.production}

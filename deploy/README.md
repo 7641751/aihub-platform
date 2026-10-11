@@ -207,6 +207,20 @@ docker compose --env-file .env.production -f docker-compose.prod.yml config | gr
 # 期望：**只有一行** published: "8443"
 ```
 
+5. **网关起来就崩，日志是 `Failed to start bean 'configInvalidateListenerContainer'` + `Unable to connect to redis/<unresolved>:6379`**
+   ⇒ 这是**冷启动 + Redis 超时过紧**（2026-10-11 在 2 vCPU ECS 上实测）：出厂 `spring.data.redis.timeout=300ms`
+   在冷 JVM 上不够 Lettuce 建连握手（含 `AUTH`）⇒ 订阅容器启动失败 ⇒ 整个网关上下文被取消（崩溃循环）。
+   本编排已把网关该项默认设为 **1s**（实测够冷启动，且降级路径仍是有界的 5–6×1s）；
+   可用 `AIHUB_REDIS_TIMEOUT` 覆盖。
+   ⚠️ **排查顺序**（别一上来就怀疑网络）：① Redis 自己是否正常 ——
+   `docker exec aihub-prod-redis-1 sh -c 'redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping'` 应回 `PONG`；
+   ② 从网关容器测 TCP —— `docker exec aihub-prod-gateway-1 bash -c 'timeout 3 bash -c "cat < /dev/null > /dev/tcp/redis/6379" && echo TCP_OK'`；
+   ③ 再去看**是不是超时**（对比 `docker logs` 里的 `Started ... in NN seconds`，这类机器冷启动要 30 秒上下）。
+
+> 💡 **临时改配置做验证**（不改仓库文件）：写一个 `override-*.yml` 再
+> `docker compose --env-file .env.production -f docker-compose.prod.yml -f override-*.yml up -d <svc>`；
+> 验证完删掉 override 即可（本目录的 `override-redis-timeout.yml` 就是这么来的）。
+
 ---
 
 ## 11. 本机实测记录（2026-10-11，**同一份编排**，非 ECS）
