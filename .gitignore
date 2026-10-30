@@ -23,6 +23,19 @@ deploy/backups/
 logs/
 data/
 
+# Verification / load-test evidence directories (repo root, created by the SDD workflow).
+# They hold raw Maven, k6 and Docker output plus a few credential fixtures minted during
+# acceptance runs (e.g. .m6t2-logs/api-key.txt). They are process artifacts, not deliverables:
+# the durable conclusions live in docs/ and .superpowers/sdd/*.md. Ignoring the whole family
+# makes an accidental `git add -A` unable to publish a credential.
+.*-logs/
+.*-review-logs/
+.*-rereview-logs/
+.*coverage/
+.hb2-logs/
+.build-check/
+.buildx/
+
 # Sandbox-only Maven local repository, produced by the untracked .mvn/maven.config override below.
 # Not a property of the build itself: a fresh clone resolves dependencies from ~/.m2.
 .m2repo/
