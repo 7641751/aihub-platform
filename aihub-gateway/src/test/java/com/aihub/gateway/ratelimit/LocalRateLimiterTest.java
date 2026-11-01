@@ -44,8 +44,13 @@ class LocalRateLimiterTest {
     @Test
     void refillsAfterTheWindow() {
         LocalRateLimiter limiter = limiter(100);
-        limiter.tryConsume("k", 10, 1);
-        assertThat(limiter.tryConsume("k", 10, 1).allowed()).isFalse();
+
+        // 前置条件（必须断言，不能靠"用完就走"）：本用例测的是补充速率，只有在
+        // 「新桶是满的」这条规则成立时，第一次调用才会真的把桶扣空；如果新桶从
+        // 0 令牌起步，后续两条断言会「恰好」通过而规则已被破坏（覆盖面漏洞）。
+        assertThat(limiter.tryConsume("k", 10, 1).allowed()).as("前置条件：新桶是满的，第一次调用必须放行")
+                .isTrue();
+        assertThat(limiter.tryConsume("k", 10, 1).allowed()).as("burst=1 已用尽，同一时刻第二次必须拒绝").isFalse();
 
         clock.addAndGet(100L);   // qps=10 → 100ms 补一个
 
