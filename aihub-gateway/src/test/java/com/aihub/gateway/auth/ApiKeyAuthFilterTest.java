@@ -178,10 +178,23 @@ class ApiKeyAuthFilterTest {
     }
 
     /**
-     * **形状覆盖**（不是区分性用例）：{@code /v1;x=/chat/completions} 同样命中 controller，
-     * 但它的原始路径以 {@code "/v1;"} 开头、不以 {@code "/v1/"} 开头，**旧守卫也会拒绝**它 ——
-     * 实测把守卫改回 {@code value().startsWith("/v1/")} 本用例仍绿。所以它只能证明「这类变体
-     * 保持被拒绝」，不能用来论证「旧守卫的绕过已关闭」；那个论证只有上面那条百分号编码用例成立。
+     * 回归（**区分性**用例）：{@code /v1;x=/chat/completions} 同样命中 controller，但它的原始路径
+     * 以 {@code "/v1;"} 开头、**不以 {@code "/v1/"} 开头** —— 于是
+     * {@code value().startsWith("/v1/")} 对它是 {@code false}，取反后走
+     * {@code !enabled || !startsWith} 的**放行**分支，旧守卫同样会被绕过。
+     *
+     * <p><b>本 javadoc 曾把这条写成「形状覆盖，不是区分性用例」，并声称「旧守卫也会拒绝它」——
+     * 那是错的（2026-11-01 实测修正）</b>。它只在守卫写成 {@code startsWith("/v1")}（**不带尾斜杠**）
+     * 时才是非区分性的：那时 {@code /v1;x=} 以 {@code /v1} 开头，确实被拦住。带尾斜杠的旧守卫
+     * 与本条路径的正确守卫判据正好相反，因此本条**是**区分性用例。
+     *
+     * <p>实测记录（{@code -Dsurefire.runOrder=reversealphabetical}，11 例）：
+     * <ul>
+     *   <li>守卫改回 {@code value().startsWith("/v1/")} → <b>本条红</b>、百分号编码那条也红
+     *       （2 例失败，均挂在 {@code assertRejectedWithoutTouchingUpstream} 的 401 断言上）；</li>
+     *   <li>守卫改成 {@code value().startsWith("/v1")} → 本条绿、百分号编码那条红（1 例失败）。</li>
+     * </ul>
+     * 也就是说「谁被拦住」完全取决于尾斜杠，这正是不能用前缀匹配做安全判定的原因。
      */
     @Test
     void pathParameterVariantCannotBypassTheGuard() throws Exception {
