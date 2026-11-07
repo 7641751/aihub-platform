@@ -637,6 +637,91 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
   （surefire 的工作目录是**模块**目录，不是仓库根）；③ 判据不是 `BUILD SUCCESS`，而是 **`jacoco.exec` 存在且非空 + 报告里覆盖行数 > 0**。
   可复现的两条命令与实测数字见 `README.md` 的「测试」一节（六条核心链路 91.07%，2026-10-07）。
 
+## 8.5 注释与 javadoc 规范（2026-11-07）
+
+**为什么单列一节**：注释是给下一个人读的，但本仓库的注释里曾同时混着三种互不兼容的写法，
+其中一种（Markdown 粗体）在 Javadoc 里**根本不渲染**，会原样显示成星号 —— 也就是说
+`**权威结论**` 在 IDE 里和在生成的 HTML 里都不是粗体，只是一堆噪音。规范本身不长，长的是
+「为什么每条必须这样」。
+
+### 8.5.1 粗体一律用 `<b>…</b>`，不用 `**…**`
+
+Javadoc 是 HTML 方言，不是 Markdown。`**x**` 会原样输出两个星号。
+本次（2026-11-07）把全仓 **2990 处** `**` 成对替换成 `<b>`，覆盖 **316 个源文件**。
+
+- **成对**的才换；块内个数为奇数的一律**整块跳过并报告**，由人工判断（不猜）。
+  实测跳过 2 个块，都是源文件里真实残缺，已逐个手工修。
+- **`{@code}` / `{@link}` / `{@literal}` / `{@value}` / `<pre>` 内部不动** —— 那些是字面量，
+  典型是路径通配符 `/api/**`、`/internal/**`（全仓 23 处）。
+- **`**` 紧跟在 `/` 后面的（`Router/**x**`）按路径通配符处理、不转换** —— 这是脚本的保守选择，
+  代价是这类粗体要人工写 `<b>`。
+- 替换**不改变行数**：全仓有 **792 处** `类名.java:行号` 形式的外部引用
+  （`docs/` 170 处已进 git，`.superpowers/` 601 处未跟踪），重写注释块会把这些锚点全部打歪。
+  实测 `git diff --numstat` 逐文件 `+2643 −2643`（A 阶段）、`unequalFiles=0`。
+  与 C-2 合并后累计 `+2693 −2693`，仍然零漂移。
+
+### 8.5.2 编号必须带归属：`BUG-Dn` 与 `M<里程碑> 决策 n`
+
+**问题不是风格，是一符多义**。各里程碑的决策表**都从 1 开始编号且互不共享**
+（M4 计划 `docs/superpowers/plans/2026-09-27-m4-business-platform.md` 的 23 条决策表、
+M5 计划 `docs/superpowers/plans/2026-10-02-m5-kb-pipeline.md`、M3 计划
+`docs/superpowers/plans/2026-09-23-m3-traffic-governance.md`），
+而历史缺陷也用了同一套 `Dn`。于是一个裸 `D4` 可以同时指：
+
+| 写法 | 指什么 | 出处 |
+|---|---|---|
+| 缺陷 D4 | 平台故障对客回 `503 service_unavailable`，不谎报成 `401` | `docs/CONVENTIONS.md` §5、`docs/archive/README-2026-10-09.md:331` |
+| M4 决策 4 | 配置失效走 Redis Pub/Sub | M4 计划决策表第 4 行 |
+| M5 决策 4 | `kb_chunk` 的列定义 | M5 计划 `:55` |
+
+实测最刺眼的一对：`aihub-gateway/.../config/ConfigClient.java` 写「主动失效（D4）」，
+而 `aihub-gateway/.../auth/ApiKeyAuthFilter.java` 写「两个状态码（D4 起）」——
+两个不相干的东西同一个编号，跨文件无锚点。
+
+**规范**：
+- 缺陷 → `BUG-D1` / `BUG-D4`（本次把 35 处改名；原始登记处 `docs/archive/README-2026-10-09.md`
+  与 `.superpowers/sdd/d1-fix-report.md` 的标题保持原样，它们是历史记录，不改）。
+- 决策 → `M4 决策 4`（**必须带里程碑前缀**；本次把 30 处补上前缀）。
+
+**存量债务（本轮不处理，已知）**：其余裸 `Dn`（`D5`…`D17`）还有 **140 行**命中。
+它们指向 M4 决策表的其它条目，同样缺前缀，但批量改写会打歪 `docs/` 里 170 处行号锚点，
+且不在本轮授权范围内 ⇒ 登记为债务，由 `docs/check-javadoc.py` 的 `R2-legacy` 计数盯着
+（不硬失败）。
+
+### 8.5.3 成员级 javadoc 写 `@param`
+
+全仓 570 个成员级 javadoc 块里，`@param` 只有 135 次、`@return` 17 次。
+最典型的危害是 `ApiKeyResolver.resolve(String keyHash)` —— 它**一字未提** `keyHash`
+要的是 `ApiKeyHasher.hash(secret)` 的十六进制摘要，而不是明文 secret；
+这条约束当时只写在调用方 `ApiKeyAuthFilter` 的一行代码里。
+
+**规范**：≥ 6 行的成员级 javadoc 块，参数要写 `@param`。
+**为什么是 ≥ 6 行**：一行 getter / record 组件的 javadoc 不写 `@param` 是合理的，
+一条要求几百处无意义改动的规则会被直接关掉，等于没有。
+现状 **142 处**未达标（`R3`，不硬失败，逐步补）。
+
+### 8.5.4 检查脚本
+
+`docs/check-javadoc.py`（纯脚本，不引 Maven 插件、不改构建）：
+
+```
+python docs/check-javadoc.py            # 报告
+python docs/check-javadoc.py --quiet    # 只打印汇总
+```
+
+三条规则，退出码 1 表示有硬失败：
+
+| 规则 | 检查什么 | 硬失败 |
+|---|---|---|
+| `R1` | 注释里的 Markdown 粗体 `**x**`（`{@code}` 内与 `/` 后不计） | **是** |
+| `R2` | 裸的 `D1` / `D4` | **是** |
+| `R2-legacy` | 裸的其它 `Dn` | 否（存量债务，140） |
+| `R3` | ≥6 行成员级 javadoc 缺 `@param` | 否（存量，142） |
+
+**2026-11-07 基线**：`R1 = 0` / `R2 = 0` / `R2-legacy = 140` / `R3 = 142` ⇒ 退出码 **0**。
+脚本扫的是 **9 个源根**（6 个 `src/main/java` + 3 个 `src/test/java`，共 316 个 `.java`，
+1678 个 javadoc 块）。注意 `aihub-service` / `aihub-dao` / `aihub-mq` **没有** `src/test/java`。
+
 ## 9. 提交约定
 
 - conventional commits：`feat:` / `fix:` / `test:` / `chore:` / `docs:` / `refactor:`。
