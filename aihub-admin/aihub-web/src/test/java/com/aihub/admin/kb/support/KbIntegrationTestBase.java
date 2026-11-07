@@ -37,16 +37,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 
 /**
- * kb 集成测试的**助手基类**（M5 Task 5）。
+ * kb 集成测试的<b>助手基类</b>（M5 Task 5）。
  *
  * <p><b>⚠️ 本类刻意不带任何 Spring 注解</b>：注解（尤其 {@code @DynamicPropertySource} /
- * {@code @TestPropertySource} / {@code @Import}）会进入 Spring 的**上下文缓存键**，于是每个子类都会
- * fork 一个**新上下文** —— 那会打破 M5 的硬约束（全量 {@code Tomcat started on port} 必须保持 **7**）。
- * 容器与属性都由 {@code TestContainers} + {@link AbstractIntegrationTest} 那**一处**提供；
+ * {@code @TestPropertySource} / {@code @Import}）会进入 Spring 的<b>上下文缓存键</b>，于是每个子类都会
+ * fork 一个<b>新上下文</b> —— 那会打破 M5 的硬约束（全量 {@code Tomcat started on port} 必须保持 <b>7</b>）。
+ * 容器与属性都由 {@code TestContainers} + {@link AbstractIntegrationTest} 那<b>一处</b>提供；
  * 本类只放"测试之间的公共代码"（HTTP 助手、DB 查询、有界轮询）。
  *
- * <p><b>断言一律走数据库 + 向量库**状态**</b>，不抢 {@code kb.parse}/{@code kb.embed} 队列：
- * 每个 Spring 上下文里都跑着两个消费者，而且它们**争抢**同一个共享队列 ⇒ 抢队列必然 flaky。
+ * <p><b>断言一律走数据库 + 向量库<b>状态</b></b>，不抢 {@code kb.parse}/{@code kb.embed} 队列：
+ * 每个 Spring 上下文里都跑着两个消费者，而且它们<b>争抢</b>同一个共享队列 ⇒ 抢队列必然 flaky。
  * "真的写进 Chroma 了"这条，用生产客户端 {@link KbVectorStoreClient} 直接查（那是外部事实源，不是队列）。
  */
 public abstract class KbIntegrationTestBase extends AbstractIntegrationTest {
@@ -68,7 +68,7 @@ public abstract class KbIntegrationTestBase extends AbstractIntegrationTest {
     @Autowired
     protected RabbitTemplate rabbitTemplate;
 
-    /** 生产客户端：测试用它**直接查 Chroma**（"真的写进去了"只能这么证）。 */
+    /** 生产客户端：测试用它<b>直接查 Chroma</b>（"真的写进去了"只能这么证）。 */
     @Autowired
     protected KbVectorStoreClient vectorStore;
 
@@ -184,7 +184,7 @@ public abstract class KbIntegrationTestBase extends AbstractIntegrationTest {
         return consoleTokenService.issue(new ConsoleClaims(1L, tenantId, ConsoleClaims.ROLE_ADMIN, now, now + 3_600L));
     }
 
-    /** 生成一篇长度**恰好 17000 字符**的 markdown：在 size=800 / overlap=100（步长 700）下恰好 25 段（见 Task 4 的算法）。 */
+    /** 生成一篇长度<b>恰好 17000 字符</b>的 markdown：在 size=800 / overlap=100（步长 700）下恰好 25 段（见 Task 4 的算法）。 */
     protected static byte[] markdownOf(int targetLength, String marker) {
         StringBuilder sb = new StringBuilder(targetLength);
         sb.append("# ").append(marker).append('\n');

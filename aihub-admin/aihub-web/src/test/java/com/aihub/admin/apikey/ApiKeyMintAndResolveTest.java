@@ -33,16 +33,16 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
     private static final String RESOLVE_PATH = "/internal/api-keys/resolve";
 
     /**
-     * {@code expire_at} 往返的容差（毫秒）。**取 1 ms 的理由（2026-09-29 独立评审 M-2 更正）**：
-     * {@code Instant.now()} 带纳秒，而 MySQL 的 {@code DATETIME(3)} 是**四舍五入**（不是截断）到毫秒 ——
-     * 评审实测 {@code .821768400 → .822}，误差 {@code +231600 ns}，因此**正确实现上的确定性上界是
-     * ≤ 0.5 ms**，1 ms 有 2 倍余量（评审 30 次往返、3 个 JVM 时区实测最坏 {@code 481200 ns}，全绿）。
+     * {@code expire_at} 往返的容差（毫秒）。<b>取 1 ms 的理由（2026-09-29 独立评审 M-2 更正）</b>：
+     * {@code Instant.now()} 带纳秒，而 MySQL 的 {@code DATETIME(3)} 是<b>四舍五入</b>（不是截断）到毫秒 ——
+     * 评审实测 {@code .821768400 → .822}，误差 {@code +231600 ns}，因此<b>正确实现上的确定性上界是
+     * ≤ 0.5 ms</b>，1 ms 有 2 倍余量（评审 30 次往返、3 个 JVM 时区实测最坏 {@code 481200 ns}，全绿）。
      *
-     * <p>**取 1 ms 的坏理由（已删除）**：曾经写在这里的「1 秒容差宽到会把基准错吞掉、收紧后任何
-     * 时区级偏差都不可能被吃掉」在事实层面是**错的** —— 本条断言走实体往返，而实体往返在两种基准下
-     * 都**自洽**（写入与读回走同一次连接时区换算、互相抵消），所以它**从来**看不见基准错：修复前的
-     * 变异体（字段换回裸 {@code Instant}）实测让这条用例**保持全绿**。基准的判别力在
-     * {@link #expireAtIsStoredOnTheUtcWallClockBasisSharedByItsSiblingColumns()}（它读的是**原始列**），
+     * <p><b>取 1 ms 的坏理由（已删除）</b>：曾经写在这里的「1 秒容差宽到会把基准错吞掉、收紧后任何
+     * 时区级偏差都不可能被吃掉」在事实层面是<b>错的</b> —— 本条断言走实体往返，而实体往返在两种基准下
+     * 都<b>自洽</b>（写入与读回走同一次连接时区换算、互相抵消），所以它<b>从来</b>看不见基准错：修复前的
+     * 变异体（字段换回裸 {@code Instant}）实测让这条用例<b>保持全绿</b>。基准的判别力在
+     * {@link #expireAtIsStoredOnTheUtcWallClockBasisSharedByItsSiblingColumns()}（它读的是<b>原始列</b>），
      * 不在这个容差上。收紧本身仍然值得保留：它让「往返精确」这件事成为一个有意义的断言。
      */
     private static final long EXPIRY_ROUND_TRIP_TOLERANCE_MILLIS = 1L;
@@ -138,12 +138,12 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 决策 14 的**不兼容变更之所以不需要清 Redis**，全部依据就是这条收敛行为：Redis 里已经躺着的旧
-     * 5 段载荷必须被当成**缓存未命中**（而不是异常）→ 回源 MySQL → 就地重写成 6 段。
+     * 决策 14 的<b>不兼容变更之所以不需要清 Redis</b>，全部依据就是这条收敛行为：Redis 里已经躺着的旧
+     * 5 段载荷必须被当成<b>缓存未命中</b>（而不是异常）→ 回源 MySQL → 就地重写成 6 段。
      *
      * <p>只在 codec 层面钉「返回 {@code null}」证明不了这一点：调用方一个 {@code requireNonNull}、
      * 一次把 null 当故障记 ERROR、或者直接把 decode 结果丢进断言，都会让「收敛」变成「故障」。
-     * 所以这里从 {@code ApiKeyService.resolve} 这一层走一遍真实路径，并断言拿回来的是**真相源**的值
+     * 所以这里从 {@code ApiKeyService.resolve} 这一层走一遍真实路径，并断言拿回来的是<b>真相源</b>的值
      * （旧载荷里的 {@code ak_legacy}/{@code tenantId=9} 不得泄漏出来），以及条目真的被重写了。
      */
     @Test
@@ -168,12 +168,12 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
     }
 
     /**
-     * Finding I1：**非 NULL** 的 {@code expire_at} 走「回源 MySQL」这条路径必须被真正执行一次。
+     * Finding I1：<b>非 NULL</b> 的 {@code expire_at} 走「回源 MySQL」这条路径必须被真正执行一次。
      *
      * <p>本类原有的两个用例都绕过了它：上面那条铸的是永不过期（{@code expireAt = null}），
      * {@code expiredKeyResolvesButIsNotUsable} 解析命中的是 {@code mint} 顺手写进 Redis 的那份载荷。
      * 于是 MyBatis 的 {@code Instant} ↔ MySQL {@code datetime(3)} 映射从没跑过，而
-     * {@link ApiKeyView#usable()} 把 {@code expireAt == null} 当作**永久有效** —— 任何一次读回失败
+     * {@link ApiKeyView#usable()} 把 {@code expireAt == null} 当作<b>永久有效</b> —— 任何一次读回失败
      * （字段映射错、时区错、列名错、值被截断）都会把一年期的 key 静默降级成永不过期的 key，
      * 而这正好落在鉴权路径上。这里删掉缓存逼出 DB 路径，把这条静默降级钉死。
      */
@@ -207,24 +207,24 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
 
     /**
      * Fix 2 的判别器：{@code api_key.expire_at} 是 {@code DATETIME(3)}，而它的兄弟列
-     * {@code created_at} / {@code updated_at} 由数据库生成、存的是 **UTC 墙上时间**。
-     * 因此这一格必须与兄弟们**同一个基准** —— 用 {@link LocalDateTime} 读回来（该载体不做时区
+     * {@code created_at} / {@code updated_at} 由数据库生成、存的是 <b>UTC 墙上时间</b>。
+     * 因此这一格必须与兄弟们<b>同一个基准</b> —— 用 {@link LocalDateTime} 读回来（该载体不做时区
      * 换算），按 UTC 折成的 epoch 毫秒必须等于铸 key 时给的那个 {@code Instant}。
      *
-     * <p><b>为什么不走实体</b>：字段是 {@code Instant} 时，驱动按 **JDBC 连接时区**把瞬时折成墙上时间
+     * <p><b>为什么不走实体</b>：字段是 {@code Instant} 时，驱动按 <b>JDBC 连接时区</b>把瞬时折成墙上时间
      * 写进去、读回再按同一个连接时区折回瞬时（连接时区解析成 LOCAL —— URL 不带
      * {@code serverTimezone} / {@code connectionTimeZone} —— 时用的才是 JVM 默认时区），实体往返
-     * **恰好自洽**，于是「实体读回来的值对」这件事**证明不了列里的基准是对的**（原有往返用例就是这样
+     * <b>恰好自洽</b>，于是「实体读回来的值对」这件事<b>证明不了列里的基准是对的</b>（原有往返用例就是这样
      * 被兜住的）。判别力只能来自裸 JDBC：本用例读的是列本身，不是实体。裸 SQL 写入方（seeder、运维、
      * 以及将来的 {@code where expire_at > now()} 比较）看到的正是这一格。
      *
-     * <p><b>判别力的方言条件（2026-09-29 独立评审 I-1）</b>：本用例读的是**列**，能判别写入基准，
-     * 但差异只在连接时区**不是 UTC** 时才出现 —— 生产方言（{@code serverTimezone=UTC}）下，裸
-     * {@code Instant} 写出来的列与显式 UTC 写出来的列**逐位相同**（评审实测 old − new = 0），
+     * <p><b>判别力的方言条件（2026-09-29 独立评审 I-1）</b>：本用例读的是<b>列</b>，能判别写入基准，
+     * 但差异只在连接时区<b>不是 UTC</b> 时才出现 —— 生产方言（{@code serverTimezone=UTC}）下，裸
+     * {@code Instant} 写出来的列与显式 UTC 写出来的列<b>逐位相同</b>（评审实测 old − new = 0），
      * 因此本用例在生产方言上对两个实现都绿。生产方言下的判别由
      * {@code TimeBasisIsConnectionFlavourIndependentTest}（故意钉非 UTC 连接时区的独立上下文）承担；
      * 本用例在生产方言（{@link com.aihub.admin.support.AbstractIntegrationTest} 的方言）下
-     * 承担的是「发布 URL 下 {@code expire_at} 的基准确实是 UTC」这条**生产等同性**断言。
+     * 承担的是「发布 URL 下 {@code expire_at} 的基准确实是 UTC」这条<b>生产等同性</b>断言。
      *
      * <p>容差 {@value #EXPIRY_ROUND_TRIP_TOLERANCE_MILLIS} ms：只给 {@code Instant.now()} 的
      * 纳秒被 {@code DATETIME(3)} 进位留位。8 小时 = 28800000 ms，比它大七个数量级。
@@ -255,7 +255,7 @@ class ApiKeyMintAndResolveTest extends AbstractIntegrationTest {
                 .isLessThanOrEqualTo(EXPIRY_ROUND_TRIP_TOLERANCE_MILLIS);
     }
 
-    /** Finding I1 的另一半：过期时间在过去时，**DB 回源**同样必须判为不可用（不靠 Redis 里那份载荷）。 */
+    /** Finding I1 的另一半：过期时间在过去时，<b>DB 回源</b>同样必须判为不可用（不靠 Redis 里那份载荷）。 */
     @Test
     void pastExpiryResolvedThroughTheDatabasePathIsNotUsable() {
         ApiKeyService.IssuedKey issued = apiKeyService.mint("t-past-db", "key-past-db",

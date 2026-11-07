@@ -20,13 +20,13 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * D16 的**真上下文**用例：空密钥下登录必须回 500 + {@code CONFIGURATION_ERROR}，而 {@code /api/**} 的门
+ * D16 的<b>真上下文</b>用例：空密钥下登录必须回 500 + {@code CONFIGURATION_ERROR}，而 {@code /api/**} 的门
  * 必须关着（401），且不许把配置故障泄漏成别的形状。
  *
  * <p><b>为什么必须有这一类</b>：空/短密钥这条路径此前只在
  * {@code ConsoleAuthFilterTest} 的 {@code MockMvcBuilders.standaloneSetup(...)} 里被断言过 ——
  * 那是手工装配的 advice，而集成测试 {@code ConsoleLoginIntegrationTest} 用 {@code @TestPropertySource}
- * 强制注入了一把合规密钥，所以真 Spring 上下文里**从来没有**出现过空密钥。也就是说
+ * 强制注入了一把合规密钥，所以真 Spring 上下文里<b>从来没有</b>出现过空密钥。也就是说
  * 「{@code ErrorCode.CONFIGURATION_ERROR} → 500」这个具体映射虽然由
  * {@code GlobalExceptionHandler.handleBizException} 通用推导得出，却从未被端到端跑过。
  * 本类把它跑出来：真容器、真 HTTP、真 {@code @RestControllerAdvice}。

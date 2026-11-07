@@ -5,12 +5,12 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 
 /**
- * 配额的时间粒度：{@code quota.period} 是 **UTC** 的 {@code YYYYMM}（决策 D13）。
+ * 配额的时间粒度：{@code quota.period} 是 <b>UTC</b> 的 {@code YYYYMM}（决策 D13）。
  *
  * <p>为什么是 {@code YYYYMM} 而不是 {@code YYYY-MM}：{@code quota.period} 列是 {@code VARCHAR(8)}，
  * {@code YYYYMM} 恰好 6 字符（留出 2 个字符余量），且按字典序可比较（能精确查、也能做前缀范围查）。
  *
- * <p>为什么**必须**用 UTC：{@code period} 是「哪个自然月」的判断基准，而配额桶的 TTL、对账的
+ * <p>为什么<b>必须</b>用 UTC：{@code period} 是「哪个自然月」的判断基准，而配额桶的 TTL、对账的
  * {@code stat_date} 都以它为准。若用 JVM 默认时区（本机 Asia/Shanghai），月末最后一秒的请求会落到
  * <em>下一个月</em>的桶里 —— 与数据库里按 UTC 折出的 {@code period} 不一致，于是出现「读写两个桶」。
  * 折算一律显式用 {@link ZoneOffset#UTC}（CONVENTIONS §7 同一条纪律）。
@@ -56,7 +56,7 @@ public final class QuotaPeriod {
     }
 
     /**
-     * 严格校验：长度 6 且每一位都是 **ASCII 数字**。
+     * 严格校验：长度 6 且每一位都是 <b>ASCII 数字</b>。
      *
      * <p>不能用 {@code Character.isDigit}（它接受阿拉伯-印度数字等非 ASCII 数字，而
      * {@code Integer.parseInt} 会拒绝它们 —— 校验与解析必须用同一套字符集），也不能靠

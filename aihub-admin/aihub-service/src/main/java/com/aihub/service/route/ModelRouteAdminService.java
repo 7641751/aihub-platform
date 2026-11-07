@@ -17,29 +17,29 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 模型路由的控制面写路径（Task 10）：CRUD。{@code model_route} 是**全局资源**（表里没有
- * {@code tenant_id}），因此按 {@code docs/CONVENTIONS.md} §10 的 **R1**：读写都是平台级，
- * 任何 {@code ADMIN} 都有权；审计的 {@code tenant_id} 记 **SQL NULL**（不是 0、不是操作者的租户）。
+ * 模型路由的控制面写路径（Task 10）：CRUD。{@code model_route} 是<b>全局资源</b>（表里没有
+ * {@code tenant_id}），因此按 {@code docs/CONVENTIONS.md} §10 的 <b>R1</b>：读写都是平台级，
+ * 任何 {@code ADMIN} 都有权；审计的 {@code tenant_id} 记 <b>SQL NULL</b>（不是 0、不是操作者的租户）。
  *
  * <p><b>每一次写都在同一个 {@code @Transactional} 里做三件事</b>：业务写 + 审计
  * （{@link AuditService#record} 刻意不加 {@code REQUIRES_NEW}，因此加入本方法的事务）+
- * {@link ConfigChangePublisher#publishAfterCommit(String)}（注册 after-commit 钩子，**提交之后**才
+ * {@link ConfigChangePublisher#publishAfterCommit(String)}（注册 after-commit 钩子，<b>提交之后</b>才
  * 抬水位并广播）。回滚时三者一起作废 —— 由 Task 8 的
  * {@code ChannelAdminIntegrationTest#rolledBackWritePublishesNothingAndDoesNotRaiseTheWatermark} 钉住
  * （本任务按计划只做正向）。
  *
  * <p><b>唯一键冲突必须翻译成 400</b>：{@code model_route} 上有
  * {@code uk_model_route(model_name, channel_id)}，违反时直接抛的 {@link DuplicateKeyException} 会落到
- * {@code GlobalExceptionHandler} 的兜底分支变成 **500** —— 而 {@code ErrorCode} 里没有 409，
- * 语义上正确的答案就是 **400 {@code INVALID_PARAM}**。见 {@link #insertRoute}：捕获并把底层异常翻成
- * {@link BizException}，message 可读且**不含 SQL / 约束名**。
+ * {@code GlobalExceptionHandler} 的兜底分支变成 <b>500</b> —— 而 {@code ErrorCode} 里没有 409，
+ * 语义上正确的答案就是 <b>400 {@code INVALID_PARAM}</b>。见 {@link #insertRoute}：捕获并把底层异常翻成
+ * {@link BizException}，message 可读且<b>不含 SQL / 约束名</b>。
  *
- * <p><b>悬挂路由必须被挡住</b>：{@code model_route.channel_id} **没有外键**，所以建/改前必须查
- * {@link ChannelMapper}，渠道不存在 → **404 {@code NOT_FOUND}**（否则会产生悬挂路由，快照带着它、
+ * <p><b>悬挂路由必须被挡住</b>：{@code model_route.channel_id} <b>没有外键</b>，所以建/改前必须查
+ * {@link ChannelMapper}，渠道不存在 → <b>404 {@code NOT_FOUND}</b>（否则会产生悬挂路由，快照带着它、
  * 网关静默丢掉）。见 {@link #requireChannelExists}。
  *
  * <p><b>取值校验</b>：{@code status} 只接受 {@code ACTIVE}/{@code INACTIVE}（其它 400），
- * {@code weight}/{@code priority} 必须 ≥ 0（负数 400）。状态字面量用本类的**私有常量**，
+ * {@code weight}/{@code priority} 必须 ≥ 0（负数 400）。状态字面量用本类的<b>私有常量</b>，
  * 不复用 {@code ChannelDescriptor}/{@link com.aihub.common.config.ModelRouteDescriptor} 上的常量
  * （那是网关侧读契约，不为写侧校验去改跨服务类型）。
  */
@@ -144,7 +144,7 @@ public class ModelRouteAdminService {
         return summary(entity);
     }
 
-    /** {@code DELETE /api/routes/{id}} = **真删行**（与 Task 9 的 api-keys 一致；路由没有历史行语义）。 */
+    /** {@code DELETE /api/routes/{id}} = <b>真删行</b>（与 Task 9 的 api-keys 一致；路由没有历史行语义）。 */
     @Transactional
     public void delete(long id, AuditService.Actor actor) {
         ModelRouteEntity entity = requireRoute(id);
@@ -165,7 +165,7 @@ public class ModelRouteAdminService {
     }
 
     /**
-     * 插入并**翻译唯一键冲突**：{@code uk_model_route(model_name, channel_id)} 违反 → 400
+     * 插入并<b>翻译唯一键冲突</b>：{@code uk_model_route(model_name, channel_id)} 违反 → 400
      * {@code INVALID_PARAM}。直接放行 {@link DuplicateKeyException} 会落到兜底分支变成 500
      * （{@code ErrorCode} 里没有 409），而 message 绝不带 SQL / 约束名（只给业务可读的两维值）。
      */

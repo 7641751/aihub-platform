@@ -7,14 +7,14 @@ import java.util.List;
  * kb 流水线（M5 Task 3）的拓扑名字与分批纯函数。
  *
  * <p><b>admin 是唯一的声明方</b>（{@link KbTopologyConfig}）；发布端（{@code KbDocumentPublisher}）
- * 与消费端（Task 4/5）都按这些常量工作。常量是**唯一真相源**：单侧改名不会编译失败，
+ * 与消费端（Task 4/5）都按这些常量工作。常量是<b>唯一真相源</b>：单侧改名不会编译失败，
  * 只会变成「消息永远投不到队列」。
  *
  * <p><b>命名形状</b>照既有计量链路（{@code MeteringTopology}）：业务 exchange + N 条业务队列 +
- * 一个 DLX + 一个 DLQ。两个阶段的**失败代价不同**（解析失败 = 文件问题，嵌入失败 = 上游/向量库问题），
- * 因此各一条队列；**共用 DLQ** 让运维只需盯一个地方。
+ * 一个 DLX + 一个 DLQ。两个阶段的<b>失败代价不同</b>（解析失败 = 文件问题，嵌入失败 = 上游/向量库问题），
+ * 因此各一条队列；<b>共用 DLQ</b> 让运维只需盯一个地方。
  *
- * <p><b>命名与既有计量链路逐字同构</b>（决策 **D16**）：{@code aihub.kb.exchange}（exchange）/
+ * <p><b>命名与既有计量链路逐字同构</b>（决策 <b>D16</b>）：{@code aihub.kb.exchange}（exchange）/
  * {@code aihub.kb.parse}（routing + queue）/ {@code aihub.kb.embed}（routing + queue）/
  * {@code aihub.kb.dlx} / {@code aihub.kb.dlq}，形状与 {@code MeteringTopology} 一一对应。
  * <b>照抄形状、不发明新形状</b>：运维在两个链路之间切换时不该重新学一套命名。
@@ -50,16 +50,16 @@ public final class KbTopology {
     }
 
     /**
-     * 把 {@code chunkCount} 个分段按 {@code batchSize} 切成批次区间（**纯函数**，D10）。
+     * 把 {@code chunkCount} 个分段按 {@code batchSize} 切成批次区间（<b>纯函数</b>，D10）。
      *
-     * <p>产出 {@code ceil(N/batchSize)} 条；**最后一批可以不满**。第 i 批是闭区间
-     * {@code [i*batchSize, min((i+1)*batchSize-1, chunkCount-1)]}。用**区间**而不是"每批带文本"，
+     * <p>产出 {@code ceil(N/batchSize)} 条；<b>最后一批可以不满</b>。第 i 批是闭区间
+     * {@code [i*batchSize, min((i+1)*batchSize-1, chunkCount-1)]}。用<b>区间</b>而不是"每批带文本"，
      * 让消息体积恒定且可重放（文本从 {@code kb_chunk} 读）。
      *
      * @param docId      文档 id（批次归属）
-     * @param chunkCount 分段总数；{@code 0} ⇒ **空列表**（0 段不该走到这里：Task 4 会先判
+     * @param chunkCount 分段总数；{@code 0} ⇒ <b>空列表</b>（0 段不该走到这里：Task 4 会先判
      *                   {@code FAILED("无可提取文本")}，D14）
-     * @param batchSize  每批段数，**必须为正**（0/负会让切分除零或死循环 ⇒ 快速失败）
+     * @param batchSize  每批段数，<b>必须为正</b>（0/负会让切分除零或死循环 ⇒ 快速失败）
      */
     public static List<KbEmbedBatch> embedBatches(long docId, int chunkCount, int batchSize) {
         if (batchSize < 1) {

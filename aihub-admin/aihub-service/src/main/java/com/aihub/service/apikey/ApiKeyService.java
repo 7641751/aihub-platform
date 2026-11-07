@@ -30,19 +30,19 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 而 {@code aihub-common} 必须保持零依赖。
  * <p>密钥视图与「是否可用」的规则都来自 {@link ApiKeyView}，两个服务共用同一个定义。
  *
- * <p><b>Redis 不可用时必须**快速**降级（D1）</b>：{@code resolve} 是
+ * <p><b>Redis 不可用时必须<b>快速</b>降级（BUG-D1）</b>：{@code resolve} 是
  * {@code POST /internal/api-keys/resolve} 的全部业务逻辑，而 gateway 给这一跳的预算是
  * {@code AdminClientConfig.responseTimeout(3s)}。Redis 停机时每一次缓存访问都要等满
- * {@code spring.data.redis.timeout}，**读缓存 + 回写缓存**两次叠加就会超过 3 秒 ——
- * 网关于是把一条**健康**的回答当成传输故障（compose 全栈验收实测 WARN→ERROR 恰好 3.01 秒），
+ * {@code spring.data.redis.timeout}，<b>读缓存 + 回写缓存</b>两次叠加就会超过 3 秒 ——
+ * 网关于是把一条<b>健康</b>的回答当成传输故障（compose 全栈验收实测 WARN→ERROR 恰好 3.01 秒），
  * 一把有效的 key 因此变成 401。所以：
  * <ul>
  *   <li><b>粘性降级</b>：一次 Redis 访问失败之后，接下来 {@link #REDIS_DEGRADE_STICKY_MILLIS}
- *       毫秒内**不再碰 Redis**（连试都不试），请求直接走 MySQL。与网关限流器
+ *       毫秒内<b>不再碰 Redis</b>（连试都不试），请求直接走 MySQL。与网关限流器
  *       {@code RateLimiter} 的粘性降级同款；</li>
  *   <li><b>一次故障只赔一次</b>：「读缓存失败」当场就进入粘性降级，因此同一次 {@code resolve}
- *       里的**回写缓存**会被跳过，不会让同一个请求连赔两次超时；</li>
- *   <li>粘性窗口只影响**缓存**，不影响**正确性**：窗口内照常从 MySQL（真相源）解析，
+ *       里的<b>回写缓存</b>会被跳过，不会让同一个请求连赔两次超时；</li>
+ *   <li>粘性窗口只影响<b>缓存</b>，不影响<b>正确性</b>：窗口内照常从 MySQL（真相源）解析，
  *       窗口过后自动再试一次 Redis。</li>
  * </ul>
  * 这段窗口与 Redis 客户端自己的命令超时（{@code spring.data.redis.timeout}）是两件事：
@@ -54,8 +54,8 @@ public class ApiKeyService {
     private static final Logger log = LoggerFactory.getLogger(ApiKeyService.class);
 
     /**
-     * 「Redis 密钥缓存不可用」的粘性窗口。取 5 秒的理由：它只推迟**缓存**的恢复，
-     * 不推迟**服务**的恢复（窗口内照常从 MySQL 解析），因此可以比网关限流器的 1 秒更宽 ——
+     * 「Redis 密钥缓存不可用」的粘性窗口。取 5 秒的理由：它只推迟<b>缓存</b>的恢复，
+     * 不推迟<b>服务</b>的恢复（窗口内照常从 MySQL 解析），因此可以比网关限流器的 1 秒更宽 ——
      * 宽一点才能把「Redis 挂了期间每个请求都去撞一次超时」真正按下去。
      */
     private static final long REDIS_DEGRADE_STICKY_MILLIS = 5_000L;
@@ -81,27 +81,27 @@ public class ApiKeyService {
     }
 
     /**
-     * 铸造一把 key 并绑定到一个**已存在**的租户上（{@code tenantId} 由调用方保证存在）。
+     * 铸造一把 key 并绑定到一个<b>已存在</b>的租户上（{@code tenantId} 由调用方保证存在）。
      *
      * <p><b>这是密钥生成的唯一实现</b>：{@code newKeyId} + {@code newSecret} + {@code hash} → 组实体 →
      * {@code insert} → 回填缓存 → 返回 {@link IssuedKey}。{@link #mint} 与
      * {@code ApiKeyAdminService.create} 都只能经过这里 —— 密钥格式（{@code ak_} + 16 位
      * {@code [a-z0-9]} + {@code .} + 32 字节 URL-safe base64）已被 {@code ApiKeyToolingTest} 的固定向量
-     * 钉死，**一个字节都不许变**。
+     * 钉死，<b>一个字节都不许变</b>。
      *
-     * <p>{@code expireAt} 是**瞬时**（跨服务契约用 {@code Instant}）；
-     * 落库时显式折成 {@code api_key.expire_at} 的基准 —— **UTC 墙上时间**
+     * <p>{@code expireAt} 是<b>瞬时</b>（跨服务契约用 {@code Instant}）；
+     * 落库时显式折成 {@code api_key.expire_at} 的基准 —— <b>UTC 墙上时间</b>
      * （{@code DATETIME(3)}，与兄弟列 {@code created_at} / {@code updated_at} 同基准）。
      *
      * <p><b>这个换算是承重的</b>：实体字段是 {@code LocalDateTime}（不做时区换算的载体），
      * 库里的那串数字就是 UTC 墙上时间。若这里直接塞 {@code Instant}（或让字段退回 {@code Instant}），
-     * 驱动会按 **JDBC 连接时区**折墙上时间（连接时区解析成 LOCAL 时就是 JVM 默认时区，本机
+     * 驱动会按 <b>JDBC 连接时区</b>折墙上时间（连接时区解析成 LOCAL 时就是 JVM 默认时区，本机
      * Asia/Shanghai），实体往返虽然自洽，但列里的值与兄弟列差 8 小时 —— 裸 SQL 写入方、以及将来
      * {@code where expire_at > now()} 的比较都会错。基准只写在这里与 {@link #loadFromDb} 的读回处
-     * 各一次，**不依赖连接参数也不依赖 JVM 设置**。
+     * 各一次，<b>不依赖连接参数也不依赖 JVM 设置</b>。
      *
      * <p><b>{@code @Transactional} 在这里是承重的</b>：唯一的跨类调用方
-     * {@code ApiKeyAdminService.create} 是**另一个 bean**，只有走代理、注解才生效（同一个类内部的自调用
+     * {@code ApiKeyAdminService.create} 是<b>另一个 bean</b>，只有走代理、注解才生效（同一个类内部的自调用
      * 不会开启事务）。
      */
     @Transactional
@@ -129,7 +129,7 @@ public class ApiKeyService {
 
     /**
      * 「最小内部签发」入口（{@code ApiKeyMintRunner}）：先按名字 {@code findOrCreateTenant}，
-     * 再把生成整段**委托**给 {@link #issue} —— 生成逻辑因此只有一份实现。
+     * 再把生成整段<b>委托</b>给 {@link #issue} —— 生成逻辑因此只有一份实现。
      */
     @Transactional
     public IssuedKey mint(String tenantName, String keyName, Instant expireAt) {
@@ -148,19 +148,19 @@ public class ApiKeyService {
     }
 
     /**
-     * 回源 MySQL。{@code api_key.expire_at} 是 {@code DATETIME(3)}、按 **UTC 墙上时间**存储
+     * 回源 MySQL。{@code api_key.expire_at} 是 {@code DATETIME(3)}、按 <b>UTC 墙上时间</b>存储
      * （与列 {@code created_at} / {@code updated_at} 同基准），实体字段因此是
-     * {@link LocalDateTime}；这里显式声明基准折回 {@link ApiKeyView} 需要的**瞬时**
+     * {@link LocalDateTime}；这里显式声明基准折回 {@link ApiKeyView} 需要的<b>瞬时</b>
      * （{@code toInstant(ZoneOffset.UTC)}）。
      *
-     * <p>不这么做时有**两种错法，后果不同**，两个都要避免：
+     * <p>不这么做时有<b>两种错法，后果不同</b>，两个都要避免：
      * <ul>
-     *   <li>**字段留 {@code Instant}**：驱动按 **JDBC 连接时区**把瞬时折成墙上时间**写进去**
+     *   <li><b>字段留 {@code Instant}</b>：驱动按 <b>JDBC 连接时区</b>把瞬时折成墙上时间<b>写进去</b>
      *       （连接时区解析成 LOCAL —— URL 不带 {@code serverTimezone} / {@code connectionTimeZone} ——
-     *       时用的才是 **JVM 默认时区**），于是**原始列**里存的是那个时区的墙钟，与兄弟列差一个连接
+     *       时用的才是 <b>JVM 默认时区</b>），于是<b>原始列</b>里存的是那个时区的墙钟，与兄弟列差一个连接
      *       时区偏移（本机 Asia/Shanghai 观测到 8 小时）—— 裸 SQL 写入方（seeder / 运维）、以及任何
      *       {@code where expire_at > now()} / {@code utc_timestamp()} 的比较都落在另一个基准上；</li>
-     *   <li>**只在这里用 {@code Timestamp} 读**：列的内容一个字节都没变，错的是**读出来的瞬时** ——
+     *   <li><b>只在这里用 {@code Timestamp} 读</b>：列的内容一个字节都没变，错的是<b>读出来的瞬时</b> ——
      *       驱动把这一格按连接时区解释成瞬时，于是交给 {@link ApiKeyView#usable()} 比较的对象偏了一个
      *       连接时区偏移（这才是「读侧」的错法，原始列本身仍然与兄弟列同基准）。</li>
      * </ul>
@@ -168,15 +168,15 @@ public class ApiKeyService {
      *
      * <p><b>更正（2026-09-29 独立评审 I-2）</b>：这里曾经写着「读出的瞬时整整差 8 小时，而
      * {@link ApiKeyView#usable()} 正是拿这个瞬时与 {@code Instant.now()} 比的，落在鉴权路径上」——
-     * 那条是**错的**。修复前的实体往返是**自洽**的（写入与读回走同一次连接时区换算、互相抵消），
-     * 评审实测往返偏差 231600 ns、{@code usable()} 判定一直正确，**key 并没有提前 8 小时过期**。
-     * 本次修复纠正的是**原始列的基准与兄弟列不一致**（以及由此产生的裸 SQL / 跨列比较错），
+     * 那条是<b>错的</b>。修复前的实体往返是<b>自洽</b>的（写入与读回走同一次连接时区换算、互相抵消），
+     * 评审实测往返偏差 231600 ns、{@code usable()} 判定一直正确，<b>key 并没有提前 8 小时过期</b>。
+     * 本次修复纠正的是<b>原始列的基准与兄弟列不一致</b>（以及由此产生的裸 SQL / 跨列比较错），
      * 不是鉴权判定错。措辞以 {@link ApiKeyEntity} 的类注释为准。
      *
      * <p><b>为什么基准必须写在代码里</b>：发布的两个 URL 都钉了 {@code serverTimezone=UTC}
      * （{@code aihub-admin/aihub-web/src/main/resources/application.yml:8}、{@code docker-compose.yml:65}），
-     * 而在那种方言下旧读法与新读法**逐位相等**（评审实测 old − new = 0）—— 旧代码在生产上
-     * 没有可观测差异。本次改动的价值是**不再依赖那个连接参数**（也不依赖 JVM 时区）：
+     * 而在那种方言下旧读法与新读法<b>逐位相等</b>（评审实测 old − new = 0）—— 旧代码在生产上
+     * 没有可观测差异。本次改动的价值是<b>不再依赖那个连接参数</b>（也不依赖 JVM 时区）：
      * {@code LocalDateTime} + 显式 {@code ZoneOffset.UTC} 在任何方言下都给出同一个答案。
      */
     private Optional<ApiKeyView> loadFromDb(String keyHash) {
@@ -207,7 +207,7 @@ public class ApiKeyService {
     }
 
     /**
-     * 回填缓存：失败只记日志；**正处于粘性降级窗口内时直接跳过**（见类注释「一次故障只赔一次」）。
+     * 回填缓存：失败只记日志；<b>正处于粘性降级窗口内时直接跳过</b>（见类注释「一次故障只赔一次」）。
      * 这一步不参与「回答是什么」，只影响下一次能不能少走一趟 MySQL。
      */
     private void cache(String keyHash, ApiKeyView view) {
@@ -224,8 +224,8 @@ public class ApiKeyService {
     }
 
     /**
-     * 读缓存：失败或**正处于粘性降级窗口内**都返回 {@code null}（调用方回源 MySQL）。
-     * 「窗口内直接返回 null」是 D1 的关键：它让故障期间每个请求只赔**一次**超时（甚至零次），
+     * 读缓存：失败或<b>正处于粘性降级窗口内</b>都返回 {@code null}（调用方回源 MySQL）。
+     * 「窗口内直接返回 null」是 BUG-D1 的关键：它让故障期间每个请求只赔<b>一次</b>超时（甚至零次），
      * 而不是每次都赔满两次。
      */
     private ApiKeyView readCache(String keyHash) {
@@ -264,7 +264,7 @@ public class ApiKeyService {
 
     /**
      * 缓存 key 的唯一构造点。前缀来自 {@link ApiKeyCacheCodec#CACHE_KEY_PREFIX}（跨服务共享），
-     * Task 4 的 gateway 会用**同一个**前缀读同一批 entry，这里绝不能出现第二个字面量。
+     * Task 4 的 gateway 会用<b>同一个</b>前缀读同一批 entry，这里绝不能出现第二个字面量。
      */
     private static String cacheKey(String keyHash) {
         return ApiKeyCacheCodec.CACHE_KEY_PREFIX + keyHash;

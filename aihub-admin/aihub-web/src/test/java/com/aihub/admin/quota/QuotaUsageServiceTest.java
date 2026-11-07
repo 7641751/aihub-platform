@@ -26,7 +26,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * {@link QuotaUsageService} 的**零上下文单测**（纯 JUnit + Mockito，**不启 Spring**）。
+ * {@link QuotaUsageService} 的<b>零上下文单测</b>（纯 JUnit + Mockito，<b>不启 Spring</b>）。
  *
  * <p><b>为什么这些断言必须在这里而不是集成测试</b>：
  * <ol>
@@ -35,11 +35,11 @@ import static org.mockito.Mockito.when;
  *       {@code docs/CONVENTIONS.md} §8 的 7 上下文预算；</li>
  *   <li>纯算术（{@code remaining} 的 {@code max(0, …)} 与 {@code -1 = 不限}）在这里可以逐边界钉，
  *       不必为了一个减法和真容器打交道；</li>
- *   <li>本类**不占**上下文预算，也不写任何共享状态。</li>
+ *   <li>本类<b>不占</b>上下文预算，也不写任何共享状态。</li>
  * </ol>
  *
  * <p><b>只读性在这里也钉一遍</b>：断言 {@code QuotaMapper} 的写方法一次都没被调过 ——
- * 这是 D12 红线在**单元**层的哨兵（集成层另有一条 {@code theUsageEndpointNeverTouchesTheAccounts}）。
+ * 这是 D12 红线在<b>单元</b>层的哨兵（集成层另有一条 {@code theUsageEndpointNeverTouchesTheAccounts}）。
  */
 @ExtendWith(MockitoExtension.class)
 class QuotaUsageServiceTest {
@@ -67,7 +67,7 @@ class QuotaUsageServiceTest {
     // ---------------------------------------------------------------- 1) remaining 的边界
 
     /**
-     * 已用量**超过**限额时 remaining 必须是 {@code 0}（不是负数）：与 {@code QuotaScript} 的
+     * 已用量<b>超过</b>限额时 remaining 必须是 {@code 0}（不是负数）：与 {@code QuotaScript} 的
      * {@code math.max(0, limit - used)} 逐字一致 —— 两边算法一旦漂移，运维看到的"剩余"就会与
      * 判定用的数不同。
      */
@@ -112,7 +112,7 @@ class QuotaUsageServiceTest {
 
     // ---------------------------------------------------------------- 2) 桶的两种"没有值"
 
-    /** 桶不存在（两个字段都读回 null）⇒ {@code used=0} + {@code bucketMissing=true}，**不是**错误。 */
+    /** 桶不存在（两个字段都读回 null）⇒ {@code used=0} + {@code bucketMissing=true}，<b>不是</b>错误。 */
     @Test
     void anAbsentBucketYieldsZeroUsedAndAFlag() {
         when(quotaMapper.selectOne(any())).thenReturn(quota(1_000L, 0L));
@@ -146,7 +146,7 @@ class QuotaUsageServiceTest {
      * Redis 不可用 ⇒ {@code INTERNAL_ERROR}(500) + 明确文案。
      *
      * <p><b>绝不返回 used=0 冒充</b>：那会让运维以为"这个租户一分钱都没花"。这条与网关侧配额的
-     * fail-open（D7）**方向相反**，因为读接口没有"放行"这个概念 —— 报错才是诚实的。
+     * fail-open（D7）<b>方向相反</b>，因为读接口没有"放行"这个概念 —— 报错才是诚实的。
      */
     @Test
     void whenRedisIsDownTheReadFailsLoudlyInsteadOfReportingZero() {
@@ -161,7 +161,7 @@ class QuotaUsageServiceTest {
     }
 
     /**
-     * 桶值是畸形字符串 ⇒ {@code INTERNAL_ERROR}（**缺陷不是降级**）：与每日对账对同一列的处理同款
+     * 桶值是畸形字符串 ⇒ {@code INTERNAL_ERROR}（<b>缺陷不是降级</b>）：与每日对账对同一列的处理同款
      * （那边抛 {@code IllegalStateException}）。静默当 0 会把"桶被写坏了"藏起来。
      */
     @Test
@@ -187,7 +187,7 @@ class QuotaUsageServiceTest {
 
     // ---------------------------------------------------------------- 4) 只读哨兵
 
-    /** 读用量**一个字节都不写**：配额行与桶都不能出现写调用（D12 红线）。 */
+    /** 读用量<b>一个字节都不写</b>：配额行与桶都不能出现写调用（D12 红线）。 */
     @Test
     void theReadPathNeverWritesAnything() {
         when(quotaMapper.selectOne(any())).thenReturn(quota(1_000L, 0L));

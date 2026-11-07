@@ -22,22 +22,22 @@ import java.time.Clock;
 
 /**
  * 配额控制面接口（{@code /api/quotas}，Task 12）：由 {@link ConsoleAuthFilter} 守门
- * （ADMIN 可读写、VIEWER 只读 —— 注意 {@code GET} 在本路径上会**惰性物化**一行零额度行，见
+ * （ADMIN 可读写、VIEWER 只读 —— 注意 {@code GET} 在本路径上会<b>惰性物化</b>一行零额度行，见
  * {@link QuotaAdminService#getOrCreate} 的类注释）。本类只做「HTTP DTO ↔ 服务层入参」的转换与
  * {@link ApiResponse} 包装。
  *
- * <p>响应契约是 **admin 信封**（{@code {"code","message","data"}}）。
+ * <p>响应契约是 <b>admin 信封</b>（{@code {"code","message","data"}}）。
  *
  * <p><b>租户语义（{@code docs/CONVENTIONS.md} §10）</b>：
  * <ul>
- *   <li><b>GET = R3.2（查）</b>：{@code tenantId} **只**取令牌里的（least privilege）—— 今天**不**接受
+ *   <li><b>GET = R3.2（查）</b>：{@code tenantId} <b>只</b>取令牌里的（least privilege）—— 今天<b>不</b>接受
  *       显式覆盖（跨租户列举登记为待办），因此查询参数里没有 {@code tenantId}；</li>
  *   <li><b>PUT = R2（写）</b>：写是平台级，{@code tenantId} 来自请求体（运营必须能对任一租户设额度）。</li>
  * </ul>
  *
  * <p><b>{@code GET /api/quotas/usage}（补的只读用量出口）</b>：额度看 {@code GET /api/quotas}，
- * 已用量看**数据面预扣的 Redis 桶** —— 这个端点把两者合成一个"用了多少、还剩多少"的答案，
- * 且**一个字节都不写**（口径与三条不变量见 {@code QuotaUsageService} 的类注释）。
+ * 已用量看<b>数据面预扣的 Redis 桶</b> —— 这个端点把两者合成一个"用了多少、还剩多少"的答案，
+ * 且<b>一个字节都不写</b>（口径与三条不变量见 {@code QuotaUsageService} 的类注释）。
  *
  * <p>错误一律走 {@link BizException} → {@code GlobalExceptionHandler}
  * （{@code INVALID_PARAM} 400），本类不写任何自定义错误体。
@@ -60,7 +60,7 @@ public class QuotaController {
      * 可注入时钟的构造器（{@code period} 缺省时用它折算当前周期）。
      *
      * <p><b>为什么用 {@link Clock} 而不是 {@code System.currentTimeMillis()}</b>：CONVENTIONS §7
-     * 要求时间基准**写在代码里**、可被判据替代 —— 与 {@code QuotaAdminService} / {@code AuditService}
+     * 要求时间基准<b>写在代码里</b>、可被判据替代 —— 与 {@code QuotaAdminService} / {@code AuditService}
      * 保持同一条纪律（缺省 {@code Clock.systemUTC()} 不依赖 JVM 默认时区，也便于用例钉固定瞬时）。
      */
     public QuotaController(QuotaAdminService quotaAdminService, QuotaUsageService quotaUsageService, Clock clock) {
@@ -83,12 +83,12 @@ public class QuotaController {
     }
 
     /**
-     * 只读用量出口（R3.2）：额度取自 {@code quota} 行、已用量取自**数据面预扣的 Redis 桶**，
+     * 只读用量出口（R3.2）：额度取自 {@code quota} 行、已用量取自<b>数据面预扣的 Redis 桶</b>，
      * 剩余量由服务端按 {@code QuotaScript} 同款规则算好（{@code -1} = 该维不限，D15）。
      *
-     * <p>与 {@code GET /api/quotas} 的**关键差别**：本端点**不惰性物化**任何行、也不写任何东西
+     * <p>与 {@code GET /api/quotas} 的<b>关键差别</b>：本端点<b>不惰性物化</b>任何行、也不写任何东西
      * （配额表的已用量列是预留未接线的；真实用量只在桶里）。桶缺失 ⇒ 200 + {@code bucketMissing=true}；
-     * Redis 不可用 ⇒ {@code INTERNAL_ERROR}，**绝不用 0 冒充**。
+     * Redis 不可用 ⇒ {@code INTERNAL_ERROR}，<b>绝不用 0 冒充</b>。
      */
     @GetMapping("/usage")
     public ResponseEntity<ApiResponse<QuotaUsageService.UsageView>> usage(

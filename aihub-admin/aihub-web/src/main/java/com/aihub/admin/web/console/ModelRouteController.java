@@ -23,13 +23,13 @@ import java.util.List;
  * 模型路由控制面接口（{@code /api/routes}，Task 10）：由 {@link ConsoleAuthFilter} 守门
  * （ADMIN 可读写、VIEWER 只读），本类只做「HTTP DTO ↔ 服务层入参」的转换与 {@link ApiResponse} 包装。
  *
- * <p><b>响应契约是 admin 信封</b>（{@code {"code","message","data"}}），**不是** gateway {@code /v1}
+ * <p><b>响应契约是 admin 信封</b>（{@code {"code","message","data"}}），<b>不是</b> gateway {@code /v1}
  * 的 OpenAI 兼容体 —— 两套契约不许混用。
  *
  * <p><b>{@code model_route} 是全局资源（R1）</b>：列表返回全部行，不按令牌租户过滤
  * （表里也没有 {@code tenantId} 维度可过滤）。
  *
- * <p><b>错误一律走 {@link BizException} → {@code GlobalExceptionHandler}**
+ * <p><b>错误一律走 {@link BizException} → {@code GlobalExceptionHandler}</b>
  * （{@code INVALID_PARAM} 400 / {@code NOT_FOUND} 404），本类不写任何自定义错误体。
  */
 @RestController

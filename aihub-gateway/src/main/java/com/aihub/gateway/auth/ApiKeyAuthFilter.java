@@ -23,10 +23,10 @@ import reactor.core.publisher.Mono;
  * 信封）：数据面客户端是各种 OpenAI SDK，它们只认 {@code error.message}。密钥格式不对也按 401 处理
  * —— 畸形请求头不是参数校验问题，不该回 400 让客户端以为换个 body 就能通过。
  *
- * <p><b>两类失败，两个状态码（D4 起）</b>：
+ * <p><b>两类失败，两个状态码（BUG-D4 起）</b>：
  * <ul>
  *   <li><b>「我们决定了这把 key 无效」</b> → {@code 401 invalid_api_key}：缺 {@code Authorization}、
- *       格式不对、admin **权威地**说没有这把 key（{@link AdminResolution.Status#NOT_FOUND}）、
+ *       格式不对、admin <b>权威地</b>说没有这把 key（{@link AdminResolution.Status#NOT_FOUND}）、
  *       或 admin 给了一份 {@code usable() == false} 的视图（已过期 / 已停用）；</li>
  *   <li><b>「我们无法判定这把 key 是否有效」</b> → {@code 503 service_unavailable}：
  *       {@link AdminResolution.Status#UNAVAILABLE}（admin 不可达 / 超时 / 5xx / 响应畸形 /
@@ -36,11 +36,11 @@ import reactor.core.publisher.Mono;
  * </ul>
  *
  * <p><b>这不是削弱鉴权：两条路径都是拒绝。</b>无论 401 还是 503，请求都不会继续走到限流 / 路由 /
- * 上游，客户端都不会拿到 {@code 200} —— 401 与 503 的区别只在于**诊断通道**：以前平台故障伪装成
+ * 上游，客户端都不会拿到 {@code 200} —— 401 与 503 的区别只在于<b>诊断通道</b>：以前平台故障伪装成
  * 「你的 key 错了」（客户端会去改密钥，是错的反应），现在诚实地告诉客户端「我们暂时判不了，
  * 请稍后重试」，OpenAI SDK 对 5xx 有内建重试，能做出正确反应。因此安全姿态不变。
  *
- * <p>不上 {@code Retry-After}：我们**不知道**这次故障会持续多久（内部跳的 3 秒预算是单次调用的
+ * <p>不上 {@code Retry-After}：我们<b>不知道</b>这次故障会持续多久（内部跳的 3 秒预算是单次调用的
  * 上界，不是恢复时刻），给一个猜出来的值比不给更糟（{@code docs/CONVENTIONS.md} 第 6.6 节）。
  */
 @Component
@@ -52,13 +52,13 @@ public class ApiKeyAuthFilter implements WebFilter {
 
     /**
      * 本次请求密钥的 SHA-256 存放位置。M3 的限流用它当桶的第二维（{@code tenant + api_key}）。
-     * 存**哈希**而不是 secret：它本来就已经算出来了，而且哈希能安全地进日志/指标（secret 不能）。
+     * 存<b>哈希</b>而不是 secret：它本来就已经算出来了，而且哈希能安全地进日志/指标（secret 不能）。
      */
     public static final String ATTRIBUTE_KEY_HASH = "aihub.apiKeyHash";
 
     /**
-     * 守备范围。**必须**用 {@link PathPattern}，不能用 {@code path.startsWith("/v1/")} 这种字符串前缀：
-     * {@code getPath().value()} 是请求行里的**原始（未解码）**路径，而 handler mapping 按**解码后**的
+     * 守备范围。<b>必须</b>用 {@link PathPattern}，不能用 {@code path.startsWith("/v1/")} 这种字符串前缀：
+     * {@code getPath().value()} 是请求行里的<b>原始（未解码）</b>路径，而 handler mapping 按<b>解码后</b>的
      * 路径匹配、并且会剥掉 path parameter。两者不一致就产生绕过 ——
      * {@code POST /%761/chat/completions}（解码后即 {@code /v1/chat/completions}）与
      * {@code POST /v1;x=/chat/completions} 都不满足字符串前缀，过滤器直接放行，却照样命中
@@ -77,7 +77,7 @@ public class ApiKeyAuthFilter implements WebFilter {
     private static final String INVALID_KEY_MESSAGE = "API Key 无效、已过期或已停用";
 
     /**
-     * 「我们**无法判定**这把 key 是否有效」（平台故障）的对客文案。逐字来自本轮登记的契约
+     * 「我们<b>无法判定</b>这把 key 是否有效」（平台故障）的对客文案。逐字来自本轮登记的契约
      * （{@code docs/CONVENTIONS.md} 第 4 节），不要改写。
      */
     private static final String SERVICE_UNAVAILABLE_MESSAGE =
@@ -87,7 +87,7 @@ public class ApiKeyAuthFilter implements WebFilter {
 
     /**
      * {@link ApiKeyResolver} 的契约是「永不返回空 Mono」。万一契约被打破（返回了空 Mono），
-     * 用这个「判不了」哨兵兜底 —— 空 Mono 意味着**无法判定**这把 key 是否有效，与
+     * 用这个「判不了」哨兵兜底 —— 空 Mono 意味着<b>无法判定</b>这把 key 是否有效，与
      * {@link AdminResolution.Status#UNAVAILABLE} 是同一条诊断通道：对客 503。
      * <p><b>只 new 一次</b>：契约被打破与 admin 判定不了共用一个实例，两侧不再各自造同形哨兵。
      */
@@ -157,13 +157,13 @@ public class ApiKeyAuthFilter implements WebFilter {
     }
 
     /**
-     * 「我们**无法判定**这把 key 是否有效」：{@code 503 service_unavailable} + {@code api_error}。
+     * 「我们<b>无法判定</b>这把 key 是否有效」：{@code 503 service_unavailable} + {@code api_error}。
      *
-     * <p>与 {@link #unauthorized} 一样是**拒绝**（下游链一次都不碰），只是诊断通道不同：
+     * <p>与 {@link #unauthorized} 一样是<b>拒绝</b>（下游链一次都不碰），只是诊断通道不同：
      * 401 说的是「你的凭据不行」（客户端该去改密钥），503 说的是「我们这边判不了，稍后重试」
-     * （客户端该退避重试）。把后者报成前者会让客户端做错事 —— 那正是 D4 要修的。
+     * （客户端该退避重试）。把后者报成前者会让客户端做错事 —— 那正是 BUG-D4 要修的。
      *
-     * <p><b>刻意不加 {@code Retry-After}</b>：故障会持续多久是**未知**的（内部跳的 3 秒预算只是
+     * <p><b>刻意不加 {@code Retry-After}</b>：故障会持续多久是<b>未知</b>的（内部跳的 3 秒预算只是
      * 单次调用的上界）。因此「网关只写这四个头」（{@code Retry-After} / {@code Retry-After-MS} /
      * {@code RateLimit-Limit} / {@code RateLimit-Remaining}，见 CONVENTIONS 第 6.6 节）依旧成立。
      * {@code x-request-id} 由排在前面的 {@code RequestIdFilter} 写上，所以 503 一样带它。

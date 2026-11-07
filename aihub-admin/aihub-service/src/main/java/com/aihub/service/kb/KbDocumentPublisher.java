@@ -13,7 +13,7 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
- * kb 流水线的**发布端**（M5 Task 3）：把「这份文档可以开始解析了」的消息在业务写**提交之后**
+ * kb 流水线的<b>发布端</b>（M5 Task 3）：把「这份文档可以开始解析了」的消息在业务写<b>提交之后</b>
  * 投到 {@code kb.parse}。
  *
  * <p><b>为什么必须 after commit</b>：解析消费者（Task 4）会去读 {@code kb_document} 那一行；若在事务里
@@ -21,12 +21,12 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * after-commit 钩子在事务提交后才执行，事务回滚时钩子不执行 —— 于是「消息发出去了但行没提交」不可能发生。
  *
  * <p><b>发布失败绝不让业务写失败</b>（照 {@code ConfigChangePublisher.publish} 的先例，裁定 #6）：
- * 调用本方法时业务写**已经提交**了。把「发不出去」升级成「业务失败」只会让用户以为没存上，
+ * 调用本方法时业务写<b>已经提交</b>了。把「发不出去」升级成「业务失败」只会让用户以为没存上，
  * 然后重试一次已经成功的写。因此 {@link #publishParse(long)} 吞掉所有 {@link RuntimeException}，
  * 只记账 + 打 WARN。
  *
- * <p><b>一次发布丢失的代价（诚实登记）</b>：该 {@code kb_document} 行会**永远停在 {@code PENDING}**
- * （没有别的机制会重发）。Task 6 的 DLQ 只管**消费端**失败，管不到「消息根本没进 broker」⇒
+ * <p><b>一次发布丢失的代价（诚实登记）</b>：该 {@code kb_document} 行会<b>永远停在 {@code PENDING}</b>
+ * （没有别的机制会重发）。Task 6 的 DLQ 只管<b>消费端</b>失败，管不到「消息根本没进 broker」⇒
  * 只能靠计数器 {@value #PUBLISH_FAILURES_METRIC} 告警 + 运维重发。
  */
 @Service
@@ -34,7 +34,7 @@ public class KbDocumentPublisher {
 
     /**
      * 发布失败计数器名（照 {@code ConfigChangePublisher.PUBLISH_FAILURES_METRIC} 的先例）：
-     * 名字是**观测契约**，出现在告警规则与仪表盘里，因此作为常量暴露、由用例钉住，而不是散落的字面量。
+     * 名字是<b>观测契约</b>，出现在告警规则与仪表盘里，因此作为常量暴露、由用例钉住，而不是散落的字面量。
      */
     public static final String PUBLISH_FAILURES_METRIC = "aihub.kb.publish_failures";
 
@@ -51,7 +51,7 @@ public class KbDocumentPublisher {
     }
 
     /**
-     * 事务安全的发布入口：**有活动事务就注册 after-commit 钩子，没有活动事务就立即发布**
+     * 事务安全的发布入口：<b>有活动事务就注册 after-commit 钩子，没有活动事务就立即发布</b>
      * （与 {@code ConfigChangePublisher.publishAfterCommit} 同形，两个分支都被钉死）。
      *
      * <p>用例：{@code KbDocumentPublisherTest#publishesOnlyAfterCommitNeverBefore}（提交前 {@code never()}）
@@ -74,7 +74,7 @@ public class KbDocumentPublisher {
     }
 
     /**
-     * 把 {@code parse:{docId}} 投到 {@code kb.parse}。**永不抛异常**：发布是可丢的触发手段，
+     * 把 {@code parse:{docId}} 投到 {@code kb.parse}。<b>永不抛异常</b>：发布是可丢的触发手段，
      * 文档的真相源是 MySQL（{@code kb_document} + 原件）。
      */
     public void publishParse(long docId) {
@@ -95,7 +95,7 @@ public class KbDocumentPublisher {
     }
 
     /**
-     * 事务安全的嵌入阶段发布入口（Task 4）：**有活动事务就注册 after-commit 钩子，没有就立即发**。
+     * 事务安全的嵌入阶段发布入口（Task 4）：<b>有活动事务就注册 after-commit 钩子，没有就立即发</b>。
      *
      * <p>与 {@link #publishParseAfterCommit(long)} 同形、同样的理由：embed 消费者（Task 5）会按
      * {@code (docId, seq)} 去读 {@code kb_chunk}，必须"段先提交、消息后可见"。
@@ -116,7 +116,7 @@ public class KbDocumentPublisher {
     }
 
     /**
-     * 把 {@code embed:{docId}:{seqFrom}:{seqTo}} 投到 {@code kb.embed}。**永不抛异常**：发布是可丢的
+     * 把 {@code embed:{docId}:{seqFrom}:{seqTo}} 投到 {@code kb.embed}。<b>永不抛异常</b>：发布是可丢的
      * 触发手段，文档的真相源是 MySQL（{@code kb_document} + {@code kb_chunk} + 原件）。
      *
      * <p>残余（诚实登记）：发布丢了 ⇒ 该 doc 会停在 {@code EMBEDDING}（没有别的机制会重发）⇒

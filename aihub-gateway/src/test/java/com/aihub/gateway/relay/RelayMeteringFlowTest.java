@@ -38,7 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 端到端计量：真实 HTTP 进网关 → 中继到假上游 → 计量事件被投递（这里投给内存记录器）。
- * <p>鉴权**开着**（用 {@code @Primary} 假 AdminClient 提供 ApiKeyView），因此能钉住
+ * <p>鉴权<b>开着</b>（用 {@code @Primary} 假 AdminClient 提供 ApiKeyView），因此能钉住
  * 「事件里的 tenantId 来自鉴权结果」以及「响应头 {@code x-request-id} == 事件的 request_id」
  * 这两条最容易写错的契约。Redis 指向不存在的端口，必然 miss 后回源假 admin（与 M1 的
  * {@code ApiKeyAuthFilterTest} 同一套手法）。
@@ -127,7 +127,7 @@ class RelayMeteringFlowTest {
     }
 
     /**
-     * 决策 6 的**端到端**钉子：非流式请求的 {@code ttft_ms} 必须是 NULL。
+     * 决策 6 的<b>端到端</b>钉子：非流式请求的 {@code ttft_ms} 必须是 NULL。
      * <p>它专门防 {@code UsageCapture.ttftMs()}（无论是否流式都测「首个响应体字节」）被误当作落库值
      * 使用 —— 只有 {@code Captured.ttftMs()} 才是「非流式 ⇒ null」的那个。这里非流式响应体确实
      * 到达过网关（body 断言保证），所以「测到过首字节却仍然记 NULL」这一条是真的被验证了。
@@ -184,13 +184,13 @@ class RelayMeteringFlowTest {
     }
 
     /**
-     * 字节级透传（M1 铁律）在**计量开着**时的钉子：观察者必须只复制、不消费。
+     * 字节级透传（M1 铁律）在<b>计量开着</b>时的钉子：观察者必须只复制、不消费。
      * <p>两条断言缺一不可：
      * <ul>
      *   <li>流式响应以 {@code data: [DONE]\n\n} 收尾 —— 观察者若用 {@code read(...)} /
      *       {@code DataBufferUtils.join} 这类会推进读写位置的读法，尾部就会缺字节，这条立刻变红
      *       （而只断言「body 里含 [DONE]」的写法仍可能绿）；</li>
-     *   <li>非流式 body 与上游发出的字节**完全相等** —— 非流式是单块 body，任何字节丢失或重排都逃不掉。</li>
+     *   <li>非流式 body 与上游发出的字节<b>完全相等</b> —— 非流式是单块 body，任何字节丢失或重排都逃不掉。</li>
      * </ul>
      */
     @Test
@@ -249,13 +249,13 @@ class RelayMeteringFlowTest {
     }
 
     /**
-     * 决策 15：超长 model **只**在计量事件里被截断到 128（{@code request_log.model} 是 VARCHAR(128)），
-     * 转发给上游的请求体**逐字节不变**。M2 时这一行会 INSERT 失败 → 重试 3 次 → 进死信队列，
+     * 决策 15：超长 model <b>只</b>在计量事件里被截断到 128（{@code request_log.model} 是 VARCHAR(128)），
+     * 转发给上游的请求体<b>逐字节不变</b>。M2 时这一行会 INSERT 失败 → 重试 3 次 → 进死信队列，
      * 而 DLQ 是任何持合法 API Key 的客户端都能触碰的入口。
      *
      * <p>两条断言必须同时成立：只断言「事件被截断」时，一个把截断错放在转发路径上的实现照样绿 ——
      * 那是客户端可见的行为改变，违反 M1 的字节级透传铁律。因此这里把上游真正收到的 body 与
-     * 客户端发出的 body 做**整体相等**断言（不是 contains）。
+     * 客户端发出的 body 做<b>整体相等</b>断言（不是 contains）。
      */
     @Test
     void oversizedModelIsTruncatedInTheEventButForwardedVerbatim() throws Exception {

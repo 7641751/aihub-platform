@@ -22,24 +22,24 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Task 12 的验收标准 1：**三个实体与 V1 的列一一对应，三张表都能被 MyBatis-Plus 读写**。
+ * Task 12 的验收标准 1：<b>三个实体与 V1 的列一一对应，三张表都能被 MyBatis-Plus 读写</b>。
  *
  * <p>纯映射层是「编译通过 + 有人肉核对了列名」最容易蒙混过去的那种代码：字段名写错（
  * {@code baseUrl} ↔ {@code base_url}）、少一个字段、{@code @TableName} 指错表，编译器一句话都不会说。
- * 因此这里用**真实 MySQL**（容器）把整条路径跑一遍：JDBC 裸 INSERT → mapper 读回 → 逐字段断言。
+ * 因此这里用<b>真实 MySQL</b>（容器）把整条路径跑一遍：JDBC 裸 INSERT → mapper 读回 → 逐字段断言。
  *
  * <p>另外两件事也在这里钉住（都是 Task 13 组装快照的直接依赖）：
  * <ul>
  *   <li><b>读取顺序</b>：{@code rate_limit_policy} 上没有唯一键（决策 17），「同维度取最后一条」
- *       靠的就是 {@code id} 升序 —— 因此容器用例在**不加 ORDER BY** 的读取上断言相对 id 顺序
+ *       靠的就是 {@code id} 升序 —— 因此容器用例在<b>不加 ORDER BY</b> 的读取上断言相对 id 顺序
  *       与插入顺序一致（否则断言的只是用例自己的 SQL 子句）；</li>
- *   <li><b>状态不被 DAO 过滤</b>：同一张表里塞一条 {@code INACTIVE}，它必须**出现**在这次读取里 ——
+ *   <li><b>状态不被 DAO 过滤</b>：同一张表里塞一条 {@code INACTIVE}，它必须<b>出现</b>在这次读取里 ——
  *       ACTIVE 过滤是 Task 13 组装快照的责任（网关侧的 DTO 没有状态分量，见 Task 4 报告 §3），
  *       如果它悄悄挪进 DAO（或被误认为已在 DAO），停用行会被照用而没有任何用例变红。</li>
  * </ul>
  *
  * <p>测试数据一律用一眼可辨的合成值；渠道密钥走真实的 {@link ChannelKeyService} 加密，
- * 并断言落库的串里**没有明文**（明文渠道密钥从不入库）。
+ * 并断言落库的串里<b>没有明文</b>（明文渠道密钥从不入库）。
  */
 class ChannelConfigDaoIntegrationTest extends AbstractIntegrationTest {
 
@@ -195,9 +195,9 @@ class ChannelConfigDaoIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 写入方向也要走一遍 MyBatis-Plus（而不是只信「读回来对」）：{@code insert} 只发送**非 null** 字段，
+     * 写入方向也要走一遍 MyBatis-Plus（而不是只信「读回来对」）：{@code insert} 只发送<b>非 null</b> 字段，
      * 因此字段与列的对应关系在写路径上是另一条独立的风险（漏映射一个字段 = 那一列永远拿库里的默认值）。
-     * 这里插一条完整的渠道行，再断言**每一列**都落了库（key 级策略键 {@code api_key_id} 可空也一并覆盖）。
+     * 这里插一条完整的渠道行，再断言<b>每一列</b>都落了库（key 级策略键 {@code api_key_id} 可空也一并覆盖）。
      */
     @Test
     void aChannelInsertedThroughTheMapperLandsEveryColumnInTheDatabase() {

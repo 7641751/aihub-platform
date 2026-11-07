@@ -8,18 +8,18 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
- * {@code request_log} 月分区的**纯规划逻辑**（不碰数据库，便于把边界条件测干净）。
+ * {@code request_log} 月分区的<b>纯规划逻辑</b>（不碰数据库，便于把边界条件测干净）。
  *
  * <p>命名规则与 V1 一致：分区 {@code pYYYYMM} 覆盖 {@code YYYY-MM} 这个自然月，
- * 其上界是**下个月 1 号**（如 {@code p202611 VALUES LESS THAN ('2026-12-01')}）。
+ * 其上界是<b>下个月 1 号</b>（如 {@code p202611 VALUES LESS THAN ('2026-12-01')}）。
  *
- * <p>只做**向前追加**：因为 MySQL 要求边界严格递增（实测 {@code ADD PARTITION} 在有 pmax 时直接
+ * <p>只做<b>向前追加</b>：因为 MySQL 要求边界严格递增（实测 {@code ADD PARTITION} 在有 pmax 时直接
  * 报 1493），所以新分区只能从「最后一个有界分区的上界」开始逐月生成。中间空洞只报告（见
- * {@link Plan#gaps()}）——补它需要 REORGANIZE 一个**有数据**的分区，会搬数据、长时间持锁，
+ * {@link Plan#gaps()}）——补它需要 REORGANIZE 一个<b>有数据</b>的分区，会搬数据、长时间持锁，
  * 必须由运维决定（计划「决策登记」第 15 条）。
  *
- * <p>{@code RANGE COLUMNS} 只声明**上界**，最低的那个分区下界无界，因此比它更早的时间戳会被
- * **吸收进最低分区**（不是报错）。这里要防的只有上界一侧：上界不够远，行就静默落进 {@code pmax}。
+ * <p>{@code RANGE COLUMNS} 只声明<b>上界</b>，最低的那个分区下界无界，因此比它更早的时间戳会被
+ * <b>吸收进最低分区</b>（不是报错）。这里要防的只有上界一侧：上界不够远，行就静默落进 {@code pmax}。
  */
 public final class RequestLogPartitionPlanner {
 
@@ -79,7 +79,7 @@ public final class RequestLogPartitionPlanner {
 
     /**
      * 解析 {@code information_schema.PARTITIONS.PARTITION_DESCRIPTION}。
-     * RANGE COLUMNS 返回的是**带单引号**的日期字面量（实测 {@code '2026-10-01'}），
+     * RANGE COLUMNS 返回的是<b>带单引号</b>的日期字面量（实测 {@code '2026-10-01'}），
      * {@code pmax} 返回 {@code MAXVALUE}（→ {@code null}）。
      */
     public static LocalDate parseBound(String description) {

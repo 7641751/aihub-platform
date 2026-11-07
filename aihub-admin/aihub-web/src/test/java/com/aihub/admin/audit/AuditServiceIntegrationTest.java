@@ -27,18 +27,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Task 7 的验收：{@code audit_log} 的写入**发生在调用方的事务里**（决策 D8），
+ * Task 7 的验收：{@code audit_log} 的写入<b>发生在调用方的事务里</b>（决策 D8），
  * 且审计内容不含敏感字段、{@code created_at} 按 UTC 墙钟落库。
  *
  * <p>本轮的用例分为四组：
  * <ol>
  *   <li><b>同事务</b>（{@link #recordWritesAnAuditRowInTheSameTransactionAsTheBusinessWrite}）：
- *       业务回滚时审计行必须一起消失。做法是让**本类自己的**事务探针
+ *       业务回滚时审计行必须一起消失。做法是让<b>本类自己的</b>事务探针
  *       （{@link TransactionalProbe}，一个真实的 Spring bean，因此 {@code @Transactional} 的代理语义成立）
- *       先写一条审计、再抛异常；回滚之后该探针的审计行必须**没有留下**。
- *       ⚠️ 这条用例方法**本身不能**标 {@code @Transactional}：那样测试自己的事务会成为边界，
+ *       先写一条审计、再抛异常；回滚之后该探针的审计行必须<b>没有留下</b>。
+ *       ⚠️ 这条用例方法<b>本身不能</b>标 {@code @Transactional}：那样测试自己的事务会成为边界，
  *       探针的回滚在同一事务里被测试吞掉，断言就恒绿、什么也证明不了。
- *       <br>⚠️ 它还带一个**正向对照**：同一个探针在不抛异常时必须真的落下**恰好一行** ——
+ *       <br>⚠️ 它还带一个<b>正向对照</b>：同一个探针在不抛异常时必须真的落下<b>恰好一行</b> ——
  *       否则「record 什么都不写」的实现会让回滚断言恒绿（<i>独立评审 I3</i>）。</li>
  *   <li><b>审计失败 = 业务失败</b>：{@code record} 不允许吞异常。用一个 Jackson 序列化不了的值
  *       把受检 {@code JsonProcessingException} 逼出来，断言它变成 {@code IllegalStateException}。</li>
@@ -47,14 +47,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *       判据是「回读值按 UTC 换算后与 JVM 的 {@code Instant.now()} 同窗口」+「注入固定时钟时落库值
  *       恰好等于那个瞬时」+「用 {@code LocalDateTime}（UTC）绑定的范围查询能找到这一行」。</li>
  *   <li><b>写入边界的脱敏</b>：安全网覆盖 值形态 / 键名 / 嵌套 / 数组 / POJO / 键文本，
- *       并且**只替换不丢字段**、深度上限只削内容不削字段。</li>
+ *       并且<b>只替换不丢字段</b>、深度上限只削内容不削字段。</li>
  * </ol>
  *
  * <p><b>用例数为什么从 7 涨到 21</b>：<i>独立评审</i>（{@code .superpowers/sdd/m4-task-7-review.md}）
  * 实测发现旧用例在三处「删掉功能也照样绿」：回滚用例没有正向对照；三条脱敏用例只断言敏感值
- * **不出现**、从不断言 {@code [REDACTED]} 出现或「被脱敏的键仍然存在」（于是「整条删掉」的实现
+ * <b>不出现</b>、从不断言 {@code [REDACTED]} 出现或「被脱敏的键仍然存在」（于是「整条删掉」的实现
  * 全部通过）；四个值形态正则里有三个被键名路径短路、bcrypt 根本没有用例，且 POJO / 数组 /
- * map 的键这三条泄漏路径完全没有用例。本文件的每一条新用例都对应一个**可被杀死的变异体**
+ * map 的键这三条泄漏路径完全没有用例。本文件的每一条新用例都对应一个<b>可被杀死的变异体</b>
  * （见 {@code .superpowers/sdd/m4-task-7-fix-report.md}），没有一条是凑数。
  *
  * <p><b>本类的每一条断言都只落在自己写的那一行上</b>（按 {@code target_id} 定位，见
@@ -68,7 +68,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@link TransactionalProbeConfiguration} 上并由 {@code @Import} 引入，于是上下文缓存的 key
  * 与共享上下文不同。本仓库已有同样的先例（{@code ConsoleLoginIntegrationTest} /
  * {@code ConsoleMisconfiguredSecretIntegrationTest} 因 {@code @TestPropertySource} 各自起上下文），
- * 这里登记为**已知代价**而不是隐患：反向字母序运行
+ * 这里登记为<b>已知代价</b>而不是隐患：反向字母序运行
  * （{@code -Dsurefire.runOrder=reversealphabetical}）与全量运行都是绿的，说明它不引入顺序依赖。
  */
 @Import(AuditServiceIntegrationTest.TransactionalProbeConfiguration.class)
@@ -85,8 +85,8 @@ class AuditServiceIntegrationTest extends AbstractIntegrationTest {
             "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy";
 
     /**
-     * 只用作**键名**的合成密钥：它不含任何敏感键名片段（apikey/secret/cipher/…），
-     * 所以「键被替换、值原样保留」这件事只能由**键的文本**这一个规则解释。
+     * 只用作<b>键名</b>的合成密钥：它不含任何敏感键名片段（apikey/secret/cipher/…），
+     * 所以「键被替换、值原样保留」这件事只能由<b>键的文本</b>这一个规则解释。
      */
     private static final String SYNTHETIC_SECRET_KEY = "sk-console-rotation-key";
 
@@ -98,7 +98,7 @@ class AuditServiceIntegrationTest extends AbstractIntegrationTest {
      * {@code created_at} 判据的容差（毫秒）。
      *
      * <p>为什么是 5 秒：这条路径只有「服务层写 + 一次 insert + 一次 select」的开销，实测远小于 1 秒；
-     * 5 秒足够吸收一次 GC/容器调度抖动，而**它比 8 小时的时区偏差小 5760 倍**
+     * 5 秒足够吸收一次 GC/容器调度抖动，而<b>它比 8 小时的时区偏差小 5760 倍</b>
      * （28 800 000 ms vs 5 000 ms）—— 所以「回读早 8 小时」或「写入用 JVM 本地墙钟」这两种实现
      * 无论朝哪个方向偏都必然红。旧用例用的「库钟对库钟 + 1 小时容差」恰好把这两种错误都放过去了
      * （独立评审 I2 的实测：8.0 h）。
@@ -510,7 +510,7 @@ class AuditServiceIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 辅助
 
     /**
-     * 「无害键名 + 一种密钥形态」的公共断言：只有**值形态**这一条规则能把值守住。
+     * 「无害键名 + 一种密钥形态」的公共断言：只有<b>值形态</b>这一条规则能把值守住。
      *
      * @param innocuousKey 不含任何敏感键名片段的键（注意：它必须真的无害，否则这条用例就退化成
      *                     在考键名路径 —— 旧用例的 {@code apiKeyCipher}/{@code token} 就是这么被短路的）
@@ -528,9 +528,9 @@ class AuditServiceIntegrationTest extends AbstractIntegrationTest {
     /**
      * 本类专属 action 的行，按 {@code target_id} 在 Java 侧筛出来。
      *
-     * <p>⚠️ 这里**刻意不把 {@code tenant_id}（甚至是值为 {@code null} 的 {@code target_id}）放进 WHERE**：
+     * <p>⚠️ 这里<b>刻意不把 {@code tenant_id}（甚至是值为 {@code null} 的 {@code target_id}）放进 WHERE</b>：
      * 实测 MyBatis-Plus 3.5.17 的 {@code eq} 在值为 {@code null} 时会生成 {@code tenant_id = ?} 并绑
-     * {@code null}，而 SQL 里 {@code x = NULL} 恒为 UNKNOWN —— 于是「无租户」的那些行**查不出来**
+     * {@code null}，而 SQL 里 {@code x = NULL} 恒为 UNKNOWN —— 于是「无租户」的那些行<b>查不出来</b>
      * （本条用例第一版就因此红过：插入成功了，回读却是 0 行）。要按 null 查必须显式写 {@code isNull()}。
      * 这里选择在 Java 侧过滤：行数极少，且不给「null 语义」留任何踩空的机会。
      * （{@code target_id} 每条用例各不相同，所以只按 action 取回来再筛就够了。）
@@ -555,7 +555,7 @@ class AuditServiceIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 模拟 Task 8 手上的 {@code ChannelEntity}：一个**普通 POJO**（字段经 getter 暴露）。
+     * 模拟 Task 8 手上的 {@code ChannelEntity}：一个<b>普通 POJO</b>（字段经 getter 暴露）。
      * 它是「非 String/Map/List 的值」那条泄漏路径的最小复现。
      */
     static final class ChannelPojoProbe {
@@ -585,14 +585,14 @@ class AuditServiceIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * Task 7 自己的事务探针。**必须是真实的 Spring bean**（由 {@link TestConfiguration} 注册），
+     * Task 7 自己的事务探针。<b>必须是真实的 Spring bean</b>（由 {@link TestConfiguration} 注册），
      * 否则 {@code @Transactional} 不会被代理，也就没有事务边界可言。
      *
-     * <p>{@code writeAuditThenFail} 在**同一个事务**里先经 {@link AuditService#record} 写审计、再抛异常：
+     * <p>{@code writeAuditThenFail} 在<b>同一个事务</b>里先经 {@link AuditService#record} 写审计、再抛异常：
      * 若 {@code record} 正确地加入调用方事务，这条审计行必须随事务回滚消失；
      * 若实现改成了 {@code REQUIRES_NEW}，它就活下来 —— 那正是本类要打红的变异体。
      *
-     * <p>{@code writeAuditThenCommit} 是**正向对照**：同一条写路径、不抛异常，必须留下恰好一行。
+     * <p>{@code writeAuditThenCommit} 是<b>正向对照</b>：同一条写路径、不抛异常，必须留下恰好一行。
      * 没有它，回滚用例在「record 什么都不写」的实现下恒绿（独立评审 I3）。
      */
     @TestConfiguration

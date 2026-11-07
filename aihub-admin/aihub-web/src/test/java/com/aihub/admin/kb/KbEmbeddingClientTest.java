@@ -20,11 +20,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.within;
 
 /**
- * M5 Task 5 的**零上下文单测**（不启 Spring）：{@link KbEmbeddingClient} 的协议形状与**超时有界**。
+ * M5 Task 5 的<b>零上下文单测</b>（不启 Spring）：{@link KbEmbeddingClient} 的协议形状与<b>超时有界</b>。
  *
  * <p><b>为什么"超时有界"必须放在这里、而不是放进集成用例</b>：
  * ① 写 {@code FAILED} 的是 Task 6 的自定义 {@code MessageRecoverer}（D7）⇒ 集成层根本走不到 FAILED；
- * ② 容器会**重试 3 次 + 指数退避**，一次 30 秒超时会把集成用例拖到分钟级。
+ * ② 容器会<b>重试 3 次 + 指数退避</b>，一次 30 秒超时会把集成用例拖到分钟级。
  * 单测里把超时配成 {@value #TIMEOUT_SECONDS} 秒、对着一个"挂住不答"的假上游，既精确又快。
  */
 class KbEmbeddingClientTest {
@@ -102,9 +102,9 @@ class KbEmbeddingClientTest {
     }
 
     /**
-     * 真实上游（DashScope / OpenAI 等）都要鉴权，而客户端原先**一个鉴权头都不发** ⇒ 接不上任何带密钥的上游。
-     * 契约：配了就发 {@code Authorization: Bearer <key>}；空白等于没配 ⇒ **一个头都不加**
-     * （默认行为必须与加这个特性之前**逐字相同**，否则既有部署会被静默改变）。
+     * 真实上游（DashScope / OpenAI 等）都要鉴权，而客户端原先<b>一个鉴权头都不发</b> ⇒ 接不上任何带密钥的上游。
+     * 契约：配了就发 {@code Authorization: Bearer <key>}；空白等于没配 ⇒ <b>一个头都不加</b>
+     * （默认行为必须与加这个特性之前<b>逐字相同</b>，否则既有部署会被静默改变）。
      */
     @Test
     void aConfiguredApiKeyIsSentAsABearerTokenAndABlankOneSendsNothing() throws Exception {

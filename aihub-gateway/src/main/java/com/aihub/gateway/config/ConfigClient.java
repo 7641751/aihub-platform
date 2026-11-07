@@ -22,32 +22,32 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * 配置读取的**唯一入口**（§6.3 三级读取 + 两级缓存 + singleflight + 版本比对）。
+ * 配置读取的<b>唯一入口</b>（§6.3 三级读取 + 两级缓存 + singleflight + 版本比对）。
  *
  * <p><b>降级顺序是刻意的（决策 6）</b>：Caffeine 命中就直接用 → 未命中读 Redis（命中既采用它、
- * 也顺手刷新本地副本及其 {@code version}）→ 都没有才回源 admin。**admin 不可达时继续服务手上
- * 已有的陈旧快照（哪怕已过期）**；只有「手上一份快照都没有」（冷启动 + admin 挂）才回落到
+ * 也顺手刷新本地副本及其 {@code version}）→ 都没有才回源 admin。<b>admin 不可达时继续服务手上
+ * 已有的陈旧快照（哪怕已过期）</b>；只有「手上一份快照都没有」（冷启动 + admin 挂）才回落到
  * 遗留单渠道。理由是：30 秒前的路由表远比「没有路由表」安全，而回 503 会违反
  * 「数据面永不因控制面故障而整体不可用」。
  *
  * <p><b>「哪怕已过期」由 {@link #lastGood} 兑现</b>：两级缓存都会过期（本地 30 s、Redis 10 m），
  * 只有它们兜底的实现会在「Redis 挂 + admin 挂」时退化成遗留单渠道并丢掉多渠道路由。
- * 因此本类额外保留一份**永不失效**的最近一次成功快照，仅在编排层（本类）持有，
+ * 因此本类额外保留一份<b>永不失效</b>的最近一次成功快照，仅在编排层（本类）持有，
  * 不写 Redis、不写本地缓存 —— 它绝不能以「真快照」的身份复活一条陈旧的共享条目。
  *
  * <p><b>「手上还有快照时绝不回源」是故障期的第一性规则</b>（2026 二次复审修复 1）：只要两级缓存
- * 或 {@link #lastGood} 还能服务，就**一次回源都不做**。旧实现把 {@code refreshBlocking()} 放在
- * 读取 {@link #lastGood} **之前**，于是「Redis 挂 + admin 挂」时每一个请求都要先付一次完整回源
+ * 或 {@link #lastGood} 还能服务，就<b>一次回源都不做</b>。旧实现把 {@code refreshBlocking()} 放在
+ * 读取 {@link #lastGood} <b>之前</b>，于是「Redis 挂 + admin 挂」时每一个请求都要先付一次完整回源
  * （最长 5 s 的阻塞）才终于服务那份本来就在手上的快照 —— 比不做最近快照兜底时还差。
  *
  * <p><b>回源有冷却窗口（不是限速，是抑制）</b>：一次失败的尝试会占住单飞槽位直到它结束，
- * 所以尝试之间是**串行**的，但**不**受限速 —— 「5 秒超时」是单次尝试的**时长上限**，不是两次
- * 尝试之间的**间隔下限**。admin 快速失败（连接被拒、或返回空快照）时重试速率会逼近请求速率。
+ * 所以尝试之间是<b>串行</b>的，但<b>不</b>受限速 —— 「5 秒超时」是单次尝试的<b>时长上限</b>，不是两次
+ * 尝试之间的<b>间隔下限</b>。admin 快速失败（连接被拒、或返回空快照）时重试速率会逼近请求速率。
  * 因此每次失败的尝试都会记录一个「冷却到什么时候」（{@code aihub.config.refresh-cooldown}，
- * 默认 **5 s**），窗口内不再回源。
+ * 默认 <b>5 s</b>），窗口内不再回源。
  *
- * <p><b>日志与指标在故障期必须是有界的</b>：降级 WARN 的**硬上界是每
- * {@link #COOLDOWN_LOG_INTERVAL_MILLIS}（60 s）一条**，与「是不是本次故障期的第一条」无关 ——
+ * <p><b>日志与指标在故障期必须是有界的</b>：降级 WARN 的<b>硬上界是每
+ * {@link #COOLDOWN_LOG_INTERVAL_MILLIS}（60 s）一条</b>，与「是不是本次故障期的第一条」无关 ——
  * 任何一次缓存命中都会结束「本期」（{@link #clearDegraded()}），只看「本期第一条」的实现会被
  * 二级缓存抖动（命中 → 未命中 → 命中 → 未命中）绕成每周期一条，于是上界失效。同时
  * {@code aihub.config.snapshot.refresh.failures} 把每一次真实尝试都计数 —— 日志给人看，
@@ -65,27 +65,27 @@ import java.util.concurrent.atomic.AtomicReference;
  * <b>名额必须在每一个终态（成功 / 空 / 异常 / 取消超时）上释放</b> —— 只在成功时释放会让
  * 「第一次回源失败」的那次空信号被永久重放，实例再也回不到 admin（详见 {@link #refresh()}）。
  *
- * <p><b>主动失效（D4，M4 接通）</b>：{@link ConfigSubscriber} 订阅
+ * <p><b>主动失效（M4 决策 4，M4 接通）</b>：{@link ConfigSubscriber} 订阅
  * {@code aihub:config:invalidate}，收到一条有效消息后调 {@link #invalidate(long)}。失效必须
- * **同时**清本地层、删共享条目 {@link ConfigCache#REDIS_KEY}、并把写入水位抬到消息里的版本
+ * <b>同时</b>清本地层、删共享条目 {@link ConfigCache#REDIS_KEY}、并把写入水位抬到消息里的版本
  * （见 {@link ConfigCache#invalidateAllCaches(long)}）—— 只清本地是 M3 登记的缺口
  * （{@code docs/CONVENTIONS.md} §6.6 记的 10 分钟上界就是这么来的）。M3 的兜底收敛手段
  * 「版本比对 + TTL」仍然保留。
  *
  * <p><b>线程模型</b>：{@link #current()} 会被 event loop（过滤器/控制器）调用，而
- * {@code AdminClient} 是 WebClient（异步，不阻塞）；Redis 侧是**同步** get/set，因此这里
- * **不引入额外的调度器**，代价的上界就是「每次同步 Redis 调用的 {@code spring.data.redis.timeout}」
+ * {@code AdminClient} 是 WebClient（异步，不阻塞）；Redis 侧是<b>同步</b> get/set，因此这里
+ * <b>不引入额外的调度器</b>，代价的上界就是「每次同步 Redis 调用的 {@code spring.data.redis.timeout}」
  * （2026-10-06 已从 2 s 收到 300 ms —— 2 s 时"每条命令一次超时"会在请求路径上串行累加成 10–12 s，
  * 见 {@code RedisTimeoutBudgetTest} 与 README 的 M6 边界）。
  *
  * <p><b>「本地命中时到底读不读 Redis」取决于主动失效通道有没有接上</b>（2026-10-06）：
- * {@link #probeRedisVersionOnLocalHit} 为 {@code false}（通道已接上，**生产默认**）时，本地命中
- * **一次都不读** —— 本类因此真的回到「Redis 调用只发生在本地缓存 miss 时（30 秒那一档）」这个原始设计，
- * 收敛交给 M4 的主动失效广播；为 {@code true}（M3 形态 / 本仓库的测试环境）时保留**逐请求**版本探测，
- * 那是那种部署下**唯一**的跨实例收敛手段（拿掉会让收敛上界退回最长 10 分钟）。
+ * {@link #probeRedisVersionOnLocalHit} 为 {@code false}（通道已接上，<b>生产默认</b>）时，本地命中
+ * <b>一次都不读</b> —— 本类因此真的回到「Redis 调用只发生在本地缓存 miss 时（30 秒那一档）」这个原始设计，
+ * 收敛交给 M4 的主动失效广播；为 {@code true}（M3 形态 / 本仓库的测试环境）时保留<b>逐请求</b>版本探测，
+ * 那是那种部署下<b>唯一</b>的跨实例收敛手段（拿掉会让收敛上界退回最长 10 分钟）。
  *
- * <p>⚠️ 若将来把**本地 miss** 那条路也做成逐请求（今天不是），必须像 {@code ApiKeyResolver} 那样
- * 把 Redis I/O 切到 {@code boundedElastic}。({@link #current()} 是**同步** API：直接
+ * <p>⚠️ 若将来把<b>本地 miss</b> 那条路也做成逐请求（今天不是），必须像 {@code ApiKeyResolver} 那样
+ * 把 Redis I/O 切到 {@code boundedElastic}。({@link #current()} 是<b>同步</b> API：直接
  * {@code .block()} 式的 offload 只会把事件循环按得更久，彻底解法是异步接口改动。)
  */
 public class ConfigClient {
@@ -108,7 +108,7 @@ public class ConfigClient {
     public static final String REFRESHED_METRIC = "aihub.config.snapshot.refreshed";
 
     /**
-     * 回源**尝试失败**的次数（含 admin 报错、空快照、以及 {@code refreshBlocking()} 超时）。
+     * 回源<b>尝试失败</b>的次数（含 admin 报错、空快照、以及 {@code refreshBlocking()} 超时）。
      * 与 {@link #REFRESHED_METRIC} 一起构成「故障持续了多久」的信号 —— WARN 会被限流，
      * 计数不会，告警必须架在计数上。
      */
@@ -126,7 +126,7 @@ public class ConfigClient {
     private final Clock clock;
     private final AtomicReference<Mono<ConfigSnapshot>> inFlight = new AtomicReference<>();
     /**
-     * **永不失效**的最近一次成功快照（决策 6 的「哪怕已过期」）。
+     * <b>永不失效</b>的最近一次成功快照（决策 6 的「哪怕已过期」）。
      *
      * <p>两级缓存都有 TTL，TTL 是「多久之后重新确认」，不是「多久之后放弃服务」。仅靠两级缓存时，
      * 「本地已过期 + Redis 不可用 + admin 不可达」这一组合会让网关掉回单条遗留渠道、丢掉多渠道路由
@@ -134,7 +134,7 @@ public class ConfigClient {
      * 「真快照」的身份复活一条陈旧共享条目，覆盖掉 admin 恢复后别的实例写进去的新版本），
      * 也不回写本地缓存（那是 TTL 的职责）。
      *
-     * <p>它同时是**故障期的短路开关**：非空就说明「手上还有快照」，于是冷却窗口内一次回源都不做
+     * <p>它同时是<b>故障期的短路开关</b>：非空就说明「手上还有快照」，于是冷却窗口内一次回源都不做
      * （{@link #inCooldown()}），请求不再为一份本已拿得到的快照付出回源代价。
      */
     private final AtomicReference<ConfigSnapshot> lastGood = new AtomicReference<>();
@@ -142,53 +142,53 @@ public class ConfigClient {
     private final Counter refreshFailuresCounter;
     /**
      * 下一次允许回源的最早时刻（{@link #clock} 基准），`0` = 立即可回源。
-     * 在**每一次回源尝试开始时**推进，与这次尝试成功还是失败无关（见 {@link #markAttemptWindow()}）；
+     * 在<b>每一次回源尝试开始时</b>推进，与这次尝试成功还是失败无关（见 {@link #markAttemptWindow()}）；
      * {@link #invalidate(long)} 显式把它清回 `0`。
      */
     private final AtomicLong nextAttemptAt = new AtomicLong();
     /**
-     * 「正处于故障期」。**它不再是日志放行的依据**，只用来选 {@link #lastDegradedLogAt} 的写法
+     * 「正处于故障期」。<b>它不再是日志放行的依据</b>，只用来选 {@link #lastDegradedLogAt} 的写法
      * （无争用时 {@code set}，有争用时 CAS）：放行只由播报间隔决定（三次复审修复 2 —— 任何一次
      * 缓存命中都会把它清回 {@code false}，靠它放行等于让缓存抖动产生每周期一条 WARN）。
      * 用 CAS 而不是 {@code synchronized}：这条路径在请求线程上，它只决定日志怎么打，不决定
      * 数据面行为，因此绝不能在这里引入锁。
      */
     private final AtomicBoolean degraded = new AtomicBoolean();
-    /** 上一条降级 WARN 的时间戳（毫秒）。**日志放行的唯一依据**：距今不足 60 s 就一条都不打。 */
+    /** 上一条降级 WARN 的时间戳（毫秒）。<b>日志放行的唯一依据</b>：距今不足 60 s 就一条都不打。 */
     private final AtomicLong lastDegradedLogAt = new AtomicLong();
-    /** 当前快照 version 的**可观测镜像**（{@link Gauge} 需要 Number，不能直接量一个 record）。 */
+    /** 当前快照 version 的<b>可观测镜像</b>（{@link Gauge} 需要 Number，不能直接量一个 record）。 */
     private final AtomicLong visibleVersion = new AtomicLong();
 
     /**
-     * <b>本地命中时要不要再读一次 Redis 版本</b>（2026-10-06）。由**主动失效通道有没有真的接上**
+     * <b>本地命中时要不要再读一次 Redis 版本</b>（2026-10-06）。由<b>主动失效通道有没有真的接上</b>
      * 决定，而不是由"哪条实现更省"决定：
      *
      * <ul>
      *   <li><b>{@code false}（通道已接上，生产默认形态）</b>：本地命中直接服务本地。收敛由
-     *       M4 的主动失效广播（{@code aihub:config:invalidate}）承担 —— 跨实例的最新版本**必然**
+     *       M4 的主动失效广播（{@code aihub:config:invalidate}）承担 —— 跨实例的最新版本<b>必然</b>
      *       源于一次控制面变更，而那次变更的失效消息已经发给了本实例，用不着逐请求去探。
      *       这同时让 {@link #current()} 的 Redis 开销降为「本地 miss 时那一次」，与本节
-     *       「只发生在本地缓存 miss 时」的原始设计**重新一致**。</li>
+     *       「只发生在本地缓存 miss 时」的原始设计<b>重新一致</b>。</li>
      *   <li><b>{@code true}（通道没接上：M3 形态 / 本仓库的测试环境）</b>：保留逐请求版本探测 ——
-     *       此时它是**唯一的**跨实例收敛手段（{@code ConfigCacheTest} 里那段刻意偏离的说明就是它），
-     *       拿掉会让收敛上界退回**最长 10 分钟**。</li>
+     *       此时它是<b>唯一的</b>跨实例收敛手段（{@code ConfigCacheTest} 里那段刻意偏离的说明就是它），
+     *       拿掉会让收敛上界退回<b>最长 10 分钟</b>。</li>
      * </ul>
      *
-     * <p><b>为什么这条在故障期尤其值钱</b>：Redis 挂掉时**失效通道同时也不可用**，探测既拿不到结论、
+     * <p><b>为什么这条在故障期尤其值钱</b>：Redis 挂掉时<b>失效通道同时也不可用</b>，探测既拿不到结论、
      * 又各付满一次 {@code spring.data.redis.timeout}（2026-10-06 实测：2 s 时单请求 10–12 s，
-     * 收到 300 ms 后 ~1.65 s）—— 省掉的那一次是**纯粹的等待**。
+     * 收到 300 ms 后 ~1.65 s）—— 省掉的那一次是<b>纯粹的等待</b>。
      *
-     * <p><b>默认值的方向是刻意的</b>：旧构造函数（测试与旧装配）一律取 {@code true}，即**保持**
+     * <p><b>默认值的方向是刻意的</b>：旧构造函数（测试与旧装配）一律取 {@code true}，即<b>保持</b>
      * 逐请求探测 —— 装配漏传这个参数时的后果是"多读一次 Redis"，而不是"静默丢掉收敛手段"。
      */
     private final boolean probeRedisVersionOnLocalHit;
 
     /**
-     * 不带注册表的便捷重载：计数进 Micrometer 的**全局复合注册表**
+     * 不带注册表的便捷重载：计数进 Micrometer 的<b>全局复合注册表</b>
      * （Spring Boot 默认把各注册表挂在它上面，没有注册表时是安全空操作）。
      *
      * <p><b>它只是「随手 new 一个」时的便利</b>，不是给测试或生产装配用的：全局静态注册表在测试之间
-     * 会互相污染，所以 {@code ConfigConfig} 与单元测试一律走下面那个**显式注册表**的构造器
+     * 会互相污染，所以 {@code ConfigConfig} 与单元测试一律走下面那个<b>显式注册表</b>的构造器
      * （与 {@code MeteringConfig} 的同一套纪律）。需要隔离性时请显式传注册表。
      */
     public ConfigClient(ConfigCache cache, AdminClient adminClient, UpstreamProperties upstream,
@@ -204,9 +204,9 @@ public class ConfigClient {
     /**
      * 测试专用接缝：冷却窗口与降级日志节流的时间基准改由注入的 {@link Clock} 提供。
      *
-     * <p>它存在的理由是**一条真实的时间脆点**：`ConfigCacheTest` 里那条「两级缓存都过期之后
+     * <p>它存在的理由是<b>一条真实的时间脆点</b>：`ConfigCacheTest` 里那条「两级缓存都过期之后
      * 同版本必须被重新写回 Redis」的用例，既要等本地 80 ms TTL 过期、又要等 80 ms 冷却窗口过去，
-     * 之后还必须在**下一个 80 ms 之内**观察到刚填回本地的条目。用真实时钟时，任何 ≥80 ms 的停顿
+     * 之后还必须在<b>下一个 80 ms 之内</b>观察到刚填回本地的条目。用真实时钟时，任何 ≥80 ms 的停顿
      * 都会把那条断言翻成空（全量跑里实测红过一次）。把本地 TTL（{@code ConfigCache} 的
      * {@code Ticker}）与这里的时间基准接到同一个假时钟上，整条用例就变成确定的 —— 断言一条不动。
      *
@@ -218,10 +218,10 @@ public class ConfigClient {
     }
 
     /**
-     * 全量接缝（**装配点**用）：再多一个「本地命中时要不要探一次 Redis 版本」，语义见字段注释。
+     * 全量接缝（<b>装配点</b>用）：再多一个「本地命中时要不要探一次 Redis 版本」，语义见字段注释。
      *
      * <p><b>为什么用独立构造器而不是给 {@link GatewayConfigProperties} 加一个分量</b>：后者是 record，
-     * 加一个分量会让**每一个** {@code new GatewayConfigProperties(...)} 的调用点编译失败 ——
+     * 加一个分量会让<b>每一个</b> {@code new GatewayConfigProperties(...)} 的调用点编译失败 ——
      * 这条顾虑与实测处数已记在 {@code ConfigInvalidateProperties} 的 javadoc 上（评审核实 8 处）。
      */
     ConfigClient(ConfigCache cache, AdminClient adminClient, UpstreamProperties upstream,
@@ -243,11 +243,11 @@ public class ConfigClient {
     }
 
     /**
-     * 当前生效的快照。三级顺序 + 版本比对 + 兜底，**永不 null / 永不抛**。
+     * 当前生效的快照。三级顺序 + 版本比对 + 兜底，<b>永不 null / 永不抛</b>。
      *
-     * <p><b>登记的残留阻塞面（三次复审记录，本轮不修）</b>：冷却窗口**过去之后**、而
+     * <p><b>登记的残留阻塞面（三次复审记录，本轮不修）</b>：冷却窗口<b>过去之后</b>、而
      * {@link #lastGood} 已经有内容时，本方法仍会先走 {@link #refreshBlocking()}，因此
-     * **每个冷却窗口最多有一个请求**会为一次挂死的 admin 阻塞自己的线程最长
+     * <b>每个冷却窗口最多有一个请求</b>会为一次挂死的 admin 阻塞自己的线程最长
      * {@link #REFRESH_TIMEOUT}（5 s）。这比修复前好得多（修复前是「每个请求都先付一次回源」），
      * 而且这部分读已经被 {@code RateLimitFilter} 放到可阻塞的弹性线程池上、不再占 event loop，
      * 但必须记在这里：它是「每窗口一次」，不是「零阻塞」。彻底消除它需要把快照读取改成完全异步
@@ -293,9 +293,9 @@ public class ConfigClient {
     /**
      * 两级缓存都过期/不可用、回源也没拿到真快照时的最后两级兜底（决策 6）。
      *
-     * <p>顺序刻意固定为 {@code lastGood → legacyFallback}：手上那份**永不失效**的最近快照仍然比
+     * <p>顺序刻意固定为 {@code lastGood → legacyFallback}：手上那份<b>永不失效</b>的最近快照仍然比
      * 「只剩一条遗留渠道」好得多（决策 6 的「哪怕已过期」）；它不写任何缓存，因此不会复活陈旧
-     * 共享条目。到这一层时**已经不再回源** —— 调用方（{@link #current()}）已经决定过这一次
+     * 共享条目。到这一层时<b>已经不再回源</b> —— 调用方（{@link #current()}）已经决定过这一次
      * 要不要回源了。
      */
     private ConfigSnapshot serveRetainedOrLegacy() {
@@ -313,10 +313,10 @@ public class ConfigClient {
     }
 
     /**
-     * 冷却窗口门禁：**窗口内绝不再回源**。
+     * 冷却窗口门禁：<b>窗口内绝不再回源</b>。
      *
-     * <p>返回 {@code true} 表示「调用方直接把返回值服务出去，这一次不回源」。它**与手上有没有快照
-     * 无关**（冷启动同样要抑制重试）；{@link #lastGood} 只决定后续服务的是那份快照还是遗留单渠道，
+     * <p>返回 {@code true} 表示「调用方直接把返回值服务出去，这一次不回源」。它<b>与手上有没有快照
+     * 无关</b>（冷启动同样要抑制重试）；{@link #lastGood} 只决定后续服务的是那份快照还是遗留单渠道，
      * 以及要不要播报一条降级 WARN。
      */
     private boolean inCooldown() {
@@ -336,8 +336,8 @@ public class ConfigClient {
     /**
      * 过滤掉「没有内容」的快照：admin 在冷启动（还没组装过任何渠道/路由）时会这么回。
      * 它必须与 {@code Optional.empty()} 同序降级到遗留渠道，否则「控制面空表 + 渠道在
-     * {@code aihub.upstream.*} 里」的部署会得到一份**空快照**，所有模型都查不到候选。
-     * 有渠道但暂时没有路由的快照**不**算空 —— 那是一个合法的中间状态，不该被遗留渠道顶掉。
+     * {@code aihub.upstream.*} 里」的部署会得到一份<b>空快照</b>，所有模型都查不到候选。
+     * 有渠道但暂时没有路由的快照<b>不</b>算空 —— 那是一个合法的中间状态，不该被遗留渠道顶掉。
      */
     private ConfigSnapshot usable(ConfigSnapshot snapshot) {
         if (snapshot == null) {
@@ -349,7 +349,7 @@ public class ConfigClient {
     /**
      * 两级缓存的一致读（§6.3 的版本比对），顺带维护 {@link #lastGood}。
      *
-     * <p>规则：本地命中且**不比 Redis 落后**就用本地；Redis 的 version 更大就丢弃本地、采用 Redis
+     * <p>规则：本地命中且<b>不比 Redis 落后</b>就用本地；Redis 的 version 更大就丢弃本地、采用 Redis
      * 并顺手刷新本地副本。版本比对是 M3 唯一的跨实例收敛手段（决策 16 不写 Pub/Sub），
      * 因此它必须在本地命中这条路径上生效 —— 而不是「本地命中就无条件相信本地」。
      */
@@ -378,7 +378,7 @@ public class ConfigClient {
     }
 
     /**
-     * 记下「最近一次成功拿到的快照」。**绝不让版本倒退**：Redis 里可能残留一条比手上更旧的条目
+     * 记下「最近一次成功拿到的快照」。<b>绝不让版本倒退</b>：Redis 里可能残留一条比手上更旧的条目
      * （例如本地那份刚被别的实例回填过），把旧的盖上去会让永不失效的那一层反而变差。
      */
     private void rememberGood(ConfigSnapshot snapshot) {
@@ -391,9 +391,9 @@ public class ConfigClient {
     /**
      * 主动回源（singleflight）并回填两级缓存。返回空表示「这次没拿到真快照」。
      *
-     * <p><b>回源操作本身是惰性的</b>（{@code Mono.defer}）：拿到「正在飞」名额之前**不构造**
+     * <p><b>回源操作本身是惰性的</b>（{@code Mono.defer}）：拿到「正在飞」名额之前<b>不构造</b>
      * 真正的 admin 调用。这不是风格问题 —— 若在这里直接构造 {@code adminClient.configSnapshot()}，
-     * 每一个抢名额失败的调用者都会**先**向 admin 发一次请求再把它丢掉，singleflight 就只剩名字。
+     * 每一个抢名额失败的调用者都会<b>先</b>向 admin 发一次请求再把它丢掉，singleflight 就只剩名字。
      * 这条是被 {@code concurrentMissesCollapseIntoASingleAdminCall} 抓出来的真实缺陷。
      *
      * <p><b>名额在 {@code doFinally} 里释放，且比较的是「真正发布出去的那一个引用」。</b>
@@ -405,28 +405,28 @@ public class ConfigClient {
      *   <li>{@code doFinally} 而不是 {@code doOnSuccess}：空完成（admin 明确回「没有快照」）与异常
      *       （admin 不可达）都必须释放名额。{@code doOnSuccess} 在空完成时不触发 —— 那正好是
      *       「第一次回源失败后永久卡死」的那条路径。而 {@code doFinally} 晚于
-     *       {@code Mono.fromRunnable} 里的缓存写入（缓存写在终态信号**之前**执行），
-     *       所以「先写缓存、后清名额」的顺序仍然成立。第四次终态是**取消**（
+     *       {@code Mono.fromRunnable} 里的缓存写入（缓存写在终态信号<b>之前</b>执行），
+     *       所以「先写缓存、后清名额」的顺序仍然成立。第四次终态是<b>取消</b>（
      *       {@code refreshBlocking()} 超时），{@code doFinally} 同样会触发 —— 超时后名额不会泄漏。</li>
      * </ul>
      * 单飞性质不受影响：名额在终态释放前到达的并发调用者拿到的仍是同一个已 {@code cache()} 的
      * {@link Mono}，只订阅一次、只回源一次。
      *
      * <p><b>抢名额失败时重试 CAS，而不是把自己的 {@link Mono} 交出去</b>（2026 二次复审修复 3）：
-     * 名额被释放后 {@code inFlight.get()} 可以读到 {@code null}，此时返回自己那个**从未发布**的
-     * {@code fresh} 会让调用方订阅到一条独立的回源流，于是同一次 miss 产生**两个并发回源**；
+     * 名额被释放后 {@code inFlight.get()} 可以读到 {@code null}，此时返回自己那个<b>从未发布</b>的
+     * {@code fresh} 会让调用方订阅到一条独立的回源流，于是同一次 miss 产生<b>两个并发回源</b>；
      * 而 {@code load()} 的缓存写入又是无版本守卫的，晚到的旧响应就会覆盖掉新快照。现在
      * 要么拿到赢家的 {@link Mono}，要么以「唯一发布者」的身份重试 CAS —— 两者都只可能有一次回源。
      *
      * <p><b>冷却窗口</b>：窗口内直接返回空（调用方服务 {@link #lastGood}），这是「失败重试速率
-     * 不得超过 1/冷却窗口」的那道闸。它是**抑制**而不是限速：没有它时，快速失败的 admin 会让
+     * 不得超过 1/冷却窗口」的那道闸。它是<b>抑制</b>而不是限速：没有它时，快速失败的 admin 会让
      * 重试速率逼近请求速率（5 s 超时管的是单次尝试的时长，不是两次尝试的间隔）。
      *
      * <p><b>空 {@link Mono} 是三种情况的同一个结果，调用方不要把它当判据</b>（三次复审记录）：
      * 冷却窗口内被抑制、admin 明确回「没有快照」、以及流内异常被 {@code onErrorResume} 折成空，
-     * 在这里**完全一样**。将来的失效调用方（Pub/Sub 监听器，决策 16）因此**不能**把「空」读成
+     * 在这里<b>完全一样</b>。将来的失效调用方（Pub/Sub 监听器，决策 16）因此<b>不能</b>把「空」读成
      * 「没事可做」—— 它必须直接读 {@link #current()}（或 {@link #lastGood}）来确认手上有没有快照。
-     * 现在唯一的调用方 {@link #current()} 之所以没问题，是因为它在调本方法**之前**自己先看了
+     * 现在唯一的调用方 {@link #current()} 之所以没问题，是因为它在调本方法<b>之前</b>自己先看了
      * {@link #inCooldown()}，而不是把空信号当判据。
      */
     public Mono<ConfigSnapshot> refresh() {
@@ -466,7 +466,7 @@ public class ConfigClient {
         nextAttemptAt.set(clock.millis() + Math.max(0L, properties.refreshCooldown().toMillis()));
     }
 
-    /** 真正的回源 + 双回填。**只会被 singleflight 的赢家订阅一次**。 */
+    /** 真正的回源 + 双回填。<b>只会被 singleflight 的赢家订阅一次</b>。 */
     private Mono<ConfigSnapshot> load() {
         return adminClient.configSnapshot()
                 .map(maybe -> maybe.orElse(null))
@@ -502,9 +502,9 @@ public class ConfigClient {
     }
 
     /**
-     * 记一次**失败的回源尝试**：计数、按下限流规则决定要不要打 WARN。
+     * 记一次<b>失败的回源尝试</b>：计数、按下限流规则决定要不要打 WARN。
      *
-     * <p>冷却窗口不在这里推后 —— 它在尝试**开始**时就已经推后（{@link #markAttemptWindow()}），
+     * <p>冷却窗口不在这里推后 —— 它在尝试<b>开始</b>时就已经推后（{@link #markAttemptWindow()}），
      * 所以「两次尝试之间的间隔 ≥ {@code refreshCooldown}」与这一次尝试成功还是失败无关。
      *
      * @param ex 触发降级的异常；{@code null} 表示 admin 回了一份「空快照」（不是异常，但同样是一次失败的尝试）
@@ -517,14 +517,14 @@ public class ConfigClient {
     }
 
     /**
-     * 「进入故障期」的那一条 WARN：一次故障期**只打一条**，之后要么沉默到下一次成功回源，
+     * 「进入故障期」的那一条 WARN：一次故障期<b>只打一条</b>，之后要么沉默到下一次成功回源，
      * 要么每 {@link #COOLDOWN_LOG_INTERVAL_MILLIS} 补一条 —— 长故障期里日志条数因此有界
      * （旧实现是每请求两条：回源失败一条 + 服务最近快照一条）。
      *
      * <p><b>播报间隔对「本期第一条」同样生效</b>（三次复审修复 2）：{@link #clearDegraded()}
-     * 会在**任何一次缓存命中**时把 {@link #degraded} 清回 {@code false}，而二级缓存抖动
+     * 会在<b>任何一次缓存命中</b>时把 {@link #degraded} 清回 {@code false}，而二级缓存抖动
      * （命中 → 未命中 → 命中 → 未命中）会让每一次「重新进入故障期」都走 CAS 成功那一支。只在
-     * CAS **失败**那一支检查间隔，等于给抖动留了一条每周期一条 WARN 的路 —— 上界从「一次故障期
+     * CAS <b>失败</b>那一支检查间隔，等于给抖动留了一条每周期一条 WARN 的路 —— 上界从「一次故障期
      * 一条」退化成「每周期一条」，恰好废掉本方法存在的理由。因此放行只由 {@link #lastDegradedLogAt}
      * 决定，{@link #degraded} 只用来选时间戳的写法（无争用时 {@code set}，有争用时 CAS）。
      *
@@ -549,7 +549,7 @@ public class ConfigClient {
     /**
      * 一次可用的快照到手 = 故障期结束：清掉降级标记，让日志重新从「一次故障期一条」开始计数。
      *
-     * <p><b>刻意不碰冷却窗口</b>：窗口在一次尝试**开始时**就推后了（{@link #markAttemptWindow()}），
+     * <p><b>刻意不碰冷却窗口</b>：窗口在一次尝试<b>开始时</b>就推后了（{@link #markAttemptWindow()}），
      * 清掉它就等于让「成功回源 + 缓存随即过期」这一串立刻再各付一次回源 —— 那正是要修的行为。
      */
     private void clearDegraded() {
@@ -559,7 +559,7 @@ public class ConfigClient {
     /**
      * 同步版回源（供 {@link #current()} 在请求路径上用）：拿不到就返回 null。
      *
-     * <p>{@code block()} **不带超时**：超时由 {@link #load()} 里的 {@code .timeout(REFRESH_TIMEOUT)}
+     * <p>{@code block()} <b>不带超时</b>：超时由 {@link #load()} 里的 {@code .timeout(REFRESH_TIMEOUT)}
      * 负责，那样超时才会作为流内部的错误终止传播，让 {@code doFinally} 释放单飞名额。
      * 只在这里用 {@code block(Duration)} 会留下一个永久泄漏的名额（见 {@link #load()} 的注释）。
      */
@@ -577,7 +577,7 @@ public class ConfigClient {
     /**
      * 收到失效广播时调用。
      *
-     * @param version 失效消息里的版本。**它就是新的水位**：清掉共享条目之后，一个在飞的、
+     * @param version 失效消息里的版本。<b>它就是新的水位</b>：清掉共享条目之后，一个在飞的、
      *                更旧的回源结果必须被 {@code writeRedis} 挡住，而唯一的挡板就是这个水位。
      *                用本地的 {@code visibleVersion} 当水位是不够的 —— 它可能比控制面刚推进到的版本更旧。
      */
@@ -587,7 +587,7 @@ public class ConfigClient {
     }
 
     /**
-     * 当前生效快照的 version 的**可观测副本**（{@code aihub.config.snapshot.version} 那条 gauge 的值）。
+     * 当前生效快照的 version 的<b>可观测副本</b>（{@code aihub.config.snapshot.version} 那条 gauge 的值）。
      * {@code 0} 表示手上还没有任何控制面快照（即正在服务遗留单渠道）。
      */
     public long visibleVersion() {
@@ -595,7 +595,7 @@ public class ConfigClient {
     }
 
     /**
-     * {@link #REFRESH_FAILURES_METRIC} 的当前读数（**每一次真实失败的回源尝试**加一，被冷却窗口
+     * {@link #REFRESH_FAILURES_METRIC} 的当前读数（<b>每一次真实失败的回源尝试</b>加一，被冷却窗口
      * 挡下的请求不算）。它是「WARN 被限流之后，故障持续了多久」的对外信号 —— 告警必须架在它上面。
      */
     double refreshFailureCount() {
@@ -604,7 +604,7 @@ public class ConfigClient {
 
     /**
      * 冷启动 + admin 不可达时的兜底：把 {@code aihub.upstream.*} 合成一条单渠道快照。
-     * **不写任何缓存** —— 否则 admin 恢复后，这份兜底会以「真快照」的身份留在 Redis 里。
+     * <b>不写任何缓存</b> —— 否则 admin 恢复后，这份兜底会以「真快照」的身份留在 Redis 里。
      */
     public ConfigSnapshot legacyFallback() {
         ChannelDescriptor legacy = legacyChannel();

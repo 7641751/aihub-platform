@@ -24,18 +24,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * 分区维护的真实 DDL 行为（真 MySQL 8.4）。条条都是本机实测确认过的现象：
  * ① 缺的未来月份可以被补齐；② 已经落进 pmax 的行会被 REORGANIZE 救回正确分区；
- * ③ 重复调用是幂等的（且第一次调用**确实动了手**）；④ 基准月由活状态推导，不随日历漂移；
+ * ③ 重复调用是幂等的（且第一次调用<b>确实动了手</b>）；④ 基准月由活状态推导，不随日历漂移；
  * ⑤ DDL 失败会带着原因抛出；⑥ cron 钉在 UTC。（⑤⑥ 是纯本地检查，不需要容器，但同属本类主题。）
  *
  * <p><b>为什么「救援 / 幂等」两个用例的基准月必须从活状态推导，而不能写字面量</b>：
- * 本类是 {@code @SpringBootTest}，维护器的 {@code ApplicationRunner} 会在**每次上下文启动**时
+ * 本类是 {@code @SpringBootTest}，维护器的 {@code ApplicationRunner} 会在<b>每次上下文启动</b>时
  * 对着共享容器跑一遍 {@code ensureCoverage(今天)}（UTC），覆盖永远被推到「今天 + 2 个月」。
  * 只要真实日期走到字面量那几个月，前置条件「这个月还没有专属分区 ⇒ 行落在 pmax」就不再成立：
  * 原先救援用例写死 2028-06，真实 UTC 日期一到 2028-04-01，启动补齐就会建出 p202806，
  * {@code partitionFor("2028-06-15 …")} 返回 p202806 而不是 pmax —— 用例自己把自己判红，
- * 与 JUnit 执行顺序无关，而且**不可恢复**（分区只会越建越多）。把字面量往后挪只是把炸弹推远。
+ * 与 JUnit 执行顺序无关，而且<b>不可恢复</b>（分区只会越建越多）。把字面量往后挪只是把炸弹推远。
  * 现在基准月 = 「当前最后一个有界分区的上界 + 6 个月」（上界必是某月 1 号，故结果也是），
- * 它永远落在**当前覆盖之外**，前置条件因此由活状态保证，而不是由「今天是几号」保证。
+ * 它永远落在<b>当前覆盖之外</b>，前置条件因此由活状态保证，而不是由「今天是几号」保证。
  *
  * <p>{@link #ensureCoverageAddsTheMissingFutureMonths} 仍用历史字面量（2027-03），这是安全的：
  * 分区只增不减，一旦覆盖过 p202703 就永远存在，该用例的断言不会随日期变化。
@@ -69,7 +69,7 @@ class RequestLogPartitionMaintainerTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 用例基准月的**唯一**来源：当前覆盖之外 6 个月（必为某月 1 号）。
+     * 用例基准月的<b>唯一</b>来源：当前覆盖之外 6 个月（必为某月 1 号）。
      * 落在覆盖之外 ⇒ 这个月没有专属分区 ⇒ 插进去的行会落进 pmax（前置条件成立）；
      * +6 是余量，保证「插入的那一行」与「本次要补的分区」不会互相顶掉。
      */
@@ -98,10 +98,10 @@ class RequestLogPartitionMaintainerTest extends AbstractIntegrationTest {
     }
 
     /**
-     * **陷阱复现 + 存量救援**：先把一行插到当前覆盖之外的月份（它会静默落进 pmax，`EXPLAIN` 可见），
-     * 再让维护器补齐，然后这一行必须出现在正确分区里、内容不变，而且**已经不在 pmax 里**。
+     * <b>陷阱复现 + 存量救援</b>：先把一行插到当前覆盖之外的月份（它会静默落进 pmax，`EXPLAIN` 可见），
+     * 再让维护器补齐，然后这一行必须出现在正确分区里、内容不变，而且<b>已经不在 pmax 里</b>。
      *
-     * <p>基准月与其期望分区名来自**同一个值**（{@link #benchmarkMonthBeyondCoverage()}），
+     * <p>基准月与其期望分区名来自<b>同一个值</b>（{@link #benchmarkMonthBeyondCoverage()}），
      * 输入与断言不可能漂移。
      */
     @Test
@@ -138,7 +138,7 @@ class RequestLogPartitionMaintainerTest extends AbstractIntegrationTest {
     /**
      * 幂等：第二次调用不再有任何变化。
      *
-     * <p>**第一次调用必须真的动手**：基准月取自活状态（覆盖之外），所以第一次调用一定建出分区；
+     * <p><b>第一次调用必须真的动手</b>：基准月取自活状态（覆盖之外），所以第一次调用一定建出分区；
      * 若不断言这一点，一旦别的用例已经把覆盖推到基准月之后，两次调用就都是空操作，
      * 用例退化成恒真的空断言 —— 一个不幂等的实现也能过。这条断言让「第二次无变化」有意义。
      */
@@ -159,11 +159,11 @@ class RequestLogPartitionMaintainerTest extends AbstractIntegrationTest {
     }
 
     /**
-     * Fix 1 的**可执行**回归证据：模拟「真实日期已经走到 2028-04-01 之后」的状态 ——
+     * Fix 1 的<b>可执行</b>回归证据：模拟「真实日期已经走到 2028-04-01 之后」的状态 ——
      * 那时启动补齐（today + 2 个月）会建出 p202806。
      *
      * <p>旧写法（写死 2028-06）的前置条件在这里必然不成立：`EXPLAIN` 说那行在 p202806，
-     * 而旧断言要求 pmax —— 这就是它从 2028-04-01 起**永久变红**的原因，且与执行顺序无关。
+     * 而旧断言要求 pmax —— 这就是它从 2028-04-01 起<b>永久变红</b>的原因，且与执行顺序无关。
      * 同一状态下派生基准月仍然落在覆盖之外（`EXPLAIN` = pmax），所以新写法不受影响。
      */
     @Test
@@ -197,7 +197,7 @@ class RequestLogPartitionMaintainerTest extends AbstractIntegrationTest {
     }
 
     /**
-     * Fix 3：DDL 失败必须**带着原因**抛出。控制流不变（warn → 重读 → 重新规划 → 仍缺才 throw），
+     * Fix 3：DDL 失败必须<b>带着原因</b>抛出。控制流不变（warn → 重读 → 重新规划 → 仍缺才 throw），
      * 但抛出的 {@link IllegalStateException} 要能顺着 cause 链看到原始的 {@code DataAccessException}
      * （SQL state / error code / 原始语句都在它里面）。
      *

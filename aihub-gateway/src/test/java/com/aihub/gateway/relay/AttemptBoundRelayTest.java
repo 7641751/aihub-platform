@@ -39,16 +39,16 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 上界（{@link RelayAttempts#MAX_ATTEMPTS}）必须**落在转发循环本身**，而不能只靠「进入循环之前把
+ * 上界（{@link RelayAttempts#MAX_ATTEMPTS}）必须<b>落在转发循环本身</b>，而不能只靠「进入循环之前把
  * 候选列表截断」。截断管得住「候选有几条」，管不住「同一条候选被订阅几次」。
  *
  * <p><b>被钉住的缺陷</b>：当「下一个候选」是在 {@code Mono.defer} 的受保护区域内递归订阅、而同一个
- * 逃逸的上游失败又在该区域的 {@code onErrorResume} 里**再次**订阅同一个下标时，一次
+ * 逃逸的上游失败又在该区域的 {@code onErrorResume} 里<b>再次</b>订阅同一个下标时，一次
  * {@code attempt(i)} 会展开成 {@code C(m) = 1 + 2·C(m-1)}：3 条候选的混合故障
- * （503 → 429 → 连不上）实测产生 **7 次**上游调用（第 3 条被订阅 4 次，并且把刚刚被打上熔断标记的
+ * （503 → 429 → 连不上）实测产生 <b>7 次</b>上游调用（第 3 条被订阅 4 次，并且把刚刚被打上熔断标记的
  * 429 渠道又打了一遍）。
  *
- * <p>本类用**记录型工厂**（每次 {@code forChannel} 恰好对应一次上游调用）把这件事变成可数的数字，
+ * <p>本类用<b>记录型工厂</b>（每次 {@code forChannel} 恰好对应一次上游调用）把这件事变成可数的数字，
  * 并用 {@link FakeUpstream#requestCount()} 证明「每条候选各一次」；客户端拿到的仍是真实的最后一个
  * 失败（连不上 → 502 {@code upstream_unreachable}），因此这条上界没有以牺牲行为为代价。
  *
@@ -108,10 +108,10 @@ class AttemptBoundRelayTest {
      *
      * <p>三条断言分别钉住上界的三个面：
      * <ol>
-     *   <li>{@link #clientFactory} 的调用序列 = 每条候选**恰好一次**（同一条候选被订阅两次就会多出
+     *   <li>{@link #clientFactory} 的调用序列 = 每条候选<b>恰好一次</b>（同一条候选被订阅两次就会多出
      *       一个 id）；</li>
      *   <li>总上游调用数 ≤ {@link RelayAttempts#MAX_ATTEMPTS}（放大上界的字面形式）；</li>
-     *   <li>两条真实夹具各收到**恰好一个**请求（{@code lastRequest != null} 这种老断言看不见重复）。</li>
+     *   <li>两条真实夹具各收到<b>恰好一个</b>请求（{@code lastRequest != null} 这种老断言看不见重复）。</li>
      * </ol>
      * 429 渠道只能被打一次：被重复打意味着刚写下的熔断标记又被自己重新命中，上界因此失去意义。
      */

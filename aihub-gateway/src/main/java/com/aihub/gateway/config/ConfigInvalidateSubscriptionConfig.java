@@ -12,7 +12,7 @@ import org.springframework.data.redis.listener.ChannelTopic;
 import org.springframework.data.redis.listener.RedisMessageListenerContainer;
 
 /**
- * 把 {@link ConfigSubscriber} 接到 Redis Pub/Sub 上的装配点（D4）。
+ * 把 {@link ConfigSubscriber} 接到 Redis Pub/Sub 上的装配点（M4 决策 4）。
  *
  * <p><b>装配的所有权在这里，不在 {@code ConfigConfig}</b>：订阅是一个可以整体关掉的旁路
  * （{@code aihub.config.invalidate-subscription=false}），而 {@code ConfigConfig} 里那些 bean
@@ -23,16 +23,16 @@ import org.springframework.data.redis.listener.RedisMessageListenerContainer;
  * {@code @Bean} 方法的参数注入不到、上下文起不来。
  *
  * <p>{@code @ConditionalOnProperty} 默认 {@code matchIfMissing = true}：生产（{@code application.yml}
- * 里是 {@code ${AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION:true}}）默认**订阅**。网关的测试环境把它显式
+ * 里是 {@code ${AIHUB_CONFIG_INVALIDATE_SUBSCRIPTION:true}}）默认<b>订阅</b>。网关的测试环境把它显式
  * 设成 {@code false} —— 那里没有活 Redis，{@code RedisMessageListenerContainer} 会在后台按退避
- * 策略**无限重连**并污染日志；订阅逻辑本身由 {@code ConfigSubscriberTest} 直接驱动
+ * 策略<b>无限重连</b>并污染日志；订阅逻辑本身由 {@code ConfigSubscriberTest} 直接驱动
  * （{@code onMessage}），端到端由 Task 17 的 compose 验收覆盖。
  *
  * <p><b>条件判定是大小写敏感的，而绑定不是</b>：{@code havingValue = "true"} 是逐字符比较，
  * {@code TRUE} / {@code 1} 都不等于 {@code true}；而 {@link ConfigInvalidateProperties} 的松弛
  * 绑定会把这两者都绑成 {@code true}。两者不一致的后果是：值写成 {@code TRUE} 时 record 读出来是
  * 「开」、{@code RedisMessageListenerContainer} 却根本没被创建 —— 静默退回 M3 的 TTL 收敛。
- * 所以 compose / 环境变量里的值必须**恰好**是 {@code true} 或 {@code false}。
+ * 所以 compose / 环境变量里的值必须<b>恰好</b>是 {@code true} 或 {@code false}。
  */
 @Configuration
 @EnableConfigurationProperties(ConfigInvalidateProperties.class)

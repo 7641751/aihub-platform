@@ -37,18 +37,18 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 配额链**端到端**：真实 HTTP 穿过真实过滤器链（含 {@link QuotaFilter}），到假上游、再回到客户端。
+ * 配额链<b>端到端</b>：真实 HTTP 穿过真实过滤器链（含 {@link QuotaFilter}），到假上游、再回到客户端。
  *
  * <p>为什么必须有这一条：{@link QuotaFilterTest} 自己 {@code new} 过滤器，因此它对「过滤器压根不在
  * 链上」这类故障完全免疫。本类不构造任何配额组件（{@code @Primary} 替身只覆盖判定结果），只发真实 HTTP、
  * 只读响应，因此它红就等于「线上配额这一跳不存在」。
  *
  * <p><b>Redis 指向死端口</b>（{@code spring.data.redis.port=1}，与 M1/M2/M3 既有做法一致）：本类证明的
- * 因此是**降级路径**上的端到端配额 —— 「Redis 挂了也照样放行」；「Redis 里桶最终等于真实用量」那条
- * 由 **admin 侧真 Redis** 集成测试负责（网关测试永远不允许依赖 Docker，CONVENTIONS §8 item 3）。
+ * 因此是<b>降级路径</b>上的端到端配额 —— 「Redis 挂了也照样放行」；「Redis 里桶最终等于真实用量」那条
+ * 由 <b>admin 侧真 Redis</b> 集成测试负责（网关测试永远不允许依赖 Docker，CONVENTIONS §8 item 3）。
  *
  * <p><b>字节透传（D17 + M1 铁律）</b>：{@code QuotaFilter} 为了估算必须读请求体，而下游（路由、转发）
- * 也必须能读到**同一份字节**。{@link #cachedBodyStillReachesTheUpstreamByteForByte()} 用真实上游收到的
+ * 也必须能读到<b>同一份字节</b>。{@link #cachedBodyStillReachesTheUpstreamByteForByte()} 用真实上游收到的
  * body 做整体相等断言 —— 一个「释放了 buffer 还传原 exchange」的实现会让上游收到空体，立刻变红。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
@@ -96,7 +96,7 @@ class QuotaDegradeTest {
     }
 
     /**
-     * Redis 不可用（{@code QuotaLimiter} 返回 {@code null}）时请求**必须放行**：配额是记账，
+     * Redis 不可用（{@code QuotaLimiter} 返回 {@code null}）时请求<b>必须放行</b>：配额是记账，
      * 不能因为记账组件坏了就拒绝付费客户（D7）。放行的同时必须有 {@code aihub.quota.degraded} 计数。
      */
     @Test
@@ -116,7 +116,7 @@ class QuotaDegradeTest {
     }
 
     /**
-     * 配额这一跳打开时，上游收到的字节必须与客户端发出的**完全一致**（D17 + M1 铁律）。
+     * 配额这一跳打开时，上游收到的字节必须与客户端发出的<b>完全一致</b>（D17 + M1 铁律）。
      * <p>body 含多字节 UTF-8 与首尾空格：任何字节丢失、重排、截断都会让整体相等断言失败。
      */
     @Test

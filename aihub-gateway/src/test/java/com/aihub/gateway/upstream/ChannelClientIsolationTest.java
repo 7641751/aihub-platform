@@ -20,24 +20,24 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 渠道级客户端的**隔离**性质。{@link UpstreamClientFactoryTest} 那 5 条各自只钉住了一半，
+ * 渠道级客户端的<b>隔离</b>性质。{@link UpstreamClientFactoryTest} 那 5 条各自只钉住了一半，
  * 剩下的一半在这里补成真的能红的断言（Task 8 的自审要求）：
  *
  * <ol>
  *   <li><b>凭据逐请求注入，绝不挂在客户端上</b>：{@code channelClientCarriesNoDefaultBearerToken}
  *       只断言「渠道客户端没有默认 Authorization」。它反面的场景 —— 一旦某个渠道的密钥成了默认头，
- *       共享同一个客户端的另一条渠道就会带上它 —— 没有被证伪。这里把两条渠道的**解密结果**分别注入
- *       各自的请求，断言上游每次**只**收到本次请求该有的那一个；并在连续两次带凭据的请求之后，
- *       发一次**不带凭据**的请求：任何「记在客户端上」的实现都会在这里把上一条渠道的密钥送到上游。</li>
+ *       共享同一个客户端的另一条渠道就会带上它 —— 没有被证伪。这里把两条渠道的<b>解密结果</b>分别注入
+ *       各自的请求，断言上游每次<b>只</b>收到本次请求该有的那一个；并在连续两次带凭据的请求之后，
+ *       发一次<b>不带凭据</b>的请求：任何「记在客户端上」的实现都会在这里把上一条渠道的密钥送到上游。</li>
  *   <li><b>超时按渠道生效</b>：{@code clientsAreCachedByBaseUrlTimeoutAndMode} 只能证明「超时不同 →
  *       客户端实例不同」；把 {@code responseTimeout} 写成常数（例如遗留客户端的 120 秒），它照样全绿。
  *       这里用「上游写完第一帧就把响应体扣住」的握手来区分：同一个 base-url、同一个工厂，
  *       300ms 的渠道必须在中途失败，3000ms 的渠道必须把整段读完 —— 区别只可能来自各自的
- *       {@code timeout_ms}。流式渠道（100ms）同样必须读完：它**不设** responseTimeout。</li>
+ *       {@code timeout_ms}。流式渠道（100ms）同样必须读完：它<b>不设</b> responseTimeout。</li>
  * </ol>
  *
  * <p>本夹具的 {@code HttpServer} 只有一条 dispatch 线程（与 {@code SseStreamingTest} 同一处警告），
- * 因此每个用例独占一个假上游，且**每一次扣帧都保证放行**：成功路径由后台线程延时放行，
+ * 因此每个用例独占一个假上游，且<b>每一次扣帧都保证放行</b>：成功路径由后台线程延时放行，
  * 失败路径在 {@code finally} 里放行。
  */
 class ChannelClientIsolationTest {
@@ -48,7 +48,7 @@ class ChannelClientIsolationTest {
     private static final String FIRST_FRAME = "data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\n\n";
     private static final String SECOND_FRAME = "data: [DONE]\n\n";
 
-    /** 扣帧时长：**明显大于**短超时渠道的 300ms，又**明显小于**长超时渠道的 3000ms。 */
+    /** 扣帧时长：<b>明显大于</b>短超时渠道的 300ms，又<b>明显小于</b>长超时渠道的 3000ms。 */
     private static final long HOLD_MILLIS = 700;
 
     private static final AesGcmChannelCipher CIPHER = cipher();
@@ -87,7 +87,7 @@ class ChannelClientIsolationTest {
     }
 
     /**
-     * 两条渠道共享**同一个客户端实例**（同 base-url / 同超时 / 同模式，按设计共享），
+     * 两条渠道共享<b>同一个客户端实例</b>（同 base-url / 同超时 / 同模式，按设计共享），
      * 因此这是「凭据绝不能挂在客户端上」最硬的场景：任何默认头都会串到另一条渠道。
      */
     @Test
@@ -177,7 +177,7 @@ class ChannelClientIsolationTest {
         request.retrieve().bodyToMono(String.class).block(Duration.ofSeconds(5));
     }
 
-    /** 延时放行上游的第二帧：请求必须在**扣帧期间**一直活着，超时语义才真的被验证。 */
+    /** 延时放行上游的第二帧：请求必须在<b>扣帧期间</b>一直活着，超时语义才真的被验证。 */
     private void releaseSecondFrameAfter(long millis) {
         Thread releaser = new Thread(() -> {
             try {

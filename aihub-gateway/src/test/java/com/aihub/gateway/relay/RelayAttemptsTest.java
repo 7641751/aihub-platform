@@ -21,17 +21,17 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 失败转移的**分类规则**是 M3 最容易写错的地方：哪些状态码该换渠道、哪些必须原样透传。
+ * 失败转移的<b>分类规则</b>是 M3 最容易写错的地方：哪些状态码该换渠道、哪些必须原样透传。
  * 规则本身是纯函数，因此可以在这里逐条钉死，而不必靠端到端测试去凑。
  *
- * <p>核心区分（由 {@link RelayAttempts#decision(int)} **一个**分类器承担，见
+ * <p>核心区分（由 {@link RelayAttempts#decision(int)} <b>一个</b>分类器承担，见
  * {@link #failoverIsAllowedFor5xxAnd429AndNothingElseInTheErrorRange()}）：
  * <ul>
  *   <li><b>可切换</b>：连接失败/超时（{@code WebClientRequestException}）、上游 5xx、上游 429；</li>
  *   <li><b>不可切换</b>：上游 4xx（非 429）——那是客户端的错，换渠道一样错，重试只会放大；</li>
  *   <li><b>必须保留候选</b>：所有候选的密钥都解不开时，也要给出候选（让真实的上游错误浮现），
  *       而不是把它变成 {@code model_not_found} 404；</li>
- *   <li><b>按原因而不是按异常类型</b>判定「上游失败」：响应头已到（200）之后发生的**读超时**
+ *   <li><b>按原因而不是按异常类型</b>判定「上游失败」：响应头已到（200）之后发生的<b>读超时</b>
  *       会被包成 {@code WebClientResponseException}（Task 8 实测），按类型判会把它当成成功或客户端断连。</li>
  * </ul>
  */
@@ -65,11 +65,11 @@ class RelayAttemptsTest {
     }
 
     /**
-     * **每一条消息都要过分类器**：把「可切换」与「客户端的错必须原样透传」两条规则塌成
-     * **一个**判定，从而让两个分支都真的活在决策路径上。
+     * <b>每一条消息都要过分类器</b>：把「可切换」与「客户端的错必须原样透传」两条规则塌成
+     * <b>一个</b>判定，从而让两个分支都真的活在决策路径上。
      *
      * <p>改造前的写法是 {@code shouldFailoverBeforeCommit(status) && !isClientErrorThatMustNotBeRetried(status)}
-     * —— 那个 {@code !} 是**惰性的**：两条规则在每个 {@code int} 上互斥，删掉它不会有任何用例变红，
+     * —— 那个 {@code !} 是<b>惰性的</b>：两条规则在每个 {@code int} 上互斥，删掉它不会有任何用例变红，
      * 于是「客户端 4xx 绝不换渠道」这条铁律实际上只活在测试里，而不在控制器读的那行代码里。
      * 现在控制器读的是 {@link RelayAttempts#decision(int)}，本用例把当时的全部状态逐条钉住。
      */
@@ -127,7 +127,7 @@ class RelayAttemptsTest {
                 .extracting(ChannelDescriptor::id).containsExactly(2L, 3L);
     }
 
-    /** 全部解不开时**不返回空**：否则「主密钥配错」会伪装成「这个模型不存在」（404）。 */
+    /** 全部解不开时<b>不返回空</b>：否则「主密钥配错」会伪装成「这个模型不存在」（404）。 */
     @Test
     void servableKeepsEverythingWhenNoCandidateIsDecryptable() {
         ChannelKeyDecryptor broken = decryptor(new AesGcmChannelCipher(ChannelKeyRegistry.parse("")), noLegacyKey());
@@ -137,12 +137,12 @@ class RelayAttemptsTest {
     }
 
     /**
-     * 遗留单渠道的哨兵渠道**永远可服务**，与主密钥无关（它的密钥来自 {@code aihub.upstream.api-key}，
+     * 遗留单渠道的哨兵渠道<b>永远可服务</b>，与主密钥无关（它的密钥来自 {@code aihub.upstream.api-key}，
      * 不是密文）。
      *
-     * <p>判别力来自那个**坏掉的**解密器：同一个 {@code servable} 调用里还放了一条真实渠道，它的密文
+     * <p>判别力来自那个<b>坏掉的</b>解密器：同一个 {@code servable} 调用里还放了一条真实渠道，它的密文
      * 在这个解密器下解不开。因此「结果恰好只含哨兵」这件事只有在「哨兵不走密文解密」时才成立 ——
-     * 把哨兵也送去解密，它就会与真实渠道一起被滤掉，{@code servable} 于是退回**原列表**，断言红。
+     * 把哨兵也送去解密，它就会与真实渠道一起被滤掉，{@code servable} 于是退回<b>原列表</b>，断言红。
      * 旧版本用「好解密器 + 只有哨兵」断言 {@code hasSize(1)}，那是恒真的：{@code ChannelKeyDecryptor}
      * 对哨兵无条件返回 {@code Optional.of}，所以无论实现怎么改它都会绿。
      */
@@ -172,9 +172,9 @@ class RelayAttemptsTest {
     }
 
     /**
-     * 非 BMP 模型名必须按**码点**截断，不能按 UTF-16 码元（评审 Fix 2）。
+     * 非 BMP 模型名必须按<b>码点</b>截断，不能按 UTF-16 码元（评审 Fix 2）。
      *
-     * <p>判别力来自前缀 {@code "m"}：它让每个 emoji 的高代理落在**奇数**下标，于是按码元切到第 128 个
+     * <p>判别力来自前缀 {@code "m"}：它让每个 emoji 的高代理落在<b>奇数</b>下标，于是按码元切到第 128 个
      * 恰好把一个代理对劈成两半（下面的对照断言直接验证旧行为确实切出孤立高代理）。旧实现返回的串以
      * 孤立代理结尾，写 utf8mb4 时退化成 {@code ?}；无前缀时旧实现不劈代理，但只填了 64 个字符。
      */
@@ -231,7 +231,7 @@ class RelayAttemptsTest {
     }
 
     /**
-     * 尝试次数上界（G10）：候选列表里可能含有该模型**全部**优先级组的渠道，没有上界时一次客户端
+     * 尝试次数上界（G10）：候选列表里可能含有该模型<b>全部</b>优先级组的渠道，没有上界时一次客户端
      * 请求会放大成「每一条渠道各一次上游调用」。上界必须是显式的小字面量（首选 + 两条备用）。
      */
     @Test
@@ -242,7 +242,7 @@ class RelayAttemptsTest {
     }
 
     /**
-     * G14：**按原因链**判定上游失败，而不是按异常类型。
+     * G14：<b>按原因链</b>判定上游失败，而不是按异常类型。
      *
      * <p>判别性在于第二条：一个状态 200 的 {@code WebClientResponseException}（响应头已经收到，
      * 失败发生在读响应体的中途 —— Task 8 实测的形状）如果把根因藏起来就会被判成「非上游失败」，

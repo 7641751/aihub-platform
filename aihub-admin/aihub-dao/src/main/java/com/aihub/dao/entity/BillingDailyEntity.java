@@ -16,11 +16,11 @@ import java.time.LocalDate;
  * 必须存在（它是 §12 的 M4 交付物之一，且计费单价本身登记为「只写 0」，见计划 Global Constraints）。
  *
  * <p><b>为什么 {@code statDate} 用 {@link LocalDate}</b>：{@code stat_date} 是 SQL {@code DATE}
- * （**不是** {@code DATETIME(3)}）—— 它是自然日、不是瞬时，因此既不需要、也不应该做 UTC 折算
+ * （<b>不是</b> {@code DATETIME(3)}）—— 它是自然日、不是瞬时，因此既不需要、也不应该做 UTC 折算
  * （CONVENTIONS §7 说的是 {@code datetime(3)} 那些列）。{@code cost} 用 {@link BigDecimal}
  * 映射 {@code DECIMAL(18,6)}：绝不能用 {@code double}（金额的二进制浮点误差会在对账里静默累积）。
  *
- * <p>刻意**不**映射 {@code created_at} / {@code updated_at}（与 {@code ChannelEntity} 同款：
+ * <p>刻意<b>不</b>映射 {@code created_at} / {@code updated_at}（与 {@code ChannelEntity} 同款：
  * 那两列的库默认值已经是对的，多映射只会让「INSERT 时到底写了什么」变难推理）。
  */
 @TableName("billing_daily")

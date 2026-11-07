@@ -10,7 +10,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * {@code spring-boot-starter-validation} + {@code @NotBlank} 是本任务新加的护栏：
- * 上游 base-url 配没了要在**启动时**就炸，而不是等第一个请求打到 {@code /v1/chat/completions} 才报
+ * 上游 base-url 配没了要在<b>启动时</b>就炸，而不是等第一个请求打到 {@code /v1/chat/completions} 才报
  * "baseUrl must not be null"。这里用 {@link ApplicationContextRunner} 钉住它真的生效
  * （少了 starter-validation，{@code @Validated} 会被安静忽略，护栏形同虚设）。
  */

@@ -6,19 +6,19 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 收尾侧的配额校正钩子：{@code ChatRelayController} 在**每个终端发布点**、{@code meteringPublisher.publish(event)}
- * **之后**调用 {@link #correct(MeteringEvent)}。
+ * 收尾侧的配额校正钩子：{@code ChatRelayController} 在<b>每个终端发布点</b>、{@code meteringPublisher.publish(event)}
+ * <b>之后</b>调用 {@link #correct(MeteringEvent)}。
  *
- * <p><b>为什么用事件而不是「控制器拿到 usage 后校正」</b>：控制器自己**看不到** {@code usage}
+ * <p><b>为什么用事件而不是「控制器拿到 usage 后校正」</b>：控制器自己<b>看不到</b> {@code usage}
  * —— {@code UsageCapture} 是 {@code RelayMetering} 的内部物，usage 只在 {@code metering.toEvent(signal)}
- * 被物化，而那一句在 {@code doFinally} 里。因此校正点**只能**是「事件已经组装出来之后」。
+ * 被物化，而那一句在 {@code doFinally} 里。因此校正点<b>只能</b>是「事件已经组装出来之后」。
  *
  * <p><b>真实用量取自 {@link MeteringEvent#totalTokens()}</b>（实测分量名），不是
  * {@code promptTokens()+completionTokens()} 自己加 —— 上游给什么就用什么，两个口径必须同源。
  *
- * <p><b>estimate 从哪来（13b 裁定 2）</b>：{@link MeteringEvent} 里**没有**预扣时的估算值，
+ * <p><b>estimate 从哪来（13b 裁定 2）</b>：{@link MeteringEvent} 里<b>没有</b>预扣时的估算值，
  * 因此靠 {@link QuotaReservationRegistry} 建立的 {@code requestId → (tenantId, period, estimate)}
- * 关联（过滤器写入、这里**消费并移除**）。
+ * 关联（过滤器写入、这里<b>消费并移除</b>）。
  *
  * <p><b>三条约束</b>：
  * <ol>
@@ -33,7 +33,7 @@ public class QuotaCorrector {
 
     private static final Logger log = LoggerFactory.getLogger(QuotaCorrector.class);
 
-    /** 终端收尾时找不到预扣关联的次数（过期 / 从未写入 / 已被消费）——**异常信号**，不是正常路径。 */
+    /** 终端收尾时找不到预扣关联的次数（过期 / 从未写入 / 已被消费）——<b>异常信号</b>，不是正常路径。 */
     public static final String MISSING_METRIC = "aihub.quota.correction_missing";
 
     /** 校正动作本身失败的次数（Redis 写失败等）。对账是兜底，因此只计数不拒绝。 */
@@ -53,8 +53,8 @@ public class QuotaCorrector {
     }
 
     /**
-     * 用真实用量校正本次请求的预扣。**幂等性由调用方保证**（每请求恰一次）；本方法自身
-     * 对重复调用**不安全**（{@code adjust} 非幂等），但它消费即移除，因此第二次调用只会看到「缺失」。
+     * 用真实用量校正本次请求的预扣。<b>幂等性由调用方保证</b>（每请求恰一次）；本方法自身
+     * 对重复调用<b>不安全</b>（{@code adjust} 非幂等），但它消费即移除，因此第二次调用只会看到「缺失」。
      */
     public void correct(MeteringEvent event) {
         if (!properties.enabled()) {

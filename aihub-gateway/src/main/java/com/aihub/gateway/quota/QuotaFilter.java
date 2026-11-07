@@ -32,32 +32,32 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 数据面配额预扣（设计文档 §6.2）。守 {@code /v1/**} 中**唯一计费**的端点
+ * 数据面配额预扣（设计文档 §6.2）。守 {@code /v1/**} 中<b>唯一计费</b>的端点
  * {@code /v1/chat/completions}（A 决策 13：{@code /v1/models} 不落 {@code request_log}），
  * 排在鉴权（{@code +100}）与限流（{@code +150}）之后（{@code +175}），因此租户已可从
  * {@link ApiKeyAuthFilter#ATTRIBUTE_KEY_VIEW} 里取到。
  *
  * <p><b>两种「配额没生效」的原因分开计数</b>（F6 / E.4-(a)）：
  * <ul>
- *   <li>{@link #DEGRADED_METRIC}（{@code aihub.quota.degraded}）：Redis **不可用** → 按 D7 放行；</li>
- *   <li>{@link #SCRIPT_ERROR_METRIC}（{@code aihub.quota.script_error}）：预扣脚本返回**非预期形状**
- *       （{@code QuotaScript.parse} 抛 {@code IllegalStateException}）→ 同样放行，但**这是缺陷不是降级**。
+ *   <li>{@link #DEGRADED_METRIC}（{@code aihub.quota.degraded}）：Redis <b>不可用</b> → 按 D7 放行；</li>
+ *   <li>{@link #SCRIPT_ERROR_METRIC}（{@code aihub.quota.script_error}）：预扣脚本返回<b>非预期形状</b>
+ *       （{@code QuotaScript.parse} 抛 {@code IllegalStateException}）→ 同样放行，但<b>这是缺陷不是降级</b>。
  *       合成一个计数器，等于让「Lua 写错了」永远藏在「Redis 挂了」后面 —— 两者的处置完全不同。</li>
  * </ul>
  * 另有 {@link #DENIED_METRIC}（超限拒绝）与 {@link #FAIL_OPEN_METRIC}（本过滤器自身故障放行）。
  *
  * <p><b>Redis 不可用时可选择回源 admin 预扣</b>（{@link QuotaFallback}，由 {@code aihub.quota.fallback-enabled}
- * 决定开与关）。兜底**只在「Redis 不可用」这一条分支**上尝试 —— 「本周期不限」「脚本形状异常」「自身故障」
+ * 决定开与关）。兜底<b>只在「Redis 不可用」这一条分支</b>上尝试 —— 「本周期不限」「脚本形状异常」「自身故障」
  * 都在到达这里之前就返回了，绝不试兜底。而它只可能把「放行」升级成「拒绝」：兜底自己失败 / 拿不到判定 /
  * 说还有额度，一律回到 D7 的「放行 + {@code degraded} 计数 + 跳过校正」。这样兜底既不会成为新的可用性单点，
  * 也不会成为绕过配额的手段。
  *
  * <p><b>请求体是一次性流，必须缓存且不得改变转发字节（D17 + M1 铁律）</b>：本过滤器为了估算要读
- * 请求体，而下游（路由与转发）也必须能读到**同一份字节**。因此：join 出整段 body → 复制进
- * {@code byte[]} → **释放** join 出来的 buffer（此时数据已在数组里，释放是安全的）→ 用
- * {@link ServerHttpRequestDecorator} 把**同一份** {@code byte[]} 反复供给下游 →
- * {@code exchange.mutate().request(decorated).build()}。**顺序是承重的**：先复制、再释放、
- * 然后传**装饰过的** exchange —— 反过来（释放了还传原 exchange）会让下游读到空 body。
+ * 请求体，而下游（路由与转发）也必须能读到<b>同一份字节</b>。因此：join 出整段 body → 复制进
+ * {@code byte[]} → <b>释放</b> join 出来的 buffer（此时数据已在数组里，释放是安全的）→ 用
+ * {@link ServerHttpRequestDecorator} 把<b>同一份</b> {@code byte[]} 反复供给下游 →
+ * {@code exchange.mutate().request(decorated).build()}。<b>顺序是承重的</b>：先复制、再释放、
+ * 然后传<b>装饰过的</b> exchange —— 反过来（释放了还传原 exchange）会让下游读到空 body。
  * 这一点由 {@code cachedBodyStillReachesTheUpstreamByteForByte} / 单元级字节比较证明，
  * 不靠「应该没事」。
  *
@@ -86,7 +86,7 @@ public class QuotaFilter implements WebFilter {
     /** 本过滤器自身故障导致放行的次数。 */
     public static final String FAIL_OPEN_METRIC = "aihub.quota.fail_open";
 
-    /** 唯一计费的端点（决策 A13）。用**精确相等**，不是 {@code /v1/**} 前缀。 */
+    /** 唯一计费的端点（决策 A13）。用<b>精确相等</b>，不是 {@code /v1/**} 前缀。 */
     private static final String GUARDED_PATH = "/v1/chat/completions";
 
     private static final Scheduler LIMITER_SCHEDULER = Schedulers.boundedElastic();
@@ -108,7 +108,7 @@ public class QuotaFilter implements WebFilter {
      * Spring 用的构造器：{@code fallback} 由 {@link QuotaConfig} 注入（{@code aihub.quota.fallback-enabled}
      * 决定它是「回源 admin」还是「什么都不做」）。
      *
-     * <p>{@code @Autowired} **是承重的**：本类有两个公开构造器（另一个是给测试直接用的「无兜底」版本），
+     * <p>{@code @Autowired} <b>是承重的</b>：本类有两个公开构造器（另一个是给测试直接用的「无兜底」版本），
      * 少了它就等于没有「唯一的构造器」，Spring 只会报
      * {@code Failed to instantiate [...QuotaFilter]: No default constructor found} 而整条链起不来。
      */
@@ -125,7 +125,7 @@ public class QuotaFilter implements WebFilter {
 
     /**
      * 不带兜底的构造器：等价于「兜底关闭」。保留它是为了让既有的直接构造用法（{@code QuotaFilterTest}）一行不改
-     * —— 那批用例钉的是**正常路径与降级计数**，不是兜底；兜底另由 {@code QuotaReserveFallbackTest} 端到端证明。
+     * —— 那批用例钉的是<b>正常路径与降级计数</b>，不是兜底；兜底另由 {@code QuotaReserveFallbackTest} 端到端证明。
      */
     public QuotaFilter(QuotaResolver resolver, QuotaLimiter limiter, QuotaReservationRegistry reservations,
                        QuotaConfigProperties properties, MeterRegistry registry) {
@@ -150,7 +150,7 @@ public class QuotaFilter implements WebFilter {
                 });
     }
 
-    /** 复制 join 出来的 buffer 并**立刻释放**它（数据已在 byte[] 里，释放是安全的）。 */
+    /** 复制 join 出来的 buffer 并<b>立刻释放</b>它（数据已在 byte[] 里，释放是安全的）。 */
     private static byte[] copyAndRelease(DataBuffer buffer) {
         byte[] body = new byte[buffer.readableByteCount()];
         buffer.read(body);
@@ -159,9 +159,9 @@ public class QuotaFilter implements WebFilter {
     }
 
     /**
-     * 判定（**只会在 {@link #LIMITER_SCHEDULER} 上执行**）。结果写进 {@code decision}；
+     * 判定（<b>只会在 {@link #LIMITER_SCHEDULER} 上执行</b>）。结果写进 {@code decision}；
      * 自身故障折算成 {@code fault}，形状异常折算成 {@code scriptError}，交给 {@link #finish} 放行。
-     * 这里**绝不把异常继续向上抛**（除了 {@code Error}）——配额是记账，它自己坏了不能变成全量 5xx。
+     * 这里<b>绝不把异常继续向上抛</b>（除了 {@code Error}）——配额是记账，它自己坏了不能变成全量 5xx。
      */
     private void decide(ServerWebExchange exchange, byte[] body, Decision decision) {
         decision.requestId = RequestIdFilter.ensure(exchange);
@@ -255,9 +255,9 @@ public class QuotaFilter implements WebFilter {
     }
 
     /**
-     * 放行分支：写入预扣关联 → 把**修饰过的** exchange（同一份 byte[]）交给下游链。
+     * 放行分支：写入预扣关联 → 把<b>修饰过的</b> exchange（同一份 byte[]）交给下游链。
      *
-     * @param degraded {@code true} = 本次**没有发生预扣**（不限 / Redis 降级 / 形状异常 / 自身故障），
+     * @param degraded {@code true} = 本次<b>没有发生预扣</b>（不限 / Redis 降级 / 形状异常 / 自身故障），
      *                 校正器据此跳过 adjust（否则会把从未压掉的额度补进桶里）
      */
     private Mono<Void> continueWithReservation(ServerWebExchange exchange, byte[] body, Decision decision,
@@ -289,7 +289,7 @@ public class QuotaFilter implements WebFilter {
         return view == null ? 0L : view.tenantId();
     }
 
-    /** 指标记录**绝不改变判定结论**（写失败只记一条 WARN）。 */
+    /** 指标记录<b>绝不改变判定结论</b>（写失败只记一条 WARN）。 */
     private void count(String metric) {
         try {
             registry.counter(metric).increment();
@@ -298,7 +298,7 @@ public class QuotaFilter implements WebFilter {
         }
     }
 
-    /** 降级日志节流：每个窗口最多一行，但**每个窗口都有一行**（长故障必须持续可见）。 */
+    /** 降级日志节流：每个窗口最多一行，但<b>每个窗口都有一行</b>（长故障必须持续可见）。 */
     private void logDegradedAtMostOncePerWindow() {
         long now = System.currentTimeMillis();
         long last = lastDegradeLogMillis.get();

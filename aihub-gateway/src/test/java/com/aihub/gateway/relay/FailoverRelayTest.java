@@ -53,27 +53,27 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * **M3 的验收核心**：多候选渠道下的自动故障转移与熔断，全部用真 HTTP（真实网关 + JDK HttpServer
- * 假上游），**不需要 Docker、不需要真 Redis**（Redis 指向不存在的端口 → 熔断退化成本机表，
+ * <b>M3 的验收核心</b>：多候选渠道下的自动故障转移与熔断，全部用真 HTTP（真实网关 + JDK HttpServer
+ * 假上游），<b>不需要 Docker、不需要真 Redis</b>（Redis 指向不存在的端口 → 熔断退化成本机表，
  * 这本身也是降级路径的证据）。
  *
  * <p>必须成立的行为（每一条都由下面的用例钉住，评审按此判断）：
  * <ol>
- *   <li>上游 429 → **立即**换下一个候选、标记该渠道熔断（30s，{@code markOpen}），并在计量里记下
- *       **实际服务**的那条渠道；</li>
- *   <li>上游 5xx → 换下一个候选，但**不打熔断**（决策 10）；</li>
+ *   <li>上游 429 → <b>立即</b>换下一个候选、标记该渠道熔断（30s，{@code markOpen}），并在计量里记下
+ *       <b>实际服务</b>的那条渠道；</li>
+ *   <li>上游 5xx → 换下一个候选，但<b>不打熔断</b>（决策 10）；</li>
  *   <li>上游超时（首字节之前）→ 换下一个候选；</li>
- *   <li>上游 400 → **不切换**（备用渠道一次都不该被调用）；</li>
- *   <li>候选全挂 → 客户端拿到**真实的最后一个失败**（原样状态码与 body）；</li>
+ *   <li>上游 400 → <b>不切换</b>（备用渠道一次都不该被调用）；</li>
+ *   <li>候选全挂 → 客户端拿到<b>真实的最后一个失败</b>（原样状态码与 body）；</li>
  *   <li>未知模型（快照里没有遗留渠道）→ 404 + OpenAI 形状 {@code model_not_found}；</li>
- *   <li>每条渠道的密钥**逐请求**注入，且候选数有**上界**（G10）；</li>
- *   <li>响应已提交之后（第一批字节已经转发）**不得**再切换；
- *       密钥解不开的候选被**跳过**而不是抛异常。</li>
+ *   <li>每条渠道的密钥<b>逐请求</b>注入，且候选数有<b>上界</b>（G10）；</li>
+ *   <li>响应已提交之后（第一批字节已经转发）<b>不得</b>再切换；
+ *       密钥解不开的候选被<b>跳过</b>而不是抛异常。</li>
  * </ol>
  *
  * <p>「第一个字节已转发之后不得切换」这条铁律在 {@code ChatRelayControllerTest} 的字节透传用例、
  * {@code RelayCommittedWriteFailureTest}（已提交 + 写失败）之外，本类用「响应头与第一帧原样到客户端、
- * 上游随后读超时」的构造再钉一次：切换路径在这种时序下**不可达**，且这次超时必须计成
+ * 上游随后读超时」的构造再钉一次：切换路径在这种时序下<b>不可达</b>，且这次超时必须计成
  * 上游流失败（{@code upstream_stream}）而不是客户端断连或成功。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
@@ -100,7 +100,7 @@ class FailoverRelayTest {
     private static FakeUpstream stalling;
 
     /**
-     * 本节快照里的候选渠道。**每个用例都显式声明**（默认两条：11 首选 / 12 备用）：
+     * 本节快照里的候选渠道。<b>每个用例都显式声明</b>（默认两条：11 首选 / 12 备用）：
      * 故障转移的行为只有「候选是谁、按什么顺序」确定时才有唯一答案。
      */
     private static final AtomicReference<List<ChannelDescriptor>> CHANNELS =
@@ -147,7 +147,7 @@ class FailoverRelayTest {
     /**
      * 每个用例都从「干净的假上游 + 默认两条候选 + 空熔断表 + 无本地配置缓存」开始。
      *
-     * <p>熔断表必须清：Redis 是死的，{@code markOpen} 的标记留在**本机表**里，而整个类共用一个
+     * <p>熔断表必须清：Redis 是死的，{@code markOpen} 的标记留在<b>本机表</b>里，而整个类共用一个
      * Spring 上下文 —— 上一个用例打开的渠道会把下一个用例的候选顺序改掉（这正是本机降级路径的
      * 真实行为，只是在这里必须显式复位）。
      *
@@ -164,7 +164,7 @@ class FailoverRelayTest {
             circuitBreaker.clear(channelId);
         }
         // 夹具复位（不是广播）：0 低于本夹具 admin 会给出的任何版本（它每次 +1），因此既清掉两级缓存
-        // 又不会挡住紧接着的回填。生产路径是 ConfigSubscriber 传进来的**消息版本**（D4）。
+        // 又不会挡住紧接着的回填。生产路径是 ConfigSubscriber 传进来的**消息版本**（M4 决策 4）。
         configClient.invalidate(0L);
     }
 
@@ -249,7 +249,7 @@ class FailoverRelayTest {
         assertThat(event.channelId()).isEqualTo(12L);
     }
 
-    /** 客户端的错（400）**不得**触发切换：那会把同一个错误在多个上游各计费一次。 */
+    /** 客户端的错（400）<b>不得</b>触发切换：那会把同一个错误在多个上游各计费一次。 */
     @Test
     void upstream400IsRelayedVerbatimWithoutSwitching() throws Exception {
         primary.enqueueError(400, "{\"error\":{\"message\":\"bad request from client\"}}");
@@ -312,9 +312,9 @@ class FailoverRelayTest {
     }
 
     /**
-     * 凭据**逐请求**注入，绝不挂在共享客户端上：两条渠道的 base-url / 超时 / 模式全同（= 工厂
-     * 缓存里是**同一个** WebClient 实例），第一次请求 429 后切到第二条渠道 —— 第二条渠道的上游请求
-     * 必须带**它自己**的密钥。任何「第一次请求把密钥塞进客户端默认头」的实现都会在这里把第一条
+     * 凭据<b>逐请求</b>注入，绝不挂在共享客户端上：两条渠道的 base-url / 超时 / 模式全同（= 工厂
+     * 缓存里是<b>同一个</b> WebClient 实例），第一次请求 429 后切到第二条渠道 —— 第二条渠道的上游请求
+     * 必须带<b>它自己</b>的密钥。任何「第一次请求把密钥塞进客户端默认头」的实现都会在这里把第一条
      * 渠道的密钥送到上游（{@code ChannelClientIsolationTest} 在客户端层面钉同一件事，这里是端到端）。
      */
     @Test
@@ -343,8 +343,8 @@ class FailoverRelayTest {
     }
 
     /**
-     * G10：候选数有上界。四条候选全挂时，客户端拿到的是**第 {@code MAX_ATTEMPTS} 条**候选的原样失败，
-     * 第 4 条**一次都不会被打** —— 没有上界时这一个请求会放大成 4 次上游调用。
+     * G10：候选数有上界。四条候选全挂时，客户端拿到的是<b>第 {@code MAX_ATTEMPTS} 条</b>候选的原样失败，
+     * 第 4 条<b>一次都不会被打</b> —— 没有上界时这一个请求会放大成 4 次上游调用。
      */
     @Test
     void attemptsAreCappedSoOneRequestCannotAmplifyIntoEveryCandidate() throws Exception {
@@ -378,7 +378,7 @@ class FailoverRelayTest {
         assertThat(event.channelId()).as("事件记的是最后一次被调用（并回写）的那条").isEqualTo(13L);
     }
 
-    /** 密钥解不开的候选是**不可用**，不是错误：跳过它、让下一个候选服务，绝不在请求路径上抛异常。 */
+    /** 密钥解不开的候选是<b>不可用</b>，不是错误：跳过它、让下一个候选服务，绝不在请求路径上抛异常。 */
     @Test
     void undecryptableCandidatesAreSkippedInFavourOfTheNextOne() throws Exception {
         CHANNELS.set(List.of(
@@ -398,7 +398,7 @@ class FailoverRelayTest {
     }
 
     /**
-     * **全部**候选的密钥都解不开时不许把它伪装成「模型不存在」（404），也不是 500：模型是存在的，
+     * <b>全部</b>候选的密钥都解不开时不许把它伪装成「模型不存在」（404），也不是 500：模型是存在的，
      * 只是网关此刻没有凭据可用 —— 这与「上游连不上」同属「现在服务不了」，因此是 502
      * {@code upstream_unreachable}（{@code RelayAttempts.servable} 保留原列表正是为了走到这里）。
      */
@@ -427,10 +427,10 @@ class FailoverRelayTest {
 
     /**
      * 「第一批字节已经转发之后不得再切换」的机器可判定形式：响应头与第一帧原样到客户端之后，
-     * 上游在读响应体的中途超时 —— 此时响应**已提交**，切换路径不可达，失败只能以「结束这段流」
+     * 上游在读响应体的中途超时 —— 此时响应<b>已提交</b>，切换路径不可达，失败只能以「结束这段流」
      * 收尾（绝不能把备用渠道的完整响应拼进来）。
      *
-     * <p>它同时是 G14 的端到端钉子：这次失败是**状态 200 之后**的读超时，按异常类型判定会把它
+     * <p>它同时是 G14 的端到端钉子：这次失败是<b>状态 200 之后</b>的读超时，按异常类型判定会把它
      * 当成「客户端断连」（甚至成功）；只有按原因链（{@code ReadTimeoutException}）才能计成
      * {@code upstream_stream}。
      */
@@ -466,7 +466,7 @@ class FailoverRelayTest {
     }
 
     /**
-     * G9：熔断器与路由解析器必须是**真实 bean**。单靠「context 起得来」不算 —— 这里直接断言
+     * G9：熔断器与路由解析器必须是<b>真实 bean</b>。单靠「context 起得来」不算 —— 这里直接断言
      * 注入的就是容器里那一个，并且它真的能从快照解析出候选（顺序 = priority 升序，因此是确定的）。
      * 上面那条 429 用例断言 {@code circuitBreaker.isOpen(11L)} 为真，也只有「中继调用了这个 bean」
      * 才可能成立。
@@ -504,7 +504,7 @@ class FailoverRelayTest {
 
     /**
      * 默认两条同模型候选：11（priority 0，weight 100）与 12（priority 1，weight 100）。
-     * **priority 不同**是刻意的：组内是权重随机，同组两条的先后不确定，而「下一个候选是谁」
+     * <b>priority 不同</b>是刻意的：组内是权重随机，同组两条的先后不确定，而「下一个候选是谁」
      * 必须是确定的（否则「400 不切换」「上界」这类断言会随机红）。
      */
     private static List<ChannelDescriptor> defaultChannels() {

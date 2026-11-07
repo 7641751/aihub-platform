@@ -17,11 +17,11 @@ import java.util.UUID;
  *
  * <p><b>为什么由网关生成</b>：这个值就是计量事件的 {@code request_id}，也是 {@code request_log}
  * 幂等键的一半（见计划「决策登记」第 1 条）。上游的 {@code x-request-id} 我们看不到、
- * 也不保证唯一，因此**不再透传上游的同名头**（M1 的白名单里有它，Task 2 移除）。
+ * 也不保证唯一，因此<b>不再透传上游的同名头</b>（M1 的白名单里有它，Task 2 移除）。
  *
  * <p><b>为什么不回显客户端带来的值</b>：那等于把幂等键的决定权交给调用方。
  *
- * <p><b>顺序</b>：排在 {@code ApiKeyAuthFilter}（{@code HIGHEST_PRECEDENCE + 100}）之**前**，
+ * <p><b>顺序</b>：排在 {@code ApiKeyAuthFilter}（{@code HIGHEST_PRECEDENCE + 100}）之<b>前</b>，
  * 因此 401 / 404 这类被短路或异常收尾的响应也带 {@code x-request-id} —— 排查问题时最有用的
  * 恰恰是这些失败请求。守备范围与鉴权过滤器一致（{@link PathPattern} 匹配应用内路径），
  * 避免「原始路径 vs 解码路径」那类不一致（M1 已经踩过一次）。
@@ -47,7 +47,7 @@ public class RequestIdFilter implements WebFilter {
     }
 
     /**
-     * 取本次请求的 id；没有就生成一个**并同时写进响应头**。
+     * 取本次请求的 id；没有就生成一个<b>并同时写进响应头</b>。
      * <p>这样「响应头里的 id」与「计量事件里的 id」由同一处产生，任何调用顺序都不会分叉。
      */
     public static String ensure(ServerWebExchange exchange) {

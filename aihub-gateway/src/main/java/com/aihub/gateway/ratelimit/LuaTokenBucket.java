@@ -3,7 +3,7 @@ package com.aihub.gateway.ratelimit;
 import com.aihub.common.ratelimit.RateLimitScript;
 
 /**
- * 网关侧的令牌桶脚本入口。**本类不含任何实现**：脚本与键布局的唯一真相在
+ * 网关侧的令牌桶脚本入口。<b>本类不含任何实现</b>：脚本与键布局的唯一真相在
  * {@link RateLimitScript}（`aihub-common`），理由是 admin 侧的集成测试也要验这段脚本，
  * 而 gateway 的测试不允许依赖 Docker。委托保持公开常量名不变，因此生产代码与测试都只认这一个名字。
  */

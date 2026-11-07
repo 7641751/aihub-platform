@@ -18,20 +18,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
 /**
- * admin 侧的加密服务。**不需要容器、不需要 Spring**：它只是一层「主密钥 → 密文」的薄封装，
+ * admin 侧的加密服务。<b>不需要容器、不需要 Spring</b>：它只是一层「主密钥 → 密文」的薄封装，
  * 真正的密码学在 {@code aihub-common} 的 {@code AesGcmChannelCipher} 里（两侧共用）。
  *
- * <p>这里最重要的一条是**跨侧互操作**：admin 产出的密文必须能被 gateway 侧的实现解开。
+ * <p>这里最重要的一条是<b>跨侧互操作</b>：admin 产出的密文必须能被 gateway 侧的实现解开。
  * 那也是「加密实现只许有一份」这条决策的可证伪形式。
  *
  * <p>另外三条守卫也是本类的核心：
  * <ul>
- *   <li>无主密钥时**响亮地失败**（{@code IllegalStateException}），而不是把坏数据写进
+ *   <li>无主密钥时<b>响亮地失败</b>（{@code IllegalStateException}），而不是把坏数据写进
  *       {@code channel.api_key_cipher}；</li>
- *   <li>明文为 {@code null}/空白时同样**响亮地失败**（{@code IllegalArgumentException}），
+ *   <li>明文为 {@code null}/空白时同样<b>响亮地失败</b>（{@code IllegalArgumentException}），
  *       而不是把它当成空串加密出一条「key 为空的渠道」（
  *       {@link #encryptRejectsNullAndBlankInsteadOfStoringACipherTextOfTheEmptyString()}）；</li>
- *   <li>加解密**一个字都不进日志**（{@link #cryptoOperationsNeverWriteKeyMaterialToTheLog()}）——
+ *   <li>加解密<b>一个字都不进日志</b>（{@link #cryptoOperationsNeverWriteKeyMaterialToTheLog()}）——
  *       明文只可能从日志泄漏，这条必须被证明，不能只靠「实现里没有 log 语句」的承诺。</li>
  * </ul>
  */
@@ -80,7 +80,7 @@ class ChannelKeyServiceTest {
     /**
      * 写入路径对「一定是调用方 bug」的输入也要响亮地失败。
      *
-     * <p>早先的实现把 {@code null} 映射成空串，于是 {@code encrypt(null)} 会**成功地**返回一段
+     * <p>早先的实现把 {@code null} 映射成空串，于是 {@code encrypt(null)} 会<b>成功地</b>返回一段
      * 「空字符串的密文」—— 调用方一路无阻地把「key 为空的渠道」写进 {@code channel.api_key_cipher}，
      * 直到请求打上去才以「上游 401」的形式暴露。这与本类「写入路径必须响亮地失败」的纪律相矛盾。
      */
@@ -147,10 +147,10 @@ class ChannelKeyServiceTest {
     /**
      * 「加解密不进日志」的可证伪形式。
      *
-     * <p>前一条用例只钉得住 {@code toString()} 与异常消息，而**明文唯一可能的泄漏途径是日志**：
+     * <p>前一条用例只钉得住 {@code toString()} 与异常消息，而<b>明文唯一可能的泄漏途径是日志</b>：
      * 一句图省事的 {@code log.debug("加密 {}", plaintext)} 不会让任何断言变红。因此这里把 root logger
      * 接上 {@link ListAppender}，覆盖成功加密、成功解密、无主密钥抛异常、密文解不开这四条路径，
-     * 再断言**所有**日志事件里既没有明文、也没有落库密文、也没有主密钥的 base64。
+     * 再断言<b>所有</b>日志事件里既没有明文、也没有落库密文、也没有主密钥的 base64。
      *
      * <p>用 root logger（而不是 {@code ChannelKeyService} 自己的 logger）是有意的：泄漏可能来自
      * 本类之外的任何一层（例如某天有人在 {@code AesGcmChannelCipher} 里加了日志），只监听本类会漏掉它。
@@ -158,11 +158,11 @@ class ChannelKeyServiceTest {
      * <p>两处「让断言真的能红」的构造，缺一不可：
      * <ul>
      *   <li>{@link #captureAllEvents} 在动作期间把 root 的级别降到 {@code TRACE}、并在 {@code finally}
-     *       里**恢复**：logback 是**先按 logger 的有效级别过滤、再把事件交给 appender**，
+     *       里<b>恢复</b>：logback 是<b>先按 logger 的有效级别过滤、再把事件交给 appender</b>，
      *       不设级别时本用例的敏感度就取决于「哪个类先初始化了 Logback」—— 全反应堆里 root 常是
      *       {@code INFO}，一句 {@code log.debug("加密 {}", plaintext)} 会被静默漏掉；</li>
-     *   <li>动作跑完后，用**同一条到达路径**发一条正对照事件（{@link #WITNESS}，DEBUG 级，
-     *       走的正是威胁模型里的那一条）并断言它**确实被捕获**：没有它，「一个事件都没捕获到」
+     *   <li>动作跑完后，用<b>同一条到达路径</b>发一条正对照事件（{@link #WITNESS}，DEBUG 级，
+     *       走的正是威胁模型里的那一条）并断言它<b>确实被捕获</b>：没有它，「一个事件都没捕获到」
      *       与「没有泄漏」无法区分，空捕获会让下面每一条断言恒真。</li>
      * </ul>
      */
@@ -201,7 +201,7 @@ class ChannelKeyServiceTest {
     /**
      * 捕获 root 上的所有事件（含 DEBUG/TRACE）。
      *
-     * <p>级别是**必须显式设置**的：logback 在事件抵达 appender 之前就按有效级别过滤，而 root 的级别
+     * <p>级别是<b>必须显式设置</b>的：logback 在事件抵达 appender 之前就按有效级别过滤，而 root 的级别
      * 由「谁先初始化 Logback」决定（Spring Boot 的 logback 配置是 INFO）。把它降到 {@code TRACE}
      * 并在 {@code finally} 里恢复原值，既让 debug 级泄漏可见，也不把级别留给下一个用例。
      */

@@ -5,7 +5,7 @@ import java.util.Arrays;
 import java.util.Deque;
 
 /**
- * 响应字节的**尾部**滑窗缓冲。
+ * 响应字节的<b>尾部</b>滑窗缓冲。
  *
  * <p>为什么是尾部：流式响应里 {@code usage} 出现在最后一帧（`stream_options.include_usage` 的约定），
  * 「超限就停止累积」会把最需要的那一段永远丢掉；「保留头部」同理。因此超限时丢头保尾。

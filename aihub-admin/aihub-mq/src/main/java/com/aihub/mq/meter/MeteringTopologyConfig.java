@@ -10,7 +10,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * 计量链路的**唯一声明方**（gateway 只发布，见计划「决策登记」第 4 条）。
+ * 计量链路的<b>唯一声明方</b>（gateway 只发布，见计划「决策登记」第 4 条）。
  *
  * <p>死信三件套：业务队列声明 {@code x-dead-letter-exchange/routing-key}，DLX 绑一个 DLQ。
  * 载荷解不开或落库反复失败的消息会被 reject 并进 DLQ，而不是无限 requeue 把 broker 打爆，
@@ -21,7 +21,7 @@ import org.springframework.context.annotation.Configuration;
  * {@code RejectAndDontRequeueRecoverer}，重试 3 次后它抛 {@code AmqpRejectAndDontRequeueException}，
  * 容器据此以 requeue=false 拒绝（实测日志：「Retries exhausted for message」→
  * {@code ConditionalRejectingErrorHandler}）。{@code default-requeue-rejected=false} 管的是
- * **另一条**路径（未开重试时容器自身的兜底），是可留的保险；实测把它改成 true，本任务的死信用例
+ * <b>另一条</b>路径（未开重试时容器自身的兜底），是可留的保险；实测把它改成 true，本任务的死信用例
  * 依然绿 —— 真正把关的是 recoverer，别误以为那个开关是死信的唯一开关。
  *
  * <p><b>所有名字都取自 {@link MeteringTopology}</b>，与本类里一个硬编码字面量都没有：

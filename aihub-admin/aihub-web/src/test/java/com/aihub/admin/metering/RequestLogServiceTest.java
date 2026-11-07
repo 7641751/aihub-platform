@@ -17,7 +17,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 落库与幂等。这里用的是真 MySQL（Testcontainers），因为要钉住的正是**唯一键**
+ * 落库与幂等。这里用的是真 MySQL（Testcontainers），因为要钉住的正是<b>唯一键</b>
  * {@code (request_id, created_at)} 与分区表的行为 —— 用内存库测等于没测。
  */
 class RequestLogServiceTest extends AbstractIntegrationTest {
@@ -94,7 +94,7 @@ class RequestLogServiceTest extends AbstractIntegrationTest {
 
     /**
      * Task 11 把 M2 决策 8 的缺口（{@code api_key_id} / {@code channel_id} 恒为 NULL）闭合掉了：
-     * 事件里带了值，落库这一侧必须**原样写进列**，而不是被插入策略（MyBatis-Plus 默认省略 null 字段）
+     * 事件里带了值，落库这一侧必须<b>原样写进列</b>，而不是被插入策略（MyBatis-Plus 默认省略 null 字段）
      * 或某个「只 set 一次」的实体复用悄悄丢掉。
      *
      * <p>判别力：删掉 {@code RequestLogService} 里的 {@code entity.setApiKeyId(...)} /
@@ -118,7 +118,7 @@ class RequestLogServiceTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 决策 9：{@code tenant_id} 取**事件**里的值，网关在没有认证视图时发 {@code 0} 哨兵。
+     * 决策 9：{@code tenant_id} 取<b>事件</b>里的值，网关在没有认证视图时发 {@code 0} 哨兵。
      * 真值 {@code 0} 必须原样落库 —— 不能被丢弃、也不能被写成 NULL。
      *
      * <p>判别力：把 {@code RequestLogService} 改成
@@ -142,7 +142,7 @@ class RequestLogServiceTest extends AbstractIntegrationTest {
     }
 
     /**
-     * **幂等**：同一事件（同 request_id + 同 created_at）落两次只能有一行，第二次返回 false。
+     * <b>幂等</b>：同一事件（同 request_id + 同 created_at）落两次只能有一行，第二次返回 false。
      * 反证：把 {@code RequestLogService} 里的 createdAt 换成 {@code LocalDateTime.now(UTC)}
      * 再跑本用例 → 变成两行 / 第二次返回 true，用例红（实测过 MySQL 的行为）。
      */
@@ -159,7 +159,7 @@ class RequestLogServiceTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 把「幂等键的另一半也必须稳定」写成文档：**同一 request_id 但 created_at 变了 → 第二行**。
+     * 把「幂等键的另一半也必须稳定」写成文档：<b>同一 request_id 但 created_at 变了 → 第二行</b>。
      * 这正是「消费端不许用 now()」的原因（计划「决策登记」第 2 条），也是 M4 对账要小心的地方。
      */
     @Test
@@ -175,7 +175,7 @@ class RequestLogServiceTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 验收标准第 4 条：**只有**「重复消费」允许被吞掉。非唯一键的数据库异常（这里是
+     * 验收标准第 4 条：<b>只有</b>「重复消费」允许被吞掉。非唯一键的数据库异常（这里是
      * {@code status} 为 NULL 撞上 {@code NOT NULL} 约束）必须往外抛，让消息重试/进死信。
      *
      * <p>判别力：把 {@code RequestLogService} 的 {@code catch} 放宽成

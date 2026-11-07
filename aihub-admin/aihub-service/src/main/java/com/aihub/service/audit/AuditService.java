@@ -20,9 +20,9 @@ import java.util.Map;
 import java.util.regex.Pattern;
 
 /**
- * 审计写入的服务层入口（决策 D1/D8）。
+ * 审计写入的服务层入口（M4 决策 1 / 决策 8）。
  *
- * <p><b>必须在调用方的事务里</b>：{@link #record} 刻意**不加** {@code @Transactional(REQUIRES_NEW)}
+ * <p><b>必须在调用方的事务里</b>：{@link #record} 刻意<b>不加</b> {@code @Transactional(REQUIRES_NEW)}
  * （也没有 {@code @Transactional} 本身，因此它不会开自己的事务，而是加入调用方已经打开的那个）。
  * 这不是风格选择，而是审计语义的底线 ——
  * <ul>
@@ -30,34 +30,34 @@ import java.util.regex.Pattern;
  *       审计日志会开始说谎；</li>
  *   <li>若审计不写而业务提交，「改了但没审计」同样成立，而审计是合规要求（D8），不是尽力而为。</li>
  * </ul>
- * 所以本类**永不吞异常**：{@link ObjectMapper#writeValueAsString} 抛的受检
+ * 所以本类<b>永不吞异常</b>：{@link ObjectMapper#writeValueAsString} 抛的受检
  * {@link JsonProcessingException} 在这里被转成 {@link IllegalStateException} 抛出 ——
  * 审计失败要让业务一起失败，同时受检异常不许从方法签名里漏出去。
  *
  * <p><b>detail 里不放敏感值首先是调用方的责任；本类的脱敏只是安全网，不是许可证</b>（D8）。
- * 计划第 25 行是硬约束 ——「审计表**绝不记录** API Key 明文、渠道明文密钥、{@code api_key_cipher}
+ * 计划第 25 行是硬约束 ——「审计表<b>绝不记录</b> API Key 明文、渠道明文密钥、{@code api_key_cipher}
  * 密文原文、主密钥、控制台口令/口令哈希、令牌原文」。因此：
  * <ul>
  *   <li><b>调用方绝不许把上述任何值放进 {@code detail}</b>。审计记录的准确性依赖调用方的纪律：
- *       写入边界的脱敏按**键名片段**与**值的形态**两个**启发式**工作，两条都不是保证 ——
+ *       写入边界的脱敏按<b>键名片段</b>与<b>值的形态</b>两个<b>启发式</b>工作，两条都不是保证 ——
  *       例如 {@code "Bearer sk-…"}、{@code "prefix v1:…"}、AWS 的 {@code AKIA…}
  *       这类带前后缀的形态都不会被识别（见 {@link #SENSITIVE_VALUE_PATTERNS}）。
- *       判据「审计 detail 不含任何密钥/口令/密文/令牌」的第一条路径永远是**调用方不放**；</li>
+ *       判据「审计 detail 不含任何密钥/口令/密文/令牌」的第一条路径永远是<b>调用方不放</b>；</li>
  *   <li>安全网覆盖的形状：嵌套对象/数组/任意可被 Jackson 表示的值（含 POJO —— 先被转成 JSON 树，
- *       再逐节点按同一套规则走一遍，因此实体的字段**不会**被原样序列化）、按键名命中的值、
- *       按值形态命中的字符串，以及**自身就是密钥形态的键**（见 {@link #REDACTED_KEY}）；</li>
+ *       再逐节点按同一套规则走一遍，因此实体的字段<b>不会</b>被原样序列化）、按键名命中的值、
+ *       按值形态命中的字符串，以及<b>自身就是密钥形态的键</b>（见 {@link #REDACTED_KEY}）；</li>
  *   <li><b>已知代价：过度脱敏</b>。键名用「包含」匹配（见 {@link #SENSITIVE_KEY_FRAGMENTS}），
- *       于是 {@code tokenCount} 这类**非敏感**键也会被替换成 {@value #REDACTED} ——
- *       审计读到的就是「这里有 tokenCount，值被抹了」。这是**有意接受的代价**：多一个
+ *       于是 {@code tokenCount} 这类<b>非敏感</b>键也会被替换成 {@value #REDACTED} ——
+ *       审计读到的就是「这里有 tokenCount，值被抹了」。这是<b>有意接受的代价</b>：多一个
  *       {@code [REDACTED]} 远轻于漏掉一把真密钥。它是被用例钉住的决定，不是文档里的一句免责；</li>
  *   <li><b>替换而不是丢字段</b>：审计要能回答「改了哪些字段」，悄悄丢掉一个字段 = 少一行事实，
- *       比多一个 {@code [REDACTED]} 更糟。深度上限触顶时被替换的是**子树的内容**，字段本身仍在
+ *       比多一个 {@code [REDACTED]} 更糟。深度上限触顶时被替换的是<b>子树的内容</b>，字段本身仍在
  *       （见 {@link #MAX_DEPTH}）。</li>
  * </ul>
  *
- * <p>{@code created_at} 由本类**显式**写成 UTC 墙上时间
+ * <p>{@code created_at} 由本类<b>显式</b>写成 UTC 墙上时间
  * （{@code LocalDateTime.ofInstant(clock.instant(), ZoneOffset.UTC)}，与计量路径
- * {@code RequestLogService} 完全一致）：{@code audit_log.created_at} 是**无时区**的
+ * {@code RequestLogService} 完全一致）：{@code audit_log.created_at} 是<b>无时区</b>的
  * {@code DATETIME(3)}，若靠 {@code DEFAULT CURRENT_TIMESTAMP(3)} 填充，存储基准就跟着 MySQL 会话时区走，
  * 而 {@link AuditLogEntity#getCreatedAt()} 读回来的是那一格的字面值 —— 同一列于是可能出现两套墙钟基准。
  * 显式按 UTC 写之后，写入基准与库会话时区、与 JDBC 驱动的时区推导都无关（CONVENTIONS §7）。
@@ -72,22 +72,22 @@ public class AuditService {
     static final String REDACTED = "[REDACTED]";
 
     /**
-     * **键本身**是密钥形态时的占位符（{@code {"sk-…": "ENABLED"}}）。
+     * <b>键本身</b>是密钥形态时的占位符（{@code {"sk-…": "ENABLED"}}）。
      *
-     * <p>键的文本和值一样是调用方交来的**内容**，所以它也过一遍值形态判断；命中就把键换掉、
-     * **保留值** —— 「这里有一个字段」这一条事实要留下（见类注释「替换而不是丢字段」）。
+     * <p>键的文本和值一样是调用方交来的<b>内容</b>，所以它也过一遍值形态判断；命中就把键换掉、
+     * <b>保留值</b> —— 「这里有一个字段」这一条事实要留下（见类注释「替换而不是丢字段」）。
      */
     static final String REDACTED_KEY = "[REDACTED_KEY]";
 
     /**
-     * 敏感**键名**（先归一化成小写并去掉 {@code _} / {@code -}）。
+     * 敏感<b>键名</b>（先归一化成小写并去掉 {@code _} / {@code -}）。
      *
      * <p>用「包含」而不是「相等」：真实的键名会长成 {@code apiKeyCipher}、{@code new_api_key}、
      * {@code consoleToken}、{@code masterSecret} 这些形态，穷举相等是永远追不上的。
      * 代价是会误伤（例如 {@code tokenCount}），而误伤的后果只是审计里多一个 {@value #REDACTED} ——
      * 比漏掉一把真密钥轻得多，这正是这个边界该有的偏向。
      *
-     * <p>这一条**只作用于键对应的值**，不作用于键名本身：键名 {@code apiKey} 是**标签**，
+     * <p>这一条<b>只作用于键对应的值</b>，不作用于键名本身：键名 {@code apiKey} 是<b>标签</b>，
      * 它自己不泄漏任何内容，而把两个标签都替换成同一个占位符会让「改了哪两个字段」这件事消失。
      * 键名本身是密钥的情况由值形态判断兜住（见 {@link #REDACTED_KEY}）。
      */
@@ -96,10 +96,10 @@ public class AuditService {
             "token", "cipher", "masterkey", "privatekey", "bcrypt", "hash");
 
     /**
-     * 敏感**值的形态**。键名不可信（{@code {"reason": "sk-live-..."}} 看起来完全无害），
+     * 敏感<b>值的形态</b>。键名不可信（{@code {"reason": "sk-live-..."}} 看起来完全无害），
      * 所以值的形状必须单独判一次。
      *
-     * <p><b>这是启发式，不是保证</b>：四个模式都是**锚定**的，带前后缀的形态
+     * <p><b>这是启发式，不是保证</b>：四个模式都是<b>锚定</b>的，带前后缀的形态
      * （{@code "Bearer sk-…"}、{@code "prefix v1:…"}、{@code "key=sk-…"}）一律漏过。
      * 它只能当安全网用 —— 调用方仍然不许把密钥放进 detail（见类注释）。
      */
@@ -112,7 +112,7 @@ public class AuditService {
     /**
      * 递归深度上限。detail 是调用方构造的 map，理论上可能自引用；
      * 在这里撞上 {@code StackOverflowError} 会让「审计失败要响亮」变成「整个线程挂掉」。
-     * 超过深度就**把该子树的内容**替换为 {@value #REDACTED}：键与这一层事实都还在，
+     * 超过深度就<b>把该子树的内容</b>替换为 {@value #REDACTED}：键与这一层事实都还在，
      * 丢掉的只是更深的内容（与类注释的「替换而不是丢字段」一致）。
      */
     private static final int MAX_DEPTH = 8;
@@ -129,7 +129,7 @@ public class AuditService {
     }
 
     /**
-     * 可注入时钟的构造器：用例用它钉住固定瞬时，证明 {@code created_at} 来自**本类的时钟**
+     * 可注入时钟的构造器：用例用它钉住固定瞬时，证明 {@code created_at} 来自<b>本类的时钟</b>
      * 而不是库默认值（也不是 JVM 本地墙钟）。
      */
     public AuditService(AuditLogMapper auditLogMapper, Clock clock) {
@@ -145,15 +145,15 @@ public class AuditService {
     }
 
     /**
-     * 写一条审计行。**必须在调用方的事务里**（不加 {@code @Transactional(REQUIRES_NEW)}）：
+     * 写一条审计行。<b>必须在调用方的事务里</b>（不加 {@code @Transactional(REQUIRES_NEW)}）：
      * 「改了但没审计」是不可接受的，所以审计失败要让业务一起回滚。
      *
-     * <p>detail 只放**非敏感**字段（如渠道名、权重、状态）。**调用方仍不得把明文密钥、渠道密钥、
-     * {@code api_key_cipher} 密文、主密钥、口令/口令哈希、令牌放进 detail**：本类在写入边界的脱敏是
-     * **安全网，不是许可证** —— 它按启发式工作、覆盖不到所有形态，审计记录的准确性依赖调用方的纪律
+     * <p>detail 只放<b>非敏感</b>字段（如渠道名、权重、状态）。<b>调用方仍不得把明文密钥、渠道密钥、
+     * {@code api_key_cipher} 密文、主密钥、口令/口令哈希、令牌放进 detail</b>：本类在写入边界的脱敏是
+     * <b>安全网，不是许可证</b> —— 它按启发式工作、覆盖不到所有形态，审计记录的准确性依赖调用方的纪律
      * （见类注释）。
      *
-     * @param tenantId 租户上下文；**真的没有租户上下文时传 {@code null}**（写 SQL NULL），
+     * @param tenantId 租户上下文；<b>真的没有租户上下文时传 {@code null}</b>（写 SQL NULL），
      *                 不要用 {@code 0} 当哨兵 —— {@code 0} 与真实 id 空间无法区分（id 从 1 开始）。
      *                 {@code LOGIN_FAILURE}（用户名不存在）就是这种事件。
      * @param detail   非敏感的变更摘要；{@code null} 或空 map 落库为 SQL NULL。
@@ -205,7 +205,7 @@ public class AuditService {
     }
 
     /**
-     * 放一个键值对进脱敏结果：键先按**值形态**过一遍（键的文本也是内容），值再递归脱敏。
+     * 放一个键值对进脱敏结果：键先按<b>值形态</b>过一遍（键的文本也是内容），值再递归脱敏。
      *
      * @param containerDepth 容器自身的层级；值在 {@code containerDepth + 1} 层
      */
@@ -234,7 +234,7 @@ public class AuditService {
 
     /**
      * 把一个值变成「可以安全序列化」的形态：标量照抄（命中的字符串替换成 {@value #REDACTED}），
-     * Map / {@link Iterable} 递归，**其它一切**（POJO、record、enum、数组…）先让 Jackson 转成
+     * Map / {@link Iterable} 递归，<b>其它一切</b>（POJO、record、enum、数组…）先让 Jackson 转成
      * JSON 树再按同一套规则走 —— 这就是「非 String/Map/List 的值不会被原样写出去」的保证点。
      */
     private static Object redactValue(Object value, int depth) {
@@ -288,7 +288,7 @@ public class AuditService {
     /**
      * 走 Jackson 的 JSON 树：对象、数组、文本、数字、布尔全部覆盖。
      *
-     * <p>无法归类为这几类的节点（binary / POJO 节点等）**整体替换**为 {@value #REDACTED}：
+     * <p>无法归类为这几类的节点（binary / POJO 节点等）<b>整体替换</b>为 {@value #REDACTED}：
      * 这里的原则是「认不出来就不写出去」，而不是「认不出来就照抄」。
      */
     private static Object redactNode(JsonNode node, int depth) {

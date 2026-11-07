@@ -5,9 +5,9 @@ package com.aihub.mq.kb;
  *
  * <p><b>刻意定义在 {@code aihub-mq}（消费侧）而由 {@code aihub-service} 实现</b>：依赖方向是
  * {@code web → service → mq}，且 {@code mq} 的依赖面只有 {@code aihub-common} + {@code spring-boot-starter-amqp}
- * （**看不到 {@code aihub-dao} / {@code aihub-service}**，实测 pom）。解析要读 {@code kb_document}、
+ * （<b>看不到 {@code aihub-dao} / {@code aihub-service}</b>，实测 pom）。解析要读 {@code kb_document}、
  * 读原件、切分、写 {@code kb_chunk}、发 {@code kb.embed} —— 这些都在 service/dao 侧，因此消费者只依赖这个接口。
- * 形状**逐字照既有计量链路**的 {@link com.aihub.mq.meter.MeteringSink}（"照抄既有形状、不发明新形状"）。
+ * 形状<b>逐字照既有计量链路</b>的 {@link com.aihub.mq.meter.MeteringSink}（"照抄既有形状、不发明新形状"）。
  */
 public interface KbParseSink {
 

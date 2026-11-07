@@ -10,33 +10,33 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 渠道密钥的主密钥表，从**环境变量**读入，格式为 {@code v1:<base64 32 字节>,v2:<base64 32 字节>}。
+ * 渠道密钥的主密钥表，从<b>环境变量</b>读入，格式为 {@code v1:<base64 32 字节>,v2:<base64 32 字节>}。
  *
  * <p><b>为什么可以放在 {@code aihub-common}</b>：它只用 JDK 类型（{@link Base64} / {@link Map} /
- * {@link Pattern}），因此「main 作用域零依赖」仍然成立 —— 零依赖指的是**零第三方依赖**，而不是
+ * {@link Pattern}），因此「main 作用域零依赖」仍然成立 —— 零依赖指的是<b>零第三方依赖</b>，而不是
  * 「只能用 {@code java.lang}」（{@code InternalHmac} 早就在用 {@code javax.crypto}）。
- * 放这里的唯一理由是 admin（加密）与 gateway（解密）**必须共用同一份**解析规则：各写一份等于把
+ * 放这里的唯一理由是 admin（加密）与 gateway（解密）<b>必须共用同一份</b>解析规则：各写一份等于把
  * 主密钥格式撕成两半，单侧改动不会编译报错，只会表现为「网关解不开密钥」。
  *
  * <p><b>双版本共存</b>：轮换时环境变量里同时放旧、新两把密钥 → 网关既能解开旧密文（存量行）、
  * 又能解开新密文（重加密后的行）；全部重加密完成后把旧密钥去掉。
- * 因此 {@link #parse} 对无法解析的段采取**跳过**而不是抛异常，{@link #currentVersion()} 取
+ * 因此 {@link #parse} 对无法解析的段采取<b>跳过</b>而不是抛异常，{@link #currentVersion()} 取
  * 「解析成功的最大版本号」—— 环境变量里出现垃圾时最坏的后果是「那个版本解不开」，而不是「网关起不来」。
  *
- * <p><b>不变量（评审 Fix 3）</b>：版本号必须为正、密钥必须**恰好 32 字节**（AES-256）、版本数不超过
- * {@link #MAX_VERSIONS}。这三条由**紧凑构造器**强制，而不只是由 {@link #parse} 过滤 —— 只过滤入参
+ * <p><b>不变量（评审 Fix 3）</b>：版本号必须为正、密钥必须<b>恰好 32 字节</b>（AES-256）、版本数不超过
+ * {@link #MAX_VERSIONS}。这三条由<b>紧凑构造器</b>强制，而不只是由 {@link #parse} 过滤 —— 只过滤入参
  * 意味着 {@code new ChannelKeyRegistry(Map.of(1, new byte[16]))} 仍然能构造出表：16 字节会被 JDK
- * 当作 AES-128 **静默接受**（不报错，但密文与 AES-256 的存量数据不是一回事），而 31 字节要到
+ * 当作 AES-128 <b>静默接受</b>（不报错，但密文与 AES-256 的存量数据不是一回事），而 31 字节要到
  * {@code encrypt} 时才抛出与「密文被篡改」无法区分的 {@code "AES-GCM 运算失败"}。
  *
- * <p><b>密钥数组的归属（评审 Fix 5）</b>：这类不可变值对象必须在**边界上复制**字节数组 ——
+ * <p><b>密钥数组的归属（评审 Fix 5）</b>：这类不可变值对象必须在<b>边界上复制</b>字节数组 ——
  * 构造器复制入参，{@link #key(int)} 与 {@link #keys()} 交出副本。否则任何拿到表的人都持有一份
  * 可以就地清零的主密钥。
  *
  * <p><b>equals/hashCode 的语义</b>：record 自动生成的实现用 {@code Objects.equals} 比较
- * {@code byte[]}，即**按引用比较** —— 两个内容相同的主密钥表并不相等。这是刻意保留的：本类型是
+ * {@code byte[]}，即<b>按引用比较</b> —— 两个内容相同的主密钥表并不相等。这是刻意保留的：本类型是
  * 进程内的主密钥容器，不需要值语义，而按引用比较至少是「便宜且不假装正确」。要比版本集合请用
- * {@link #describe()} 或 {@code keys().keySet()}；**不要**为此补一个逐字节比较的 equals（brief 没有这个契约）。
+ * {@link #describe()} 或 {@code keys().keySet()}；<b>不要</b>为此补一个逐字节比较的 equals（brief 没有这个契约）。
  */
 public record ChannelKeyRegistry(Map<Integer, byte[]> keys) {
 
@@ -47,14 +47,14 @@ public record ChannelKeyRegistry(Map<Integer, byte[]> keys) {
     private static final Pattern SEGMENT = Pattern.compile("^[vV](\\d{1,9}):(.+)$");
 
     /**
-     * 版本数上界。它不是安全边界，而是**配置错误的上界**：环境变量里塞了几十个版本通常意味着
-     * 有人把「历史密钥」当成了备份手段。超过上界的配置**整表拒绝**（见 {@link #parse}），
+     * 版本数上界。它不是安全边界，而是<b>配置错误的上界</b>：环境变量里塞了几十个版本通常意味着
+     * 有人把「历史密钥」当成了备份手段。超过上界的配置<b>整表拒绝</b>（见 {@link #parse}），
      * 而不是静默截断。
      */
     private static final int MAX_VERSIONS = 8;
 
     /**
-     * 校验并复制入参，使非法表**根本无法被构造**（评审 Fix 3 / Fix 5）。
+     * 校验并复制入参，使非法表<b>根本无法被构造</b>（评审 Fix 3 / Fix 5）。
      *
      * @throws IllegalArgumentException 版本号非正、密钥不是 32 字节（含 null）、版本数超过 {@link #MAX_VERSIONS}
      */
@@ -83,7 +83,7 @@ public record ChannelKeyRegistry(Map<Integer, byte[]> keys) {
     }
 
     /**
-     * 解析环境变量。任何一段解析失败都只是被跳过，**本方法永不抛异常**。
+     * 解析环境变量。任何一段解析失败都只是被跳过，<b>本方法永不抛异常</b>。
      *
      * <p><b>超过 {@link #MAX_VERSIONS} 个有效版本时整表拒绝（评审 Fix 6）</b>：返回空表而不是截断。
      * 旧行为是遇到第 9 段就 {@code break}，实测 9 个版本时 {@code size=8, currentVersion()=8,
@@ -137,13 +137,13 @@ public record ChannelKeyRegistry(Map<Integer, byte[]> keys) {
         return keys.containsKey(version);
     }
 
-    /** 指定版本密钥的**副本**（评审 Fix 5）：调用方拿到的数组与表内密钥不共享存储。 */
+    /** 指定版本密钥的<b>副本</b>（评审 Fix 5）：调用方拿到的数组与表内密钥不共享存储。 */
     public Optional<byte[]> key(int version) {
         return Optional.ofNullable(keys.get(version)).map(byte[]::clone);
     }
 
     /**
-     * 主密钥表的**副本**，连 {@code byte[]} 一起复制（评审 Fix 5）：直接交出内部数组等于把
+     * 主密钥表的<b>副本</b>，连 {@code byte[]} 一起复制（评审 Fix 5）：直接交出内部数组等于把
      * 「就地清零主密钥」的能力送给任何调用方。
      */
     @Override
@@ -156,9 +156,9 @@ public record ChannelKeyRegistry(Map<Integer, byte[]> keys) {
     }
 
     /**
-     * 供日志使用：只出现版本号，**绝不出现密钥内容**。版本号按升序排列（评审 Fix 4）——
-     * {@code Map.copyOf} 丢弃迭代顺序，而且 {@code ImmutableCollections} 的遍历顺序带**每次 JVM 启动
-     * 随机化的 SALT**：同一份输入 {@code parse("v7:…,v1:…,v4:…")} 实测出现过 {@code [4, 1, 7]}、
+     * 供日志使用：只出现版本号，<b>绝不出现密钥内容</b>。版本号按升序排列（评审 Fix 4）——
+     * {@code Map.copyOf} 丢弃迭代顺序，而且 {@code ImmutableCollections} 的遍历顺序带<b>每次 JVM 启动
+     * 随机化的 SALT</b>：同一份输入 {@code parse("v7:…,v1:…,v4:…")} 实测出现过 {@code [4, 1, 7]}、
      * {@code [4, 7, 1]}、{@code [1, 7, 4]} 三种顺序，不排序的话运维在轮换日志里根本认不出「同一份配置」。
      */
     public String describe() {

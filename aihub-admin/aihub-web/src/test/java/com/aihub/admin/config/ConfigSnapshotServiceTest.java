@@ -30,7 +30,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
 
 /**
- * 快照组装（{@code GET /internal/config/snapshot} 的数据面）。**必须真起容器**：这里要钉住的是
+ * 快照组装（{@code GET /internal/config/snapshot} 的数据面）。<b>必须真起容器</b>：这里要钉住的是
  * 「{@code max(updated_at)} 真的随一次写入推进」「{@code status = 'ACTIVE'} 真的把停用行挡在快照外」
  * 「同维度多条 ACTIVE 策略里 {@code id} 最大的那条真的赢」这三件 SQL 层面的事实 —— 换成内存替身
  * 就会变成「测自己写的排序」，一条都证明不了。
@@ -38,16 +38,16 @@ import static org.assertj.core.api.Assertions.tuple;
  * <p><b>三条控制器裁决在这里落地</b>（它们都压过计划正文的措辞）：
  * <ul>
  *   <li><b>G5</b>：INACTIVE 的 {@code channel} / {@code model_route} / {@code rate_limit_policy} 行
- *       **不得进入快照**。计划正文写的是「全部行都组装（含 DISABLED），由 gateway 侧过滤」——
+ *       <b>不得进入快照</b>。计划正文写的是「全部行都组装（含 DISABLED），由 gateway 侧过滤」——
  *       那条路走不通：{@code RatePolicy} 根本没有状态分量，而 {@code ChannelDescriptor.usable()}
- *       也只在网关侧生效，因此组装层漏掉过滤在网关侧**不可观测**。三个网关 DTO 里只有
+ *       也只在网关侧生效，因此组装层漏掉过滤在网关侧<b>不可观测</b>。三个网关 DTO 里只有
  *       {@code RatePolicy} 没有任何状态痕迹，所以过滤点只能是组装层，且每条都由
  *       {@code containsExactly} 钉死（不是「ACTIVE 的在」而是「INACTIVE 的不在」）。</li>
  *   <li><b>决策 17</b>：「同维度取最后一条」= 「取 {@code id} 最大的那条」，这里用真实 MySQL 断言，
  *       不把 {@code RateLimitPolicyMapper} javadoc 里的 InnoDB 扫描顺序假设默默继承下来。</li>
  *   <li><b>决策 D5</b>：{@code version} = {@code max(三张表 updated_at 的最大值, config_version 水位)}，
- *       改一行必须**严格变大**；水位被显式归零（见 {@link #resetVersionWatermark()}）且控制面为空时是
- *       {@code 0}。抬水位的入口是配置**写**路径（{@code ConfigChangePublisher}），本类只用 {@code updated_at}
+ *       改一行必须<b>严格变大</b>；水位被显式归零（见 {@link #resetVersionWatermark()}）且控制面为空时是
+ *       {@code 0}。抬水位的入口是配置<b>写</b>路径（{@code ConfigChangePublisher}），本类只用 {@code updated_at}
  *       那一半，因此这些断言仍然钉住「三张表都参与 max」。</li>
  * </ul>
  *
@@ -67,12 +67,12 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
     private static final long VERSION_BASIS_TOLERANCE_MILLIS = 1L;
 
     /**
-     * 「列里的墙上时间 vs 数据库自己的 UTC 时钟」的容差（毫秒）—— 独立评审 I-3 要求的**独立**基准断言用。
+     * 「列里的墙上时间 vs 数据库自己的 UTC 时钟」的容差（毫秒）—— 独立评审 I-3 要求的<b>独立</b>基准断言用。
      *
      * <p>两次 SELECT 之间的真实间隔是毫秒级（同一台容器、同一条连接池）；这里给 2 秒是给慢机器的余量。
-     * 它仍然比**任何**非零真实时区偏移小三个数量级以上（2026-09-30 在本机 JDK 25.0.2 上枚举全部
-     * tzdata zone、跨三个瞬时实测：最小的**非零**偏移是 **60 分钟 = 3600000 ms**，2 秒是它的
-     * **1/1800**），所以「列按会话时区写」这种基准错一定会红，而不是被容差吃掉。
+     * 它仍然比<b>任何</b>非零真实时区偏移小三个数量级以上（2026-09-30 在本机 JDK 25.0.2 上枚举全部
+     * tzdata zone、跨三个瞬时实测：最小的<b>非零</b>偏移是 <b>60 分钟 = 3600000 ms</b>，2 秒是它的
+     * <b>1/1800</b>），所以「列按会话时区写」这种基准错一定会红，而不是被容差吃掉。
      */
     private static final long COLUMN_CLOCK_TOLERANCE_MILLIS = 2_000L;
 
@@ -122,10 +122,10 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 决策 D5：{@code version} 必须是**严格递增的标量**。三张表都要参与 {@code max}，
+     * 决策 D5：{@code version} 必须是<b>严格递增的标量</b>。三张表都要参与 {@code max}，
      * 而且「改一行」也要推进（V1 三张表的 {@code updated_at} 都是 {@code ON UPDATE CURRENT_TIMESTAMP(3)}）。
      *
-     * <p>毫秒分辨率下同一毫秒内的两次写入可能拿到相同的 {@code updated_at} —— 那个缺口是**登记在案**的
+     * <p>毫秒分辨率下同一毫秒内的两次写入可能拿到相同的 {@code updated_at} —— 那个缺口是<b>登记在案</b>的
      * （不修），因此这里每次写入之间睡 10ms，让断言钉住的是「真的推进」而不是「时钟够快」。
      */
     @Test
@@ -158,36 +158,36 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 决策 D5 的时间**基准**：{@code max(updated_at)} 只来自**裸 SQL / seeder** 这条路径
+     * 决策 D5 的时间<b>基准</b>：{@code max(updated_at)} 只来自<b>裸 SQL / seeder</b> 这条路径
      * （控制台写入会走 {@code ConfigChangePublisher} 抬水位，把这一半盖住），因此这里把水位显式
      * 归零（见 {@link #resetVersionWatermark()}）、只靠一行 raw SQL 解释版本。
      *
-     * <p><b>本用例是判别器</b>：{@code datetime(3)} 列里存的是 **UTC 墙上时间**，所以回读必须走
+     * <p><b>本用例是判别器</b>：{@code datetime(3)} 列里存的是 <b>UTC 墙上时间</b>，所以回读必须走
      * 「不做任何时区换算」的载体 —— 先用 {@link LocalDateTime} 读出那一格（驱动对它会原样搬运），
      * 再显式折 {@code toInstant(ZoneOffset.UTC)}。曾经的实现读 {@code java.sql.Timestamp} 再
-     * {@code toInstant()}，驱动会按**连接时区**解释这串墙上时间（连接时区解析成 LOCAL 时就是
+     * {@code toInstant()}，驱动会按<b>连接时区</b>解释这串墙上时间（连接时区解析成 LOCAL 时就是
      * JVM 默认时区，本机 Asia/Shanghai），于是版本整整早 8 小时（28800000 ms）——
      * 对「几秒内收敛」的验收判据来说就是永远不收敛。
      *
-     * <p><b>判别力的边界（独立评审 I-1）</b>：旧读法只在**连接时区不是 UTC** 时才有偏差。
-     * 生产 URL 钉了 {@code serverTimezone=UTC}，在那里旧读法与新读法**逐位相等**（实测 old − new = 0），
-     * 所以本用例现在跑的生产方言下**不能**判别两个实现 —— 判别那份工作由
+     * <p><b>判别力的边界（独立评审 I-1）</b>：旧读法只在<b>连接时区不是 UTC</b> 时才有偏差。
+     * 生产 URL 钉了 {@code serverTimezone=UTC}，在那里旧读法与新读法<b>逐位相等</b>（实测 old − new = 0），
+     * 所以本用例现在跑的生产方言下<b>不能</b>判别两个实现 —— 判别那份工作由
      * {@code TimeBasisIsConnectionFlavourIndependentTest}（故意钉非 UTC 连接时区的独立上下文）承担。
-     * 本用例在这里承担的是另一半：钉住**生产读法**是「列 + 显式 UTC 折」，并用下面那条
-     * **数据库自身时钟**断言钉住**列的基准**（见下）。
+     * 本用例在这里承担的是另一半：钉住<b>生产读法</b>是「列 + 显式 UTC 折」，并用下面那条
+     * <b>数据库自身时钟</b>断言钉住<b>列的基准</b>（见下）。
      *
-     * <p>容差 {@value #VERSION_BASIS_TOLERANCE_MILLIS} ms：这一行**不加**容差就是精确相等，
+     * <p>容差 {@value #VERSION_BASIS_TOLERANCE_MILLIS} ms：这一行<b>不加</b>容差就是精确相等，
      * 保留 1 毫秒只是给 {@code datetime(3)} 的毫秒截断留位（这里实际上是整数毫秒，取 0 也会绿）。
      * 8 小时的偏差比它大 7 个数量级，因此「红」不会靠容差。
      *
-     * <p><b>独立评审 I-3 的补强 —— 列基准必须用数据库自己的时钟来钉</b>：上面的断言把**同一列**按
-     * **同一个 UTC 折常量**折了两次，因此它只能证明「生产的读法 = UTC 折」，证明不了
+     * <p><b>独立评审 I-3 的补强 —— 列基准必须用数据库自己的时钟来钉</b>：上面的断言把<b>同一列</b>按
+     * <b>同一个 UTC 折常量</b>折了两次，因此它只能证明「生产的读法 = UTC 折」，证明不了
      * 「列里存的确实是 UTC」：V1 的配置表用 {@code DEFAULT CURRENT_TIMESTAMP(3)} /
-     * {@code ON UPDATE CURRENT_TIMESTAMP(3)} 生成这一列，那写的是**数据库会话时区**的墙上时间，
+     * {@code ON UPDATE CURRENT_TIMESTAMP(3)} 生成这一列，那写的是<b>数据库会话时区</b>的墙上时间，
      * 而应用侧没有任何东西钉会话时区。若某台 MySQL 的会话时区不是 UTC，这一列会存本地墙上时间，
      * 两边一起被折错、上面的断言照样绿，而 {@code currentVersion()} 会整体偏一个时区。
-     * 因此下面额外比**两个不同的时钟**：列里的值 vs 数据库自己的 {@code UTC_TIMESTAMP(3)}；
-     * 并在会话时区与 UTC 不同时要求这一格**不**落在 {@code NOW(3)}（会话时钟）附近。
+     * 因此下面额外比<b>两个不同的时钟</b>：列里的值 vs 数据库自己的 {@code UTC_TIMESTAMP(3)}；
+     * 并在会话时区与 UTC 不同时要求这一格<b>不</b>落在 {@code NOW(3)}（会话时钟）附近。
      */
     @Test
     void versionUsesTheUtcWallClockBasisOfUpdatedAtNotTheJvmDefaultZone() {
@@ -246,7 +246,7 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
     }
 
     /**
-     * G5 第一条：INACTIVE 的渠道行**不得**进入快照。断言用 {@code containsExactly}：
+     * G5 第一条：INACTIVE 的渠道行<b>不得</b>进入快照。断言用 {@code containsExactly}：
      * 只断言「ACTIVE 那条在」的实现（把 INACTIVE 也带上）会漏过这个缺口。
      */
     @Test
@@ -260,7 +260,7 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
         assertThat(channels.get(0).apiKeyCipher()).as("密文原样透出（快照里永远只有密文）").isEqualTo(activeCipher);
     }
 
-    /** G5 第二条：INACTIVE 的路由行**不得**进入快照（路由级的 weight/priority 要一并核对）。 */
+    /** G5 第二条：INACTIVE 的路由行<b>不得</b>进入快照（路由级的 weight/priority 要一并核对）。 */
     @Test
     void inactiveRouteRowsNeverEnterTheSnapshot() {
         Long channelId = insertChannelReturningId("snap-rt-ch", ACTIVE);
@@ -276,7 +276,7 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
     }
 
     /**
-     * G5 第三条：INACTIVE 的限流策略行**不得**进入快照 —— 而且两个维度都要覆盖：
+     * G5 第三条：INACTIVE 的限流策略行<b>不得</b>进入快照 —— 而且两个维度都要覆盖：
      * 停用一条租户级行不该回落成「没有策略」，停用一条 key 级行同样不该生效。
      */
     @Test
@@ -319,9 +319,9 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 决策 17 + G5：同租户有多条 ACTIVE 租户级策略时，**id 最大的那条**赢。
+     * 决策 17 + G5：同租户有多条 ACTIVE 租户级策略时，<b>id 最大的那条</b>赢。
      *
-     * <p>数据刻意让「后插入的那条」的 qps **更小**（20 &lt; 60），并在中间夹一条 INACTIVE 的极大值：
+     * <p>数据刻意让「后插入的那条」的 qps <b>更小</b>（20 &lt; 60），并在中间夹一条 INACTIVE 的极大值：
      * 于是「取 qps 最大的」「取第一条」「取 INACTIVE 那条」三种错误实现都会红，
      * 只有「ACTIVE 里 id 最大的」才对。
      */
@@ -360,7 +360,7 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 决策 7（修订）+ 决策 17：两个维度**都**要能从快照里取到，而且跨维度的优先级不是靠 id 顺序
+     * 决策 7（修订）+ 决策 17：两个维度<b>都</b>要能从快照里取到，而且跨维度的优先级不是靠 id 顺序
      * 表达的 —— 组装顺序把租户级排在前面（快照契约），但 key 级那条仍然只被它自己的 (租户, key) 取到，
      * 因此网关的「key 级优先」不会被组装顺序吃掉。
      */
@@ -392,7 +392,7 @@ class ConfigSnapshotServiceTest extends AbstractIntegrationTest {
      * Task 13：快照必须真的把 {@code quota} 表的额度行带出来 —— 「额度来自配置快照」这条验收判据的
      * 组装层证据。网关不连数据库，这是额度到达数据面的唯一通路。
      *
-     * <p>数据刻意用**同一租户的两个周期** + **另一个租户的零额度行**：这样才能钉住
+     * <p>数据刻意用<b>同一租户的两个周期</b> + <b>另一个租户的零额度行</b>：这样才能钉住
      * 「按 {@code (tenant_id, period)} 精确镜像」而不是「只按租户取第一条」。判别力由变异体①
      * （{@code ConfigSnapshotService} 不查 {@code quota} 表）提供：那时 {@code quotas} 为空，本用例精确变红。
      */

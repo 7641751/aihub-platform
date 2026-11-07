@@ -7,7 +7,7 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import java.time.Instant;
 
 /**
- * 对应 Flyway V2 的 {@code config_version} 表：配置快照 {@code version} 的**单行水位**（决策 D1/D5）。
+ * 对应 Flyway V2 的 {@code config_version} 表：配置快照 {@code version} 的<b>单行水位</b>（M4 决策 1 / 决策 5）。
  *
  * <p>表里只有 {@code id = 1} 一行，由 V2 的 {@code INSERT} 预先写入，因此主键是
  * {@link IdType#INPUT}（不是自增）。水位只在配置写入路径上抬升

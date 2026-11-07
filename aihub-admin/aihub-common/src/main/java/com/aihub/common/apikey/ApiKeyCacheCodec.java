@@ -10,11 +10,11 @@ import java.util.List;
  * （不能引 Jackson），而这里的字段固定且都由本类写入。
  *
  * <p><b>段数是跨服务契约</b>：gateway 读 admin 写的载荷，任何一侧改了段数都会让另一侧
- * {@code decode} 返回 {@code null}（缓存未命中 → 回源 → 重写）。这**不是**故障，是收敛行为，
+ * {@code decode} 返回 {@code null}（缓存未命中 → 回源 → 重写）。这<b>不是</b>故障，是收敛行为，
  * 因此不需要清 Redis；但改段数时必须同步 {@code ApiKeyToolingTest} 的固定向量。
  *
  * <p>编码只做两件事：{@code \} → {@code \\}，{@code |} → {@code \|}（顺序固定，先转义反斜杠）。
- * 于是「反斜杠成对出现」+「{@code \|} 是数据」是唯一合法形态，解码按同一约定**单趟左到右**扫描。
+ * 于是「反斜杠成对出现」+「{@code \|} 是数据」是唯一合法形态，解码按同一约定<b>单趟左到右</b>扫描。
  * 不能改用正则切分：字段边界自带成对的反斜杠（{@code d\\|7}），用 {@code split} 会把它们
  * 当成边界的一部分吞掉 / 或把 {@code \|} 误判为边界，两种写法都有反例。
  */
@@ -22,7 +22,7 @@ public final class ApiKeyCacheCodec {
 
     /**
      * 密钥缓存的 Redis key 前缀，完整 key 是 {@code CACHE_KEY_PREFIX + key_hash}。
-     * <p>这是一条**跨服务契约**：admin 铸造时写入，gateway 校验时读取（以及回填）。任何一侧
+     * <p>这是一条<b>跨服务契约</b>：admin 铸造时写入，gateway 校验时读取（以及回填）。任何一侧
      * 私自改动或写错前缀都不会报错，只会变成永久缓存未命中，因此固定放在共享模块里，
      * 并由 {@code ApiKeyToolingTest} 钉住字面量。
      */
@@ -31,7 +31,7 @@ public final class ApiKeyCacheCodec {
     private static final String DELIMITER = "|";
     /**
      * 载荷段数。M3 起是 6（新增 {@code apiKeyId}）；旧载荷会被 {@link #decode} 判为畸形
-     * → 缓存未命中 → 回源重写。这是**收敛行为**，不是故障，因此不需要清 Redis。
+     * → 缓存未命中 → 回源重写。这是<b>收敛行为</b>，不是故障，因此不需要清 Redis。
      */
     private static final int FIELD_COUNT = 6;
 

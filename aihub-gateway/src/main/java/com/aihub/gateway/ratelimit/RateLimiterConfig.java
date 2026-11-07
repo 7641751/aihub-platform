@@ -8,7 +8,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
- * 限流链的装配点（G1/G8）。**没有这个类，整条限流链在生产里就是不可达的** ——
+ * 限流链的装配点（G1/G8）。<b>没有这个类，整条限流链在生产里就是不可达的</b> ——
  * {@code LocalRateLimiter} / {@code RedisRateLimiter} / {@code RateLimitResolver} / {@code RateLimiter}
  * 都只是普通类，没有任何 {@code @Component}，因此必须在这里显式声明为 bean。
  *
@@ -22,7 +22,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
  *       {@code RateLimitFilter} 的构造器。</li>
  * </ul>
  *
- * <p>开关 {@code aihub.ratelimit.enabled} **不在这里**判断：关掉限流是「过滤器不执行判定」，
+ * <p>开关 {@code aihub.ratelimit.enabled} <b>不在这里</b>判断：关掉限流是「过滤器不执行判定」，
  * 而不是「链不存在」。这样运维可以热切换开关而不用改 bean 图，并且端到端测试能断言
  * 「链在、但被开关挡掉」与「链不在」是两种不同的状态。
  */
@@ -45,7 +45,7 @@ public class RateLimiterConfig {
     }
 
     /**
-     * {@code (tenantId, apiKeyId) → RatePolicy}。传的是 {@code ConfigClient::current} 这**一个方法引用**
+     * {@code (tenantId, apiKeyId) → RatePolicy}。传的是 {@code ConfigClient::current} 这<b>一个方法引用</b>
      * 而不是某一时刻的快照：快照是每请求惰性取的，策略改动因此立刻生效。
      */
     @Bean

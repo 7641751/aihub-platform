@@ -40,7 +40,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 
 /**
- * {@code ConsoleAuthFilter} + 登录链路的**纯单元**用例：MockMvc standalone（真过滤器 + 真控制器 +
+ * {@code ConsoleAuthFilter} + 登录链路的<b>纯单元</b>用例：MockMvc standalone（真过滤器 + 真控制器 +
  * 真 {@link GlobalExceptionHandler}），没有 Spring 上下文、没有 Docker、没有 MySQL ——
  * 这里判定的三件事（密钥是否可用、令牌是否可解、角色是否被允许）全部是过滤器自己的决定，
  * 任何容器都只会让"某条用例为什么红"更难看清。
@@ -52,12 +52,12 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
  *       {@link #aShortConsoleSecretAlsoFailsClosedWithConfigurationError()} 会红；</li>
  *   <li>把两级角色判定删掉（只验签名）之后，{@link #viewerWritesAreForbiddenWithTheAdminEnvelope()}
  *       与 {@link #anUnknownRoleFailsClosedForReadsAndWrites()} 会红 —— 注意判据是
- *       **403 而不是落进 MVC 的 405**：{@code POST /api/ping} 没有映射，若过滤器只验签名，
+ *       <b>403 而不是落进 MVC 的 405</b>：{@code POST /api/ping} 没有映射，若过滤器只验签名，
  *       这个请求会变成 405 INVALID_PARAM，"403 + FORBIDDEN"因此是有判别力的断言。</li>
  * </ul>
  *
- * <p><b>口令编码器是 mock</b>：bcrypt 的**正确性**由 spring-security-crypto 负责（D2），本类只判定
- * "调用它的时机与参数"——包括「用户名不存在时也必须对一个**合法**的常量假哈希跑一次 matches」。
+ * <p><b>口令编码器是 mock</b>：bcrypt 的<b>正确性</b>由 spring-security-crypto 负责（D2），本类只判定
+ * "调用它的时机与参数"——包括「用户名不存在时也必须对一个<b>合法</b>的常量假哈希跑一次 matches」。
  * 那条用例断言的是<b>机制</b>（bcrypt 真的被调用了、且假哈希能过 bcrypt 的格式校验）而不是墙上时钟差：
  * 时间断言在 CI 上必然偶发，而"少跑一次 bcrypt"正是被评审点名的那个漏洞的成因。
  */
@@ -67,7 +67,7 @@ class ConsoleAuthFilterTest {
     private static final String SECRET = "console-unit-test-secret-0123456789abcdef";
     private static final String OTHER_SECRET = "console-unit-test-secret-ffffffffffffffffff";
 
-    /** 恰好 32 字符：下限是**包含**的，32 必须能用、31 必须不能。 */
+    /** 恰好 32 字符：下限是<b>包含</b>的，32 必须能用、31 必须不能。 */
     private static final String MIN_LENGTH_SECRET = "0123456789abcdef0123456789abcdef";
 
     private static final String SHORT_SECRET = "short";
@@ -252,12 +252,12 @@ class ConsoleAuthFilterTest {
     }
 
     /**
-     * {@code VIEWER + OPTIONS} 必须**不是** 403：{@code READ_METHODS} 含 {@code OPTIONS}
+     * {@code VIEWER + OPTIONS} 必须<b>不是</b> 403：{@code READ_METHODS} 含 {@code OPTIONS}
      * （与 plan 的代码片段一致），因为它是无副作用的 CORS 预检方法，放行它不给只读用户任何写能力。
      *
      * <p><b>为什么不断言 200</b>：MVC 的 {@code OPTIONS} 处理取决于 handler 的映射与
      * {@code DispatcherServlet} 的 {@code dispatchOptionsRequest}，断言一个具体状态码就把本用例绑在
-     * 框架细节上，而这里要钉的是**过滤器的决定**。判据是"不是 403/FORBIDDEN"：把 {@code OPTIONS}
+     * 框架细节上，而这里要钉的是<b>过滤器的决定</b>。判据是"不是 403/FORBIDDEN"：把 {@code OPTIONS}
      * 从 {@code READ_METHODS} 里删掉，本用例立刻红（过滤器会回 403 并带上 FORBIDDEN 信封）。
      *
      * <p>对照组是同一把 VIEWER 令牌的 POST：仍然必须 403 —— 证明本用例里的 OPTIONS 不是因为
@@ -362,13 +362,13 @@ class ConsoleAuthFilterTest {
     }
 
     /**
-     * 防枚举的**线上形状**：口令错 与 用户名不存在 必须给出逐字节相同的响应
+     * 防枚举的<b>线上形状</b>：口令错 与 用户名不存在 必须给出逐字节相同的响应
      * （状态码相同是不够的 —— 换一个 message、换一个 code、换一个字段顺序都是可枚举的信号）。
      *
-     * <p><b>判别力</b>：把"用户不存在"那一支换成任何**不同的信封**（例如
+     * <p><b>判别力</b>：把"用户不存在"那一支换成任何<b>不同的信封</b>（例如
      * {@code BizException(UNAUTHORIZED, "用户名不存在")}）之后，这条用例变红，而
      * {@link #aMissingUserStillPaysTheBcryptCost()} 仍然绿（bcrypt 照跑）—— 两条用例分别钉住
-     * "信封相同"与"两条路径都付 bcrypt 代价"这两件**不同**的事，谁也不能替代谁。
+     * "信封相同"与"两条路径都付 bcrypt 代价"这两件<b>不同</b>的事，谁也不能替代谁。
      */
     @Test
     void aWrongPasswordAndAMissingUserAreByteIdenticalOnTheWire() throws Exception {
@@ -487,7 +487,7 @@ class ConsoleAuthFilterTest {
         return MAPPER.readTree(body(result)).path("code").asText();
     }
 
-    /** 失败响应必须是 admin 信封：字段**恰好**是 code/message/data（顺序也钉住），data 是 JSON null。 */
+    /** 失败响应必须是 admin 信封：字段<b>恰好</b>是 code/message/data（顺序也钉住），data 是 JSON null。 */
     private static void assertAdminEnvelope(MvcResult result) throws Exception {
         JsonNode node = MAPPER.readTree(body(result));
         List<String> names = new ArrayList<>();
@@ -502,7 +502,7 @@ class ConsoleAuthFilterTest {
     /**
      * 只为了证明「本过滤器不守 /api/** 之外的路径」的探针：{@code /healthz} 与
      * {@code /internal/**} 在真应用里分别由 actuator 与 {@code InternalAuthFilter} 负责，
-     * standalone 里没有它们，用一个映射到同一路径的探针代替（断言的是**过滤器放行**，不是那个端点的语义）。
+     * standalone 里没有它们，用一个映射到同一路径的探针代替（断言的是<b>过滤器放行</b>，不是那个端点的语义）。
      */
     @RestController
     static class OutsideGuardedPathsProbeController {

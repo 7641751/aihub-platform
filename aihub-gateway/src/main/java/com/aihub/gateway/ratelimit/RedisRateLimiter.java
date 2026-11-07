@@ -11,12 +11,12 @@ import java.util.List;
  * Redis + Lua 令牌桶（正常路径）。
  *
  * <p><b>返回 {@code null} 表示「Redis 这一级不可用」</b>（连不上 / 超时 / 脚本返回值不合法 /
- * key 为空），由 {@link RateLimiter} 决定降级到 {@link LocalRateLimiter}。**绝不把故障表达成
- * 「拒绝」**：那等于把控制面故障变成对客户端的限流拒绝。
+ * key 为空），由 {@link RateLimiter} 决定降级到 {@link LocalRateLimiter}。<b>绝不把故障表达成
+ * 「拒绝」</b>：那等于把控制面故障变成对客户端的限流拒绝。
  *
- * <p><b>阻塞 I/O</b>：{@code StringRedisTemplate} 是 Lettuce 的**同步** API。本类只提供同步方法，
+ * <p><b>阻塞 I/O</b>：{@code StringRedisTemplate} 是 Lettuce 的<b>同步</b> API。本类只提供同步方法，
  * 调用方（过滤器路径）必须明白它的代价：Redis 不可达时每次调用会被按住
- * {@code spring.data.redis.timeout}（2 秒）。缓解手段是 {@link RateLimiter} 的**粘性降级**
+ * {@code spring.data.redis.timeout}（2 秒）。缓解手段是 {@link RateLimiter} 的<b>粘性降级</b>
  * （一旦发现不可用，接下来 1 秒内直接走本机桶，不再每次撞超时）。
  */
 public class RedisRateLimiter {

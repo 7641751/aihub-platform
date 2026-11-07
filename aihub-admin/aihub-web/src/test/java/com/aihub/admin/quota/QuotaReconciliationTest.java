@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Task 15：每日 02:00 对账任务的**真容器**证据（真 MySQL + 真 Redis）。
+ * Task 15：每日 02:00 对账任务的<b>真容器</b>证据（真 MySQL + 真 Redis）。
  *
  * <p>它钉住四类互相独立的行为：
  * <ol>
@@ -40,25 +40,25 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       （{@code uk_billing_daily(tenant_id, stat_date)} 是幂等的锚点）；{@code cost} 固定 0。</li>
  *   <li><b>偏差判据</b>：比值 {code |周期至今重算值 − 桶值| / max(周期至今重算值, 1)}，{@code > tolerance}
  *       才算（<b>等于不算</b>），且「重算值为 0 而桶值 &gt; 0」<b>必须仍报</b>（不许当除零静默跳过）。</li>
- *   <li><b>比较口径</b>（裁定 1）：比的是**周期至今**，不是当天 —— 「当天与桶不同、周期至今与桶一致」
- *       的夹具**不许报**，否则每月除最后一天外全误报。</li>
- *   <li><b>只报告不改账</b>（D12）：命中偏差的租户，{@code quota.token_used} 必须**一字不动**。</li>
+ *   <li><b>比较口径</b>（裁定 1）：比的是<b>周期至今</b>，不是当天 —— 「当天与桶不同、周期至今与桶一致」
+ *       的夹具<b>不许报</b>，否则每月除最后一天外全误报。</li>
+ *   <li><b>只报告不改账</b>（D12）：命中偏差的租户，{@code quota.token_used} 必须<b>一字不动</b>。</li>
  * </ol>
  *
- * <p><b>为什么用默认 Spring 上下文</b>：本类**不加** {@code @TestPropertySource} / {@code @Import}，
+ * <p><b>为什么用默认 Spring 上下文</b>：本类<b>不加</b> {@code @TestPropertySource} / {@code @Import}，
  * 因此复用既有默认上下文（{@link AbstractIntegrationTest}），套件 Spring 上下文总数仍是 7
  * （{@code docs/CONVENTIONS.md} §8 item 5/6 的预算）。
  *
  * <p><b>夹具纪律</b>：{@code billing_daily} / {@code request_log} / {@code quota} 与 Testcontainers
- * 容器都是**JVM 级共享**的，所以每个用例用**自己的** {@code tenantId}（{@code 903_0xx} 段，与 900/901/902
- * 段不重叠），前后各清一次，断言一律按**本用例的 (tenantId, stat_date)** 定向查 —— 绝不做全表计数。
+ * 容器都是<b>JVM 级共享</b>的，所以每个用例用<b>自己的</b> {@code tenantId}（{@code 903_0xx} 段，与 900/901/902
+ * 段不重叠），前后各清一次，断言一律按<b>本用例的 (tenantId, stat_date)</b> 定向查 —— 绝不做全表计数。
  *
  * <p><b>为什么 statDate 取 2026-09-26</b>：它落在 V1 建的 {@code p202609} 分区里（分区存在，写入不被拒）。
  * 同一 reason（period = {@code 202609}）也与其它 quota 用例隔离：那些用例一律用
  * {@code QuotaPeriod.of(System.currentTimeMillis())}（本机当前月 {@code 202610}），不会制造本 period 的候选行。
  *
- * <p><b>RED 证据（诚实登记）</b>：实现落地之前本类**无法编译**（{@code QuotaReconciliationService} /
- * {@code QuotaReconciliationJob} 尚不存在）—— 自然 RED 是编译错误，不是断言失败；判别力因此由**变异体**
+ * <p><b>RED 证据（诚实登记）</b>：实现落地之前本类<b>无法编译</b>（{@code QuotaReconciliationService} /
+ * {@code QuotaReconciliationJob} 尚不存在）—— 自然 RED 是编译错误，不是断言失败；判别力因此由<b>变异体</b>
  * 提供（见交付报告），与 Task 11 的登记形态一致。
  */
 class QuotaReconciliationTest extends AbstractIntegrationTest {

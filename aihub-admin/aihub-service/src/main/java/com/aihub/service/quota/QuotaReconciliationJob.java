@@ -13,10 +13,10 @@ import java.time.ZoneOffset;
 /**
  * 每日 02:00（UTC）触发对账：把「昨天」交给 {@link QuotaReconciliationService#reconcile(LocalDate)}。
  *
- * <p><b>⚠️ cron 必须显式 {@code zone = "UTC"}</b>：{@code @Scheduled} 默认用 **JVM 默认时区**，
+ * <p><b>⚠️ cron 必须显式 {@code zone = "UTC"}</b>：{@code @Scheduled} 默认用 <b>JVM 默认时区</b>，
  * 本机是 UTC+8，于是字面上的「02:00」会漂到 UTC 18:00。既有 {@code RequestLogPartitionMaintainer}
  * 的 {@code @Scheduled(..., zone = "UTC")} 就是这条纪律的先例。默认时刻 02:00 与 M3 的分区维护
- * 03:10 **错开**，避免同时对表下手。
+ * 03:10 <b>错开</b>，避免同时对表下手。
  *
  * <p><b>⚠️「昨天」按 UTC 折算，且时钟可注入</b>：用
  * {@code LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC).minusDays(1)}，

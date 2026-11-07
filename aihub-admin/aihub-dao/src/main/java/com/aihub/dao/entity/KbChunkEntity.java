@@ -7,7 +7,7 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import java.time.LocalDateTime;
 
 /**
- * 对应 Flyway V3 的 {@code kb_chunk}：文档入库流水线的**逐段进度表**（M5 决策 D1/D4）。
+ * 对应 Flyway V3 的 {@code kb_chunk}：文档入库流水线的<b>逐段进度表</b>（M5 决策 1 / 决策 4）。
  *
  * <p><b>列与字段一一对应，以 V3 的 SQL 为准</b>：{@code id / doc_id / seq / text / vector_id /
  * embedded_at / created_at}。{@code (doc_id, seq)} 上唯一（{@code uk_kb_chunk_doc_seq}）⇒ 重放同一段
@@ -19,7 +19,7 @@ import java.time.LocalDateTime;
  * {@code createdAt -> created_at}；{@code seq} / {@code text} 同名直映射）。
  *
  * <p>{@code embeddedAt}（可为 {@code null}）与 {@code createdAt} 用 {@link LocalDateTime} 而不是
- * {@code Instant}：{@code datetime(3)} 列在应用侧显式按 **UTC** 写入（CONVENTIONS §7）。
+ * {@code Instant}：{@code datetime(3)} 列在应用侧显式按 <b>UTC</b> 写入（CONVENTIONS §7）。
  */
 @TableName("kb_chunk")
 public class KbChunkEntity {

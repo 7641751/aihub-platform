@@ -51,7 +51,7 @@ import static org.mockito.Mockito.when;
 /**
  * §6.3 的三级读取与两级缓存，加上它的两条兜底（Redis 挂 / admin 挂）。
  *
- * <p>{@code concurrentMissesCollapseIntoASingleAdminCall} 是**缓存击穿防护**的可证伪形式：
+ * <p>{@code concurrentMissesCollapseIntoASingleAdminCall} 是<b>缓存击穿防护</b>的可证伪形式：
  * 把 singleflight 去掉（每次 miss 都直接回源）会让 admin 被调用 N 次，用例立刻变红。
  *
  * <p>本类不需要 Docker / Redis / Spring 上下文：{@code StringRedisTemplate} 是桩，
@@ -74,9 +74,9 @@ class ConfigCacheTest {
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
 
     /**
-     * 生产默认形状（30s / 10m / 300 / **5s 冷却**）。
+     * 生产默认形状（30s / 10m / 300 / <b>5s 冷却</b>）。
      *
-     * <p>冷却窗口刻意取**生产默认的那 5 秒**而不是测试自己的短值：「N 个请求只产生一次回源」这条
+     * <p>冷却窗口刻意取<b>生产默认的那 5 秒</b>而不是测试自己的短值：「N 个请求只产生一次回源」这条
      * 证据只有在冷却窗口与真实配置一致时才对生产有意义 —— 用一个 50 ms 的测试值去证明它，
      * 等于什么都没证明。
      */
@@ -104,8 +104,8 @@ class ConfigCacheTest {
     }
 
     /**
-     * Task 13：网关从快照里读额度（不连数据库）。这里只量**本地层那份快照**的额度查找，且要求
-     * **按 {@code (tenant, period)} 精确匹配** —— 变异体④（只按 {@code tenantId} 找）会让「另一个周期」
+     * Task 13：网关从快照里读额度（不连数据库）。这里只量<b>本地层那份快照</b>的额度查找，且要求
+     * <b>按 {@code (tenant, period)} 精确匹配</b> —— 变异体④（只按 {@code tenantId} 找）会让「另一个周期」
      * 那条断言返回 202601 的那份、精确变红。
      */
     @Test
@@ -153,9 +153,9 @@ class ConfigCacheTest {
 
     /**
      * 可推进的假时钟：{@code ConfigCache} 的 Caffeine TTL（{@link Ticker}，纳秒）与
-     * {@code ConfigClient} 的冷却窗口（{@link Clock}，毫秒）读的是**同一个**计数器。
+     * {@code ConfigClient} 的冷却窗口（{@link Clock}，毫秒）读的是<b>同一个</b>计数器。
      *
-     * <p>它只服务于那些「必须观察到某个 TTL 窗口**之内**的状态」的用例：用真实时钟写这种断言等于
+     * <p>它只服务于那些「必须观察到某个 TTL 窗口<b>之内</b>的状态」的用例：用真实时钟写这种断言等于
      * 把用例的成败交给调度器（GC / CI 负载 / 整反应堆并发）。推进是显式的 —— 测试说「150 ms 过去了」
      * 才是真的过去了，而不是「希望 150 ms 里没有别的线程抢走 CPU」。
      */
@@ -190,7 +190,7 @@ class ConfigCacheTest {
     /**
      * 返回 {@link Mono} 的 admin 替身：{@link #adminReturning} 只能表达「立即给出一个 Optional」，
      * 而「永不终结的流」与「按订阅次数改变行为」都需要自己控制 Publisher。{@code Mono.defer} 保证
-     * supplier 在**每次订阅**时才求值（与真实 {@code AdminClient} 的惰性一致）。
+     * supplier 在<b>每次订阅</b>时才求值（与真实 {@code AdminClient} 的惰性一致）。
      */
     private static AdminClient adminDeferring(Supplier<Mono<Optional<ConfigSnapshot>>> supplier) {
         return new AdminClient() {
@@ -211,11 +211,11 @@ class ConfigCacheTest {
      *
      * <p><b>与 brief 的字面断言有一处刻意偏离，记录在此</b>：brief 的验收标准 1 要求本地命中时
      * {@code opsForValue()} 「一次都没被调用」，但同一份 brief 的协议又要求本地命中时做
-     * **版本比对**（{@code local.version() < redis.version} → 丢弃本地）。版本存在 Redis 里，
+     * <b>版本比对</b>（{@code local.version() < redis.version} → 丢弃本地）。版本存在 Redis 里，
      * 不读 Redis 就无从比对；而且 {@code staleLocalIsDiscardedWhenRedisHasANewerVersion}
-     * 的 fixture（本地 v3 + Redis v10 同时存在）在不读 Redis 的实现下**必然**变红。
+     * 的 fixture（本地 v3 + Redis v10 同时存在）在不读 Redis 的实现下<b>必然</b>变红。
      * 两者不可兼得，这里保留 §6.3 的版本比对（它同时是决策 16 之下唯一的跨实例收敛手段），
-     * 把断言改成它真正想钉住的那件事：二级只做一次**版本探测**，不做值的读取、也不做写入。
+     * 把断言改成它真正想钉住的那件事：二级只做一次<b>版本探测</b>，不做值的读取、也不做写入。
      */
     @Test
     void localHitIsServedWithoutTouchingRedisOrAdmin() {
@@ -263,14 +263,14 @@ class ConfigCacheTest {
     }
 
     /**
-     * 冷启动 + admin 可用：这一次回源必须**同时**填满两级缓存，且回源只发生一次。
+     * 冷启动 + admin 可用：这一次回源必须<b>同时</b>填满两级缓存，且回源只发生一次。
      *
      * <p>{@code redisMissFallsToAdminAndBackfillsBothLevels} 只直接钉住了 Redis 回填的那一半
      * （{@code set} 带 snapshotTtl），本地那一半是靠「第二次读走本地」间接推出来的。本用例把
      * 「两级都被填满」与「admin 只被调用一次」直接钉住 —— 这正是任务书要求自证的
      * 「冷启动且 admin 可用时填充并缓存」这条行为本身。
      *
-     * <p>另外钉住**冷启动只花一次 Redis 探测**：{@code current()} 曾在回源前后各调一次
+     * <p>另外钉住<b>冷启动只花一次 Redis 探测</b>：{@code current()} 曾在回源前后各调一次
      * {@code resolve()}，于是冷启动要付两次 Redis 往返；现在只在回源返回空时才重读。
      */
     @Test
@@ -299,7 +299,7 @@ class ConfigCacheTest {
      * 二级命中的副作用：本地副本必须被刷新成 Redis 的版本。
      *
      * <p><b>断言的是本地层本身，而不是「第二次读到的还是 9」</b>：只要 Redis 桩还在应答，
-     * 删掉 {@code resolve()} 里的 {@code cache.putLocal(fromRedis)} 之后第二次读**照样**从 Redis
+     * 删掉 {@code resolve()} 里的 {@code cache.putLocal(fromRedis)} 之后第二次读<b>照样</b>从 Redis
      * 拿到 v9 —— 这样的用例钉不住回填。因此这里先直接查本地层，再把 Redis 桩打空
      * （{@code thenReturn(null)}），于是第二次读只能由刚被刷新的本地副本服务（admin 仍是 0 次）。
      */
@@ -355,7 +355,7 @@ class ConfigCacheTest {
     }
 
     /**
-     * 决策 6：admin 挂了也要继续服务手上已有的陈旧快照 —— 而且**不再为它付出回源代价**。
+     * 决策 6：admin 挂了也要继续服务手上已有的陈旧快照 —— 而且<b>不再为它付出回源代价</b>。
      *
      * <p><b>这个场景必须真的走到 admin 那一跳</b>：本地非空时 {@code resolve()} 直接返回本地副本，
      * 那个会抛异常的 admin 替身根本不会被调用 —— 于是「先问 admin 再退回缓存」的实现也会通过。
@@ -363,9 +363,9 @@ class ConfigCacheTest {
      * admin 开始抛异常。
      *
      * <p><b>2026 二次复审修复 1 改变了这第二次读的期望</b>：旧实现把 {@code refreshBlocking()}
-     * 放在读「最近快照」**之前**，所以第二次读要先付一次完整回源（最长 5 s 阻塞）才肯服务那份
+     * 放在读「最近快照」<b>之前</b>，所以第二次读要先付一次完整回源（最长 5 s 阻塞）才肯服务那份
      * 本来就在手上的快照，本用例因此断言过 {@code adminCalls >= 2}。现在正确的行为是
-     * **一次回源都不做**：手上还有快照时回源毫无意义，只会白白拖住 event loop 并砸向已经出问题的
+     * <b>一次回源都不做</b>：手上还有快照时回源毫无意义，只会白白拖住 event loop 并砸向已经出问题的
      * admin。所以断言改成 {@code adminCalls == 1}（只有第一跳那一次），并且必须仍然服务 66。
      */
     @Test
@@ -398,13 +398,13 @@ class ConfigCacheTest {
     }
 
     /**
-     * 复审修复 3（控制器裁决）：两级缓存**都**不可用且 admin 也挂了时，仍然要服务最近一次成功快照
-     * —— 决策 6 的字面要求是「**哪怕已过期**」，而仅靠两级缓存兜底的实现在这里会退化成单条遗留渠道、
+     * 复审修复 3（控制器裁决）：两级缓存<b>都</b>不可用且 admin 也挂了时，仍然要服务最近一次成功快照
+     * —— 决策 6 的字面要求是「<b>哪怕已过期</b>」，而仅靠两级缓存兜底的实现在这里会退化成单条遗留渠道、
      * 丢掉多渠道路由。
      *
      * <p>这三条同时成立才算通过：本地层为空、Redis 读空（模拟 TTL 到期或 Redis 不可用）、admin
      * 不可达；仍然拿到那条多渠道路由（id=31，不是 {@link LegacyChannel#ID}），并且不抛异常，
-     * 且这份内存副本**不写回 Redis**（否则会复活一条陈旧共享条目）。
+     * 且这份内存副本<b>不写回 Redis</b>（否则会复活一条陈旧共享条目）。
      *
      * <p><b>三次复审修复 3：故障期内要读两次。</b>只读一次时，「admin 只被调用一次」这条断言对
      * 修复前的实现同样成立（第一次读无论如何都要回源一次），所以它证明不了「故障期内的重复读不
@@ -471,7 +471,7 @@ class ConfigCacheTest {
     }
 
     /**
-     * **缓存击穿防护**（§6.3 的 singleflight）：16 个并发同时 miss 时，admin 只应被调用一次。
+     * <b>缓存击穿防护</b>（§6.3 的 singleflight）：16 个并发同时 miss 时，admin 只应被调用一次。
      * 去掉 singleflight 会让 admin 被调用多次 —— 在一个「配置回源是同步阻塞」的系统里，
      * 那就是把一次缓存失效放大成一次对控制面的小规模雪崩。
      */
@@ -510,7 +510,7 @@ class ConfigCacheTest {
     }
 
     /**
-     * 复审修复 1（a）：回源**结束之后**单飞槽位必须被释放，否则一次成功回源就永久封死了回源路径
+     * 复审修复 1（a）：回源<b>结束之后</b>单飞槽位必须被释放，否则一次成功回源就永久封死了回源路径
      * —— 本地 30 s / Redis 10 m TTL 一过（或 Redis 不可用），实例只会一遍遍重放第一次的终态信号，
      * 明明 admin 健康也不再回源、也不再改写 Redis。
      *
@@ -547,17 +547,17 @@ class ConfigCacheTest {
     }
 
     /**
-     * 复审修复 1（b）：**第一次回源失败不能把实例钉死**。admin 挂掉（或回一份空快照）时
+     * 复审修复 1（b）：<b>第一次回源失败不能把实例钉死</b>。admin 挂掉（或回一份空快照）时
      * {@code Mono.empty()} 是终态但不是「成功」；若只在 {@code doOnSuccess} 释放槽位，这个空信号会被
      * 永久重放 —— {@code refreshBlocking()} 从此恒为 null，网关永久停在遗留单渠道，admin 恢复后
      * 也再不会回源。
      *
-     * <p>fixture 必须让**第一次读三级全空**（本地空、Redis 空、admin 抛），否则 Redis 会在同一次读里
+     * <p>fixture 必须让<b>第一次读三级全空</b>（本地空、Redis 空、admin 抛），否则 Redis 会在同一次读里
      * 就把快照补给上层，掩盖掉卡死。这里让 Redis 全程读空，只放开 admin：于是「第二次读有没有再调
      * admin」就是唯一能把卡死与正常区分开的观测量 —— 卡死的实现连 admin 都不会再试一次。
      *
      * <p><b>冷却窗口改成 100 ms</b>（2026 二次复审修复 1）：修复 1 之后，失败的尝试会开启一个冷却
-     * 窗口，窗口内的第二次读**按设计**不碰 admin。本用例要证明的是「不会被永久钉死」，所以必须
+     * 窗口，窗口内的第二次读<b>按设计</b>不碰 admin。本用例要证明的是「不会被永久钉死」，所以必须
      * 跨过那个窗口再读 —— 这里用 100 ms 窗口 + 200 ms 等待（而不是 5 s 生产默认值）只是为了不让用例
      * 白等 5 秒；「窗口内一次都不回源」由 {@code originRetriesAreSuppressedInsideTheCooldownWindow} 钉住。
      */
@@ -606,18 +606,18 @@ class ConfigCacheTest {
     }
 
     /**
-     * 失效必须**真的丢掉本地层**：本地副本与 Redis 的版本**相同**（渠道不同）时，失效之后仍然
+     * 失效必须<b>真的丢掉本地层</b>：本地副本与 Redis 的版本<b>相同</b>（渠道不同）时，失效之后仍然
      * 服务那份陈旧的本地副本，就说明「失效」是空实现。
      *
-     * <p>{@code invalidate(long)} 现在还会删共享条目并把水位抬到该版本（D4）—— 那两半由
-     * {@code ConfigInvalidateContractTest} 钉住，**不在这里**断言：Mockito 的普通桩不会因为
+     * <p>{@code invalidate(long)} 现在还会删共享条目并把水位抬到该版本（M4 决策 4）—— 那两半由
+     * {@code ConfigInvalidateContractTest} 钉住，<b>不在这里</b>断言：Mockito 的普通桩不会因为
      * {@code delete()} 而改变 {@code get()} 的返回值，用它证明「共享条目被删掉了」是假的。
      * 本用例因此只量本地层让位（以及「让位之后不会再把失效前那份答出去」）。
      *
-     * <p>brief 原本的断言是 {@code verify(values, atLeast(2)).get(REDIS_KEY)} —— 那个断言**不会失败**：
+     * <p>brief 原本的断言是 {@code verify(values, atLeast(2)).get(REDIS_KEY)} —— 那个断言<b>不会失败</b>：
      * 每次 {@code current()} 都要做一次版本探测，所以哪怕 {@code invalidate} 是空实现，
      * 两次读也一定是 2 次 {@code get}。而且那个版本号本身是错的（原用例只调了一次
-     * {@code current()}，压根达不到 2 次）。这里改成直接量**本地层本身**是否被清掉：
+     * {@code current()}，压根达不到 2 次）。这里改成直接量<b>本地层本身</b>是否被清掉：
      * 版本号刻意与 Redis 相同，{@code fromRedis.version() > local.version()} 不成立，
      * 于是「没有真的失效」就一定会拿着陈旧的本地副本答下去。
      */
@@ -647,7 +647,7 @@ class ConfigCacheTest {
     }
 
     /**
-     * 复审修复 4：被服务的那份快照的 version 必须**在服务它的那一次**就读进指标。
+     * 复审修复 4：被服务的那份快照的 version 必须<b>在服务它的那一次</b>就读进指标。
      * 只在 {@code resolve()} 里报的话，第一次控制面快照对外会显示 version=0，直到下一次读才纠正。
      */
     @Test
@@ -663,23 +663,23 @@ class ConfigCacheTest {
     }
 
     /**
-     * 复审修复 1（重要）：**回源失败之后必须进入冷却窗口**。
+     * 复审修复 1（重要）：<b>回源失败之后必须进入冷却窗口</b>。
      *
      * <p>上一轮修复释放了单飞槽位，但释放之后就再也没有任何东西限制重试节奏 —— 「5 s 超时」
-     * 管的是单次尝试的**时长上限**，不是两次尝试之间的**间隔下限**。admin 快速失败（连接被拒，
+     * 管的是单次尝试的<b>时长上限</b>，不是两次尝试之间的<b>间隔下限</b>。admin 快速失败（连接被拒，
      * 或这份桩这样返回空快照）时，每个请求都会各付一次回源：重试速率 ≈ 请求速率。
      *
-     * <p>fixture 刻意让**两份不同的快照先后注入**（v1 → v2）：
+     * <p>fixture 刻意让<b>两份不同的快照先后注入</b>（v1 → v2）：
      * <ul>
      *   <li>第一步：本地空 + Redis 空 + admin 快速失败 → 冷却窗口开启，服务遗留渠道；</li>
-     *   <li>第二步：本地空 + Redis 空 + admin **已经好了**（回 v2），但在窗口内 ——
-     *       必须**一次都不回源**，继续服务遗留渠道。若冷却不存在，这里会立刻拿到 v2；</li>
+     *   <li>第二步：本地空 + Redis 空 + admin <b>已经好了</b>（回 v2），但在窗口内 ——
+     *       必须<b>一次都不回源</b>，继续服务遗留渠道。若冷却不存在，这里会立刻拿到 v2；</li>
      *   <li>第三步：等窗口过去，回源恢复、拿到 v2。</li>
      * </ul>
      * 第三步同时钉住了「冷却不是永久熔断」：窗口一过就必须能重新回源。
      *
-     * <p>注意这里走的是**冷启动**路径（手上没有 last-good，只有遗留渠道）：一旦手上有一份
-     * 可用快照，冷却窗口内同样短路；但**进入窗口之前**的那一次回源仍然会发生（冷却只管
+     * <p>注意这里走的是<b>冷启动</b>路径（手上没有 last-good，只有遗留渠道）：一旦手上有一份
+     * 可用快照，冷却窗口内同样短路；但<b>进入窗口之前</b>的那一次回源仍然会发生（冷却只管
      * 「两次尝试之间的间隔」，不管「第一次尝试」）—— 那种「手上已有快照」的场景由
      * {@code adminFailureKeepsServingTheCachedSnapshot} 与
      * {@code combinedRedisAndAdminOutageStillServesTheLastGoodSnapshot} 覆盖。
@@ -730,10 +730,10 @@ class ConfigCacheTest {
     }
 
     /**
-     * 复审修复 2（重要）：**WARN 的条数必须有界**。
+     * 复审修复 2（重要）：<b>WARN 的条数必须有界</b>。
      *
-     * <p>上一轮修复把单飞槽位释放之后，「配置快照回源失败」的 WARN 变成了**每个失败的尝试一条**，
-     * 而「最近快照」的 WARN 是**每个被服务的请求一条** —— 快速失败时整个故障期最多每请求两条
+     * <p>上一轮修复把单飞槽位释放之后，「配置快照回源失败」的 WARN 变成了<b>每个失败的尝试一条</b>，
+     * 而「最近快照」的 WARN 是<b>每个被服务的请求一条</b> —— 快速失败时整个故障期最多每请求两条
      * WARN。现在两条路径共用同一个「一次故障期只播报一条（之后每分钟一条）」的闸门，
      * 同时 {@code aihub.config.snapshot.refresh.failures} 把每次真实尝试都计数：
      * <b>日志给人看、计数给告警看</b>。
@@ -776,11 +776,11 @@ class ConfigCacheTest {
     }
 
     /**
-     * 三次复审修复 2（次要）：**「一次故障期一条」的 WARN 上界不能被「命中/未命中交替」绕过**。
+     * 三次复审修复 2（次要）：<b>「一次故障期一条」的 WARN 上界不能被「命中/未命中交替」绕过</b>。
      *
      * <p>{@link ConfigClient#current()} 在任何一次缓存命中时都会调 {@code clearDegraded()}，把
      * 「正处于故障期」的标记清回 {@code false}；而 {@code logDegradedOncePerEpisode} 原来只在
-     * **CAS 失败**（即「本期已经打过」）的那条路径上检查 60 s 播报间隔 —— CAS **成功**那条
+     * <b>CAS 失败</b>（即「本期已经打过」）的那条路径上检查 60 s 播报间隔 —— CAS <b>成功</b>那条
      * （「重新进入故障期」）直接放行。于是二级缓存抖动（命中 → 未命中 → 命中 → 未命中）会让每个
      * 周期都立刻打一条 WARN：上界从「一次故障期一条」退化成「每周期一条」，无界。
      *
@@ -830,11 +830,11 @@ class ConfigCacheTest {
     }
 
     /**
-     * 复审修复 3（次要）：**缓存写入必须拒绝版本倒退**。
+     * 复审修复 3（次要）：<b>缓存写入必须拒绝版本倒退</b>。
      *
-     * <p>单飞槽位被释放之后，输掉 CAS 的调用者可能读到 {@code null} 并把**自己那条从未发布**的
+     * <p>单飞槽位被释放之后，输掉 CAS 的调用者可能读到 {@code null} 并把<b>自己那条从未发布</b>的
      * {@link Mono} 交出去，于是同一次 miss 产生第二个并发回源。而 {@code load()} 的两级写入
-     * 原本是**无条件**的，所以先发起的旧响应晚到时会覆盖掉新快照 —— 本地与 Redis 两侧都能倒退。
+     * 原本是<b>无条件</b>的，所以先发起的旧响应晚到时会覆盖掉新快照 —— 本地与 Redis 两侧都能倒退。
      *
      * <p>本用例针对的正是那个方向：v5 已经在两级缓存里（回源拿到的），随后把 v3 直接写进去。
      * 没有版本守卫时，本地会变成 v3、Redis 会被 v3 覆盖，后续读也会服务 v3（回归）。
@@ -876,15 +876,15 @@ class ConfigCacheTest {
     }
 
     /**
-     * 三次复审修复 1（重要）：**同版本的重新写入必须放行**。
+     * 三次复审修复 1（重要）：<b>同版本的重新写入必须放行</b>。
      *
-     * <p>守卫写成 {@code version() <= 水位} 时，「两级缓存都过期 → 回源拿到一个**没有变化**的版本」
-     * 这条路上，Redis 层会**永远**填不回去：本地层因为 key 已经过期而正常回填（{@code merge} 在
+     * <p>守卫写成 {@code version() <= 水位} 时，「两级缓存都过期 → 回源拿到一个<b>没有变化</b>的版本」
+     * 这条路上，Redis 层会<b>永远</b>填不回去：本地层因为 key 已经过期而正常回填（{@code merge} 在
      * 键不存在时直接插入），共享缓存却因为 {@code 10 <= 10} 被拒。此后每个实例都以本地 TTL 的
      * 节奏（≈2 次/分钟/实例）去敲 admin，而不是大约每 10 分钟一次 —— 正是两级缓存要消除的那种
      * 控制面压力；Redis 重启或一次瞬时写失败对那个版本留下同样的永久后果。等号不是「倒退」。
      *
-     * <p>fixture 里控制面**始终**返回 v10（没有停机、也没有配置变更）：第一次读写入 Redis
+     * <p>fixture 里控制面<b>始终</b>返回 v10（没有停机、也没有配置变更）：第一次读写入 Redis
      * （水位=10），等本地 TTL 与冷却窗口都过去（两者都取 80 ms，模拟 Redis 的 10 分钟 TTL 也到期）
      * 后第二次读三级全空、重新回源，拿到的还是 v10 —— 它必须被重新写进 Redis。
      * 改成严格比较之前，下面第二个 {@code verify(values).set(...)} 会「Wanted but not invoked」。
@@ -934,16 +934,16 @@ class ConfigCacheTest {
     }
 
     /**
-     * 三次复审修复 1（后半，重要）：**从 Redis 观察到的版本必须抬升写入水位**。
+     * 三次复审修复 1（后半，重要）：<b>从 Redis 观察到的版本必须抬升写入水位</b>。
      *
-     * <p>只让 {@code writeRedis} 记住「本实例写过的版本」是不够的：如果这条实例在**回源在途**时
+     * <p>只让 {@code writeRedis} 记住「本实例写过的版本」是不够的：如果这条实例在<b>回源在途</b>时
      * 从 Redis 读到了一个更新的版本（别的实例刚写进去的 v10），随后那条更旧的在途响应（v5）回来，
-     * 本地层会被守卫正确拒绝，但 Redis 的水位仍是「从未写过」，于是 v5 会被写进**共享**条目 ——
+     * 本地层会被守卫正确拒绝，但 Redis 的水位仍是「从未写过」，于是 v5 会被写进<b>共享</b>条目 ——
      * 毒化所有其他实例。修复：{@code readRedis()} 把观察到的版本也推进水位
      * （{@code accumulateAndGet(..., Math::max)}），配合严格 {@code <} 比较，同版本的正常回填仍然放行。
      *
-     * <p>这一个子场景**不需要 Lua/CAS**（与代码里原先的披露相反）：观察与写入都在同一个进程里，
-     * 水位就是那次观察的结论。仍然拦不住的是**跨进程**那一半（本实例既没读到也没写过别人刚写的
+     * <p>这一个子场景<b>不需要 Lua/CAS</b>（与代码里原先的披露相反）：观察与写入都在同一个进程里，
+     * 水位就是那次观察的结论。仍然拦不住的是<b>跨进程</b>那一半（本实例既没读到也没写过别人刚写的
      * v7 时，更旧的 v5 会覆盖它），那才需要 Redis 侧的原子「读-比-写」。
      *
      * <p>fixture 用一个在订阅时才求值的 admin 替身：它在回源真正开始后调用
@@ -979,13 +979,13 @@ class ConfigCacheTest {
     }
 
     /**
-     * 复审修复 4（次要）：**第四个终态是「取消/超时」**，它也必须释放单飞槽位。
+     * 复审修复 4（次要）：<b>第四个终态是「取消/超时」</b>，它也必须释放单飞槽位。
      *
      * <p>修复 1 的论证枚举了成功 / 空完成 / 异常三种终态，但 {@code refreshBlocking()} 的
-     * {@code block(5 s)} 超时走的是**取消**：{@code doFinally} 同样会触发，所以名额不会泄漏。
+     * {@code block(5 s)} 超时走的是<b>取消</b>：{@code doFinally} 同样会触发，所以名额不会泄漏。
      * 这条此前没有任何用例覆盖。
      *
-     * <p>fixture：admin 第一次返回一条**永不终结**的流（挂起的控制面），{@code refreshBlocking()}
+     * <p>fixture：admin 第一次返回一条<b>永不终结</b>的流（挂起的控制面），{@code refreshBlocking()}
      * 在 5 s 上限处超时并取消；随后让 admin 正常应答，下一次读必须能重新回源。
      * 若超时不释放名额，第二次读会永远拿到同一条挂起的流（或那条被重放的空信号），
      * 于是这里读不到 v5/id=55。
@@ -994,7 +994,7 @@ class ConfigCacheTest {
      * 都会让这条用例钉住的「生产配置」不再是被验证的那一个。
      *
      * <p>冷却窗口在这里取 100 ms 并在重试前等待：超时本身也是一次失败的尝试，窗口内按设计不再回源。
-     * 本用例要证明的是**取消释放了单飞名额**，所以必须跨过冷却窗口再读。
+     * 本用例要证明的是<b>取消释放了单飞名额</b>，所以必须跨过冷却窗口再读。
      */
     @Test
     void timeoutCancellationReleasesTheSingleflightSlot() throws Exception {

@@ -13,7 +13,7 @@ import com.baomidou.mybatisplus.annotation.TableName;
  * <p><b>{@code passwordHash} 只存 bcrypt 哈希</b>（{@code VARCHAR(72)} 恰好容纳 bcrypt 的 60 字符，
  * 见决策 D2）。明文口令既不进这个类以外的任何地方，也不进日志/审计/响应体。
  *
- * <p>{@code role} 是 {@code /api/**} 授权的**唯一来源**（D10）：只有 {@code ADMIN}/{@code VIEWER}
+ * <p>{@code role} 是 {@code /api/**} 授权的<b>唯一来源</b>（D10）：只有 {@code ADMIN}/{@code VIEWER}
  * 被认，其余一律 fail-closed（由 {@code ConsoleAuthFilter} 判，不在这里判 —— 本类是纯数据）。
  */
 @TableName("sys_user")

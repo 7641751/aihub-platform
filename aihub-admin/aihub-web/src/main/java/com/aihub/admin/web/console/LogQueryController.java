@@ -20,15 +20,15 @@ import java.util.List;
  * （ADMIN/VIEWER 都可读，本端点只读）。本类只做「查询参数校验 + DTO 包装」，业务在
  * {@link RequestLogQueryService}。
  *
- * <p><b>租户模型（{@code docs/CONVENTIONS.md} §10 R3.1）</b>：这是**运营查询**，{@code tenantId}
- * **必须显式给出**（缺省 400）—— 理由是**防无界扫描**（{@code request_log} 的索引以 {@code tenant_id}
- * 打头），**不是**授权。令牌里的 {@code tenantId}（R4）在这里不参与判定。
+ * <p><b>租户模型（{@code docs/CONVENTIONS.md} §10 R3.1）</b>：这是<b>运营查询</b>，{@code tenantId}
+ * <b>必须显式给出</b>（缺省 400）—— 理由是<b>防无界扫描</b>（{@code request_log} 的索引以 {@code tenant_id}
+ * 打头），<b>不是</b>授权。令牌里的 {@code tenantId}（R4）在这里不参与判定。
  *
  * <p><b>边界被钉死在这里</b>（控制器裁定 3）：{@code size} 缺省 20 / {@code >200} 钳到 200 /
  * {@code <1} → 400；{@code page} 缺省 0 / {@code <0} → 400；{@code from}/{@code to} 必须是能解析成
  * {@link Instant} 的绝对时刻（解析失败 400）、且 {@code from <= to}（否则 400）。
  *
- * <p><b>关于这几条 {@code private static} 校验助手在两/三个控制器里重复</b>：Task 11 的文件集是**封闭**的
+ * <p><b>关于这几条 {@code private static} 校验助手在两/三个控制器里重复</b>：Task 11 的文件集是<b>封闭</b>的
  * （计划 Files / Step 5 的 {@code git add} 清单里没有共享工具类），所以这里选择各自持有一份小助手，
  * 而不是新建一个未被声明的文件、或让控制器去调另一个控制器的静态方法。
  *

@@ -14,7 +14,7 @@ import java.nio.file.Path;
  * 切片测试（{@code @WebFluxTest} 等）按「非 Web 组件」把它过滤掉，不会白白拉起调度器
  * —— 与 {@code MybatisMapperConfig} 处理 {@code @MapperScan} 的理由一致。
  *
- * <p>这里**没有**任何拓扑声明（队列 / 交换器）：唯一声明方是 admin（见计划「决策登记」第 4 条），
+ * <p>这里<b>没有</b>任何拓扑声明（队列 / 交换器）：唯一声明方是 admin（见计划「决策登记」第 4 条），
  * 因此网关的 {@code spring.rabbitmq.dynamic} 显式关掉（见 application.yml）。
  */
 @Configuration

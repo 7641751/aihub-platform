@@ -67,32 +67,32 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Task 8 的**线上契约**：租户 / 渠道 CRUD + 加密写入 + 主密钥轮换 + 提交后广播失效。
+ * Task 8 的<b>线上契约</b>：租户 / 渠道 CRUD + 加密写入 + 主密钥轮换 + 提交后广播失效。
  * 真容器（MySQL + Redis）、真 HTTP、真令牌、真 AES-GCM。
  *
  * <p><b>合成密钥</b>：控制台签名密钥与渠道主密钥都由 {@code @TestPropertySource} 注入
- * （{@code application.yml} 对两者都**刻意没有默认值**）。两者都是**合成**值，只活在这个测试上下文里，
+ * （{@code application.yml} 对两者都<b>刻意没有默认值</b>）。两者都是<b>合成</b>值，只活在这个测试上下文里，
  * 绝不是任何真实凭证。
  *
- * <p><b>为什么主密钥是双版本（v1 + v2）</b>：验收判据里有「轮换后 {@code key_version} **前进**」。
+ * <p><b>为什么主密钥是双版本（v1 + v2）</b>：验收判据里有「轮换后 {@code key_version} <b>前进</b>」。
  * {@code channel.key_version} 必须与密文的自描述标签一致（{@code ChannelEntity} 的类注释），
  * 而 {@code ChannelKeyService.currentKeyVersion()} 是主密钥表里的最大版本号 —— 单版本时它是个常量，
- * 「前进」在同一个 Spring 上下文里**不可观测**。所以上下文里放 v1 与 v2 两把：
- * {@code currentKeyVersion() == 2}，而轮换用例先落一条**用 v1 加密的存量行**（模拟「主密钥升到 v2
+ * 「前进」在同一个 Spring 上下文里<b>不可观测</b>。所以上下文里放 v1 与 v2 两把：
+ * {@code currentKeyVersion() == 2}，而轮换用例先落一条<b>用 v1 加密的存量行</b>（模拟「主密钥升到 v2
  * 之前写入的渠道」），轮换之后它必须变成 v2 —— 这样「前进」才是可判别的。
  *
- * <p><b>回滚用例的纪律</b>（Task 7 的评审逐条换来的）：探针是**测试树里**的真实 Spring bean
- * （{@link RollbackProbeConfiguration}），它调**真实的** {@link ChannelAdminService#create} 之后在同一
- * 事务里抛异常；而该用例方法**自己不带 {@code @Transactional}** —— 否则测试自己的事务会成为边界，
- * 回滚就什么也证明不了。渠道数量用**增量**断言（先记基线），不用全表计数：
+ * <p><b>回滚用例的纪律</b>（Task 7 的评审逐条换来的）：探针是<b>测试树里</b>的真实 Spring bean
+ * （{@link RollbackProbeConfiguration}），它调<b>真实的</b> {@link ChannelAdminService#create} 之后在同一
+ * 事务里抛异常；而该用例方法<b>自己不带 {@code @Transactional}</b> —— 否则测试自己的事务会成为边界，
+ * 回滚就什么也证明不了。渠道数量用<b>增量</b>断言（先记基线），不用全表计数：
  * {@code channel} 表、{@code audit_log} 表与 Testcontainers 容器都是 JVM 级共享的。
  * 「业务写、审计、after-commit 钩子一起作废」这个不变量由三件事分别钉住：渠道数不变、
- * **按本次失败写独有的渠道名找不到审计行**、以及同一窗口内成功写的失效消息**必须**被观测到
+ * <b>按本次失败写独有的渠道名找不到审计行</b>、以及同一窗口内成功写的失效消息<b>必须</b>被观测到
  * （正向投递对照 —— 窗口太短时它先红，而不是让「没有消息」静默假绿）。
  *
  * <p><b>审计断言的作用域</b>：{@code audit_log} 是 JVM 级共享表，所以每条审计断言都必须按
- * **本用例的 {@code target_id}**（渠道 / 租户 id 都是自增主键，不会跨用例复用）或**本用例独有的
- * 渠道名**来查，绝不做全表计数；渠道写的 {@code tenant_id} 必须用 {@code isNull()} 查 ——
+ * <b>本用例的 {@code target_id}</b>（渠道 / 租户 id 都是自增主键，不会跨用例复用）或<b>本用例独有的
+ * 渠道名</b>来查，绝不做全表计数；渠道写的 {@code tenant_id} 必须用 {@code isNull()} 查 ——
  * {@code eq(tenantId, null)} 恒不成立（CONVENTIONS §7），用它查会静默返回 0 行、把断言变成假绿。
  *
  * <p><b>订阅是本类自己搭的</b>{@code AbstractIntegrationTest} 不提供任何
@@ -107,7 +107,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
 
     /**
-     * 合成控制台签名密钥（≥32 字符）。刻意**不是 {@code private}**：注解值里的常量表达式引用私有常量时
+     * 合成控制台签名密钥（≥32 字符）。刻意<b>不是 {@code private}</b>：注解值里的常量表达式引用私有常量时
      * javac 会报访问控制错误（{@code ConsoleLoginIntegrationTest} 已实测过）。
      */
     static final String CONSOLE_SECRET = "channel-it-secret-0123456789abcdefghijklmn";
@@ -125,12 +125,12 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
 
     private static final String PLAINTEXT = "sk-console-plaintext-synthetic";
 
-    /** PUT 换新密钥时写入的**新**明文：必须与 {@link #PLAINTEXT} 不同，否则「换成了新明文」不可判别。 */
+    /** PUT 换新密钥时写入的<b>新</b>明文：必须与 {@link #PLAINTEXT} 不同，否则「换成了新明文」不可判别。 */
     private static final String REPLACEMENT_PLAINTEXT = "sk-console-replaced-plaintext-synthetic";
 
     /**
-     * Task 11 探测用例的合成**渠道明文密钥**：它只会出现在探测请求发往上游的 {@code Authorization}
-     * 头里（真实打一次上游），**绝不许**出现在探测响应体或任何日志里 —— 这正是「绝不回显密钥」那条
+     * Task 11 探测用例的合成<b>渠道明文密钥</b>：它只会出现在探测请求发往上游的 {@code Authorization}
+     * 头里（真实打一次上游），<b>绝不许</b>出现在探测响应体或任何日志里 —— 这正是「绝不回显密钥」那条
      * 断言的哨兵串。
      */
     private static final String PROBE_PLAINTEXT = "sk-channel-plaintext-synthetic";
@@ -148,7 +148,7 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
     private static final Duration SUBSCRIPTION_TIMEOUT = Duration.ofSeconds(5);
 
     /**
-     * 回滚用例的**观测窗口**：既用来等「没有消息」（缺席），也用来等正向对照的「有消息」（投递）。
+     * 回滚用例的<b>观测窗口</b>：既用来等「没有消息」（缺席），也用来等正向对照的「有消息」（投递）。
      * 两个方向共用同一个长度，是为了让「窗口太短」在正向对照上变红，而不是让缺席断言静默假绿
      * （Task 8 的独立评审登记，N7）。
      */
@@ -165,7 +165,7 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
     @Autowired
     private TenantMapper tenantMapper;
 
-    /** 真 Mapper（不是替身）：审计半边必须由**真的落库行**来判（Task 8 的独立评审，I1）。 */
+    /** 真 Mapper（不是替身）：审计半边必须由<b>真的落库行</b>来判（Task 8 的独立评审，I1）。 */
     @Autowired
     private AuditLogMapper auditLogMapper;
 
@@ -564,8 +564,8 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
 
     /**
      * {@link #auditRowsForChannelName} 用 MyBatis-Plus 的 {@code like} 匹配 {@code detail}，而 LIKE 的
-     * {@code %} / {@code _} / {@code \} 是**元字符**。夹具名今天只含 {@code m4-ch-it-} + 8 位 UUID 十六进制，
-     * 所以是安全的 —— 但那是**假设**，不是断言。本用例把这条假设变成可执行事实：谁把前缀改成
+     * {@code %} / {@code _} / {@code \} 是<b>元字符</b>。夹具名今天只含 {@code m4-ch-it-} + 8 位 UUID 十六进制，
+     * 所以是安全的 —— 但那是<b>假设</b>，不是断言。本用例把这条假设变成可执行事实：谁把前缀改成
      * {@code m4_ch_it_}（下划线变成单字符通配符），这里先红，而不是让审计查询悄悄匹配到别的行
      * （Task 8 修复轮复评 M-2）。
      */
@@ -582,11 +582,11 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 8) 渠道探测（Task 11）
 
     /**
-     * 探测**真的打了一次上游**并回报可达性与耗时，响应里**绝不出现密钥**（明文、落库密文都不许）。
+     * 探测<b>真的打了一次上游</b>并回报可达性与耗时，响应里<b>绝不出现密钥</b>（明文、落库密文都不许）。
      *
      * <p>这一条刻意落在本类（而不是 {@code ProbeAndQueryIntegrationTest}）：探测要解密渠道密钥 ⇒ 需要
      * {@code aihub.channel.master-key}，而该属性只存在于本类的 {@code @TestPropertySource} 里；
-     * {@code @Import} 会把导入者类算进上下文缓存键，所以新写一个带同样属性的类会 fork **第 8 个**
+     * {@code @Import} 会把导入者类算进上下文缓存键，所以新写一个带同样属性的类会 fork <b>第 8 个</b>
      * Spring 上下文（计划 Interfaces 第 6 条 / CONVENTIONS §8 item 5/6）。
      *
      * <p>判别力由变异体 {@code M6}（把明文塞进 {@code ProbeResult.message}）提供：变异后
@@ -615,7 +615,7 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
                 .isNotNull().startsWith("Bearer ");
     }
 
-    /** 渠道不存在 → **404**（停用仍可探测；它是诊断动作，不是数据面调用）。 */
+    /** 渠道不存在 → <b>404</b>（停用仍可探测；它是诊断动作，不是数据面调用）。 */
     @Test
     void probingAnUnknownChannelIs404NotFound() throws Exception {
         ResponseEntity<String> res = post("/api/channels/9000000000/probe", Map.of());
@@ -625,13 +625,13 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 失败路径：上游**不回包** ⇒ 有界超时后 {@code reachable=false}，整个探测必须**有界**（超时上限
+     * 失败路径：上游<b>不回包</b> ⇒ 有界超时后 {@code reachable=false}，整个探测必须<b>有界</b>（超时上限
      * = {@code ChannelProbeService.PROBE_TIMEOUT_CAP} = 3 秒）。没有上界时这条会拿渠道的
      * {@code timeout_ms}（60s）去等，本用例的时延断言会红。
      *
      * <p><b>阈值必须与 3 秒判据一致（评审 I-2）</b>：此前写的是 {@code isLessThan(8_000L)} —— 判据文字
      * 宣称「超时上限 3 秒」、阈值却给到 8 秒，断言比判据松。把生产上限改成 5 秒后本用例照样绿（10 秒才
-     * 红），即 3 秒上界**没有判别力**。现在收紧到 {@code isLessThan(3_500L)}（给容器/CI 抖动留 500ms
+     * 红），即 3 秒上界<b>没有判别力</b>。现在收紧到 {@code isLessThan(3_500L)}（给容器/CI 抖动留 500ms
      * 余量）：5 秒上限会精确变红，3 秒上限回绿。
      */
     @Test
@@ -678,7 +678,7 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 解密失败（密文解不开）⇒ 按「不可达 + 非敏感原因」处理，**不抛异常**、**不回显密文**。
+     * 解密失败（密文解不开）⇒ 按「不可达 + 非敏感原因」处理，<b>不抛异常</b>、<b>不回显密文</b>。
      * 判别力由变异体（让 {@code decrypt} 的空 Optional 直接抛）提供：变异后本用例的状态码断言
      * 从 200 变 500，精确变红。
      */
@@ -746,7 +746,7 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 审计断言与作用域
 
     /**
-     * 按 {@code target_id} 取**本用例这条渠道**的审计行，并顺带钉住 {@code tenant_id} 的 SQL NULL 语义
+     * 按 {@code target_id} 取<b>本用例这条渠道</b>的审计行，并顺带钉住 {@code tenant_id} 的 SQL NULL 语义
      * （渠道不是租户级资源，见 {@code ChannelAdminService} 的类注释）：查询必须用 {@code isNull()} ——
      * {@code eq(tenantId, null)} 恒不成立（CONVENTIONS §7），用它查会静默返回 0 行、把断言变成假绿。
      */
@@ -768,7 +768,7 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
         return row;
     }
 
-    /** 租户写的审计行：{@code tenant_id} 必须**等于目标租户 id**（不是 NULL）。 */
+    /** 租户写的审计行：{@code tenant_id} 必须<b>等于目标租户 id</b>（不是 NULL）。 */
     private AuditLogEntity onlyTenantAuditRow(String action, long tenantId) {
         List<AuditLogEntity> rows = auditLogMapper.selectList(new LambdaQueryWrapper<AuditLogEntity>()
                 .eq(AuditLogEntity::getAction, action)
@@ -804,7 +804,7 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 按 detail 里的**渠道名**数 CHANNEL_CREATE 审计行。名字是每个用例独有的夹具值，因此这条查询只可能
+     * 按 detail 里的<b>渠道名</b>数 CHANNEL_CREATE 审计行。名字是每个用例独有的夹具值，因此这条查询只可能
      * 命中「本用例的那一行」，不是全表计数（{@code audit_log} 与容器都是 JVM 级共享的）。回滚用例用它
      * 同时做正向对照（成功写必须找得到）与反向断言（失败的写必须找不到）。
      */
@@ -876,7 +876,7 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
         return listenerContainer;
     }
 
-    /** 装一条真 Redis 订阅，并在返回之前**确认订阅已经建立**（否则第一条真消息会被静默丢掉）。 */
+    /** 装一条真 Redis 订阅，并在返回之前<b>确认订阅已经建立</b>（否则第一条真消息会被静默丢掉）。 */
     private BlockingQueue<String> subscribeAndAwait() throws InterruptedException {
         BlockingQueue<String> received = new LinkedBlockingQueue<>();
         container().addMessageListener((message, channel) -> received.add(new String(message.getBody())),
@@ -886,7 +886,7 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 反复发一条**带唯一后缀的哨兵**，直到 {@code poll} 拿到的第一条就是刚刚那条 —— 说明队列里连更早的
+     * 反复发一条<b>带唯一后缀的哨兵</b>，直到 {@code poll} 拿到的第一条就是刚刚那条 —— 说明队列里连更早的
      * 残留都没有（发布连接与订阅连接各一条，Redis 保序），于是随后收到的真消息一定是紧接着投递的那条。
      * 哨兵不含分隔符，{@link ConfigInvalidateCodec#decode} 对它返回 {@code null}，不会被误当成有效失效。
      */
@@ -911,8 +911,8 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * {@link #awaitMessage} 的可变窗口版本：窗口长度由调用方给。回滚用例的正向投递对照必须用**与缺席
-     * 断言相同的窗口长度**，否则「窗口太短」不会被任何断言发现（Task 8 的独立评审登记，N7）。
+     * {@link #awaitMessage} 的可变窗口版本：窗口长度由调用方给。回滚用例的正向投递对照必须用<b>与缺席
+     * 断言相同的窗口长度</b>，否则「窗口太短」不会被任何断言发现（Task 8 的独立评审登记，N7）。
      */
     private static ConfigInvalidateMessage awaitMessageWithin(BlockingQueue<String> received, String reason,
                                                               Duration timeout) throws InterruptedException {
@@ -931,12 +931,12 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 回滚用例的探针：**测试树里的真实 Spring bean**（由 {@link TestConfiguration} 注册），
-     * 因此 {@code @Transactional} 的代理语义成立。它在同一个事务里调**真实**的
+     * 回滚用例的探针：<b>测试树里的真实 Spring bean</b>（由 {@link TestConfiguration} 注册），
+     * 因此 {@code @Transactional} 的代理语义成立。它在同一个事务里调<b>真实</b>的
      * {@link ChannelAdminService#create} 之后抛异常 —— 业务写、审计、以及 after-commit 钩子必须一起作废。
      * 这三件事都被用例本身钉住，而不是只写在注释里：渠道行不落库（按失败写独有的名字查计数为 0）、
-     * 渠道数不变、同一名字下**找不到 CHANNEL_CREATE 审计行**、窗口内没有任何失效消息
-     * （而成功写的消息在同一窗口长度内**必须**被观测到，作为投递对照）。
+     * 渠道数不变、同一名字下<b>找不到 CHANNEL_CREATE 审计行</b>、窗口内没有任何失效消息
+     * （而成功写的消息在同一窗口长度内<b>必须</b>被观测到，作为投递对照）。
      */
     @TestConfiguration
     static class RollbackProbeConfiguration {

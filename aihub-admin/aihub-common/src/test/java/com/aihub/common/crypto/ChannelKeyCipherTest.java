@@ -14,11 +14,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 渠道密钥的 AES-GCM 加解密是**跨服务**能力：admin 加密（写入 {@code channel.api_key_cipher}），
+ * 渠道密钥的 AES-GCM 加解密是<b>跨服务</b>能力：admin 加密（写入 {@code channel.api_key_cipher}），
  * gateway 解密（本地注入上游密钥）。两侧共用本文件里的实现，因此「密文格式」「主密钥解析规则」
  * 「版本自描述」这三件事都压在这里。
  *
- * <p>测试用的明文一律是**一眼可辨的合成值**（{@code sk-channel-plaintext-synthetic}）：
+ * <p>测试用的明文一律是<b>一眼可辨的合成值</b>（{@code sk-channel-plaintext-synthetic}）：
  * 真实渠道密钥不允许出现在任何 tracked 文件里，包括测试夹具。
  *
  * <p>本类不需要 Spring 上下文，也不需要 Docker / Redis。
@@ -28,18 +28,18 @@ class ChannelKeyCipherTest {
     private static final String PLAINTEXT = "sk-channel-plaintext-synthetic";
 
     /**
-     * 固定向量 1（评审 Fix 1；二轮 Fix 1 把它**做不到**的事写清楚）：由提交 {@code f64cf27} 的实现加密
-     * 一次生成后**粘贴为字面量**，不是被测代码现算的。主密钥是 {@link #b64Key(int) b64Key(2)}，
+     * 固定向量 1（评审 Fix 1；二轮 Fix 1 把它<b>做不到</b>的事写清楚）：由提交 {@code f64cf27} 的实现加密
+     * 一次生成后<b>粘贴为字面量</b>，不是被测代码现算的。主密钥是 {@link #b64Key(int) b64Key(2)}，
      * 明文即 {@link #PLAINTEXT}，body 58 字节（12 nonce + 30 明文 + 16 tag）→ 80 字符、以 {@code ==} 结尾。
      *
      * <p>为什么必须有它：本类其余用例的期望值全部由被测实现推导，把 nonce 挪到密文后面、或把 tag 从
-     * 128 位改成别的位数，那些用例会**全绿**，而数据库里已经躺着的 {@code channel.api_key_cipher} 行
+     * 128 位改成别的位数，那些用例会<b>全绿</b>，而数据库里已经躺着的 {@code channel.api_key_cipher} 行
      * 会永久解不开（admin 写入的密文 gateway 读不出来）。这条字面量把「今天的格式」冻住。
      *
-     * <p><b>它单独挡不住字母表漂移（二轮评审实测）</b>：本向量的 body **既不含 {@code +} 也不含
-     * {@code /}**，而这两套字母表在只含 {A–Z a–z 0–9} 的 body 上完全一致；把生产代码的
+     * <p><b>它单独挡不住字母表漂移（二轮评审实测）</b>：本向量的 body <b>既不含 {@code +} 也不含
+     * {@code /}</b>，而这两套字母表在只含 {A–Z a–z 0–9} 的 body 上完全一致；把生产代码的
      * {@code getEncoder()} / {@code getDecoder()} 换成 {@code getUrlEncoder()} / {@code getUrlDecoder()}，
-     * **只靠这一条向量会全绿**，但 body 含 {@code +} 或 {@code /} 的存量行会永久失解。
+     * <b>只靠这一条向量会全绿</b>，但 body 含 {@code +} 或 {@code /} 的存量行会永久失解。
      * 字母表那一半由 {@link #PLUS_AND_SLASH_PAYLOAD} 负责 —— 两条向量合起来才是完整的格式冻结点。
      */
     private static final String FIXED_PAYLOAD =
@@ -47,14 +47,14 @@ class ChannelKeyCipherTest {
 
     /**
      * 固定向量 2（二轮评审 Fix 1）：与 {@link #FIXED_PAYLOAD} 同源（{@code b64Key(2)} + {@link #PLAINTEXT}），
-     * 但它的 body **同时含 {@code +} 与 {@code /}** —— 标准 base64 字母表里那两个非 URL-safe 字符。
+     * 但它的 body <b>同时含 {@code +} 与 {@code /}</b> —— 标准 base64 字母表里那两个非 URL-safe 字符。
      *
-     * <p>为什么必须有它：这是**唯一**能发现「标准 base64 换成 URL-safe base64」的用例。实测
+     * <p>为什么必须有它：这是<b>唯一</b>能发现「标准 base64 换成 URL-safe base64」的用例。实测
      * {@code getUrlDecoder()} 对含 {@code +} 或 {@code /} 的 body 抛 {@code IllegalArgumentException}
-     * （{@code decrypt} 把它折算成空），于是**存量行中 body 含这两个字符的那些会永久不可解**；而
+     * （{@code decrypt} 把它折算成空），于是<b>存量行中 body 含这两个字符的那些会永久不可解</b>；而
      * {@link #FIXED_PAYLOAD} 的 body 落在两套字母表的交集里，同一种漂移下它照样绿。
      *
-     * <p>来源：仓库树之外的**离线 scratch 程序**（与生产同布局的 AES/GCM/NoPadding、12 字节 nonce、
+     * <p>来源：仓库树之外的<b>离线 scratch 程序</b>（与生产同布局的 AES/GCM/NoPadding、12 字节 nonce、
      * 128 位 tag）搜索得到后粘贴为字面量 —— nonce 十六进制 {@code e187c6498d5051b6831cbe0b}，
      * 第 4 个候选命中，未落进仓库、未进提交。
      */
@@ -97,7 +97,7 @@ class ChannelKeyCipherTest {
     }
 
     /**
-     * AES-GCM 下**复用 nonce 是致命缺陷**（同一密钥 + 同一 nonce 会泄露明文异或并摧毁认证性）。
+     * AES-GCM 下<b>复用 nonce 是致命缺陷</b>（同一密钥 + 同一 nonce 会泄露明文异或并摧毁认证性）。
      * 这条用例是它的防线：同一明文加密两次必须得到两个不同的密文，且都能解回来。
      */
     @Test
@@ -125,17 +125,17 @@ class ChannelKeyCipherTest {
     }
 
     /**
-     * 评审 Fix 1 + 二轮 Fix 1：用**字面量**钉住载荷格式，而不是用实现现算期望值。三件事各钉一处：
+     * 评审 Fix 1 + 二轮 Fix 1：用<b>字面量</b>钉住载荷格式，而不是用实现现算期望值。三件事各钉一处：
      * ① 硬编码密文能解回硬编码明文（nonce 在前、tag 在后、填充形态）；
      * ② 版本标签是载荷的一部分；
-     * ③ 解码后长度 = 12 (nonce) + 明文长度 + 16 (GCM tag)，把 nonce 与 tag 的字节数**独立于实现**钉死。
+     * ③ 解码后长度 = 12 (nonce) + 明文长度 + 16 (GCM tag)，把 nonce 与 tag 的字节数<b>独立于实现</b>钉死。
      *
      * <p>两条向量的分工：本条（body 不含 {@code +}/{@code /}）钉布局、长度与版本标签；
      * {@link #pinnedVectorWithPlusAndSlashPinsTheStandardBase64Alphabet}（body 同时含这两个字符）
-     * 钉**标准** base64 字母表。缺任意一条，就有一种漂移能全绿通过。
+     * 钉<b>标准</b> base64 字母表。缺任意一条，就有一种漂移能全绿通过。
      *
      * <p><b>本类不覆盖的方向（不要当成已冻结）</b>：把 {@code +}/{@code /} 映射到同样字符的自定义
-     * 字母表漂移（例如只重排 A–Z 的表）；填充字符的省略与否 —— 两条向量只走**解码**方向，而 JDK 解码器
+     * 字母表漂移（例如只重排 A–Z 的表）；填充字符的省略与否 —— 两条向量只走<b>解码</b>方向，而 JDK 解码器
      * 容忍缺失 padding，所以向量自身对「编码器是否补 {@code =}」不设防。
      */
     @Test
@@ -153,12 +153,12 @@ class ChannelKeyCipherTest {
     }
 
     /**
-     * 二轮评审 Fix 1：把**标准** base64 字母表也钉死，而不只是钉住「某一套 base64」。
+     * 二轮评审 Fix 1：把<b>标准</b> base64 字母表也钉死，而不只是钉住「某一套 base64」。
      *
      * <p>反证（实测，见报告 §9）：把 {@code AesGcmChannelCipher} 的 {@code getEncoder()} /
-     * {@code getDecoder()} 临时换成 {@code getUrlEncoder()} / {@code getUrlDecoder()}，本用例**变红**
+     * {@code getDecoder()} 临时换成 {@code getUrlEncoder()} / {@code getUrlDecoder()}，本用例<b>变红</b>
      * （{@code decrypt} 返回空 {@link Optional}），而 {@link #pinnedPayloadVectorFreezesTheCiphertextFormat}
-     * 仍**是绿的** —— 那正是上一轮冻结留下的缺口。最后一条断言是「防止向量被换成无害 body」的哨兵：
+     * 仍<b>是绿的</b> —— 那正是上一轮冻结留下的缺口。最后一条断言是「防止向量被换成无害 body」的哨兵：
      * 不含 {@code +}/{@code /} 的 body 在这两套字母表下取值相同，会让本用例失去鉴别力。
      */
     @Test
@@ -180,11 +180,11 @@ class ChannelKeyCipherTest {
     }
 
     /**
-     * 评审 Fix 2：**真的翻转密文区的字节**。旧写法
+     * 评审 Fix 2：<b>真的翻转密文区的字节</b>。旧写法
      * {@code payload.substring(0, len - 2) + "A"} 只是砍掉两个 base64 填充字符再补一个 'A'：
-     * 实测原 body 58 字节 → 篡改后 59 字节，且**原 58 字节一个都没变**（byte diff = 0）。
+     * 实测原 body 58 字节 → 篡改后 59 字节，且<b>原 58 字节一个都没变</b>（byte diff = 0）。
      * 那不是「篡改任一字节」，只能证明「多一个字节的载荷解不开」；不认证的实现只要对长度敏感
-     * （例如 CBC 系）就能照样绿。这里改成：解码 body、翻转 nonce 之后的第一个密文字节、按**等长**
+     * （例如 CBC 系）就能照样绿。这里改成：解码 body、翻转 nonce 之后的第一个密文字节、按<b>等长</b>
      * 重新编码 —— 长度不变，唯一的变化就是那一个字节，只有 GCM tag 校验能拦下它。
      */
     @Test
@@ -241,7 +241,7 @@ class ChannelKeyCipherTest {
     }
 
     /**
-     * 轮换的完整含义：**旧密文仍然解得开**（旧版本还在表里），而**新加密一定用新版本**。
+     * 轮换的完整含义：<b>旧密文仍然解得开</b>（旧版本还在表里），而<b>新加密一定用新版本</b>。
      * 只有「解密时先查 DB 的 key_version 再选密钥」的实现才会在这条上红。
      */
     @Test
@@ -284,8 +284,8 @@ class ChannelKeyCipherTest {
     }
 
     /**
-     * Optional nit 的结论：载荷标签对 {@code [vV]} 的宽容**保留**（运维手写或旧数据不该被大小写坑到），
-     * 而 {@code labelOf} 是**规范化**成小写而不是原样回显。于是「V1:」载荷能解开、且 labelOf 报
+     * Optional nit 的结论：载荷标签对 {@code [vV]} 的宽容<b>保留</b>（运维手写或旧数据不该被大小写坑到），
+     * 而 {@code labelOf} 是<b>规范化</b>成小写而不是原样回显。于是「V1:」载荷能解开、且 labelOf 报
      * {@code "v1"} —— 两者一致：能解的载荷一定有非空 label，label 一定是小写规范形。
      */
     @Test
@@ -320,13 +320,13 @@ class ChannelKeyCipherTest {
     }
 
     /**
-     * 评审 Fix 3：不变量必须由**紧凑构造器**自己守住，而不是只靠 {@code parse} 过滤。旧实现里
+     * 评审 Fix 3：不变量必须由<b>紧凑构造器</b>自己守住，而不是只靠 {@code parse} 过滤。旧实现里
      * {@code new ChannelKeyRegistry(Map.of(1, new byte[16]))} 构造成功，而且 16 字节会被 JDK 当成
-     * AES-128 **静默接受**（实测 encrypt 返回了一个合法的 16 字节密钥密文）；31 字节则在 encrypt 时
+     * AES-128 <b>静默接受</b>（实测 encrypt 返回了一个合法的 16 字节密钥密文）；31 字节则在 encrypt 时
      * 抛出与篡改无法区分的 "AES-GCM 运算失败"，decrypt 静默返回空。两者都是坏数据/坏诊断。
      *
      * <p>二轮 Fix 2：{@link ChannelKeyRegistry#MAX_VERSIONS} 的上限同样由构造器守住，而此前只有
-     * {@link #registryRefusesMoreVersionsThanTheCap} 走的是 {@code parse}。这里补一条「9 个**合法**
+     * {@link #registryRefusesMoreVersionsThanTheCap} 走的是 {@code parse}。这里补一条「9 个<b>合法</b>
      * 32 字节版本直接构造必须抛」，否则删掉构造器里的上限判断，整个套件仍然全绿。
      */
     @Test
@@ -358,7 +358,7 @@ class ChannelKeyCipherTest {
     }
 
     /**
-     * 评审 Fix 5：主密钥数组**不得按引用外泄**。旧实现里 {@code key(1)} / {@code keys().get(1)}
+     * 评审 Fix 5：主密钥数组<b>不得按引用外泄</b>。旧实现里 {@code key(1)} / {@code keys().get(1)}
      * 返回的就是内部数组，调用方（或任何下游工具）就地清零/改写等于破坏表里的密钥。
      * 同时钉住入参侧：传给构造器的数组之后被改写，也不得影响表内内容。
      */
@@ -387,7 +387,7 @@ class ChannelKeyCipherTest {
 
     /**
      * 评审 Fix 4：{@code Map.copyOf} 丢弃迭代顺序，而且 {@code ImmutableCollections} 的遍历顺序带
-     * **每次 JVM 启动随机化的 SALT** —— 同一份输入 {@code v7,v1,v4} 实测出现过 {@code [4, 1, 7]}、
+     * <b>每次 JVM 启动随机化的 SALT</b> —— 同一份输入 {@code v7,v1,v4} 实测出现过 {@code [4, 1, 7]}、
      * {@code [4, 7, 1]}、{@code [1, 7, 4]} 三种顺序（本类的红/绿证据里就是 {@code [1, 7, 4]}）。
      * {@code describe()} 现在显式排序：同一份环境变量必须打出同一行。
      */
@@ -399,9 +399,9 @@ class ChannelKeyCipherTest {
     }
 
     /**
-     * 评审 Fix 6：版本数上限**不得静默丢弃**。旧实现遇到第 9 段直接 {@code break}，实测
+     * 评审 Fix 6：版本数上限<b>不得静默丢弃</b>。旧实现遇到第 9 段直接 {@code break}，实测
      * {@code size=8, currentVersion()=8, has(9)=false} —— 运维多写一段，{@code encrypt} 就悄悄改用
-     * 较小的版本号加密，唯一的信号是 {@code describe()}。现在超过上限**整表拒绝**：{@code parse}
+     * 较小的版本号加密，唯一的信号是 {@code describe()}。现在超过上限<b>整表拒绝</b>：{@code parse}
      * 仍然永不抛异常，返回空表 =「未配置主密钥」，admin 侧的 {@code encrypt} 立刻抛
      * {@code IllegalStateException}（响亮失败），而不是选错密钥。
      */

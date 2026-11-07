@@ -24,18 +24,18 @@ import java.util.function.BooleanSupplier;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 线程模型：**限流判定绝不占用订阅它的那个线程**（复审 Fix 2 的 (b)）。
+ * 线程模型：<b>限流判定绝不占用订阅它的那个线程</b>（复审 Fix 2 的 (b)）。
  *
- * <p><b>为什么这件事必须单独证</b>：判定这一跳上有两处**阻塞**调用 —— 策略解析会在两级缓存
+ * <p><b>为什么这件事必须单独证</b>：判定这一跳上有两处<b>阻塞</b>调用 —— 策略解析会在两级缓存
  * 未命中时做同步 Redis GET（必要时还有一次同步回源），而 {@code RedisRateLimiter} 是阻塞的 Lua
- * 调用。{@code spring.data.redis.timeout} 是 2 秒：Redis **卡住**（不是拒绝）时，在 event loop 上做这些
+ * 调用。{@code spring.data.redis.timeout} 是 2 秒：Redis <b>卡住</b>（不是拒绝）时，在 event loop 上做这些
  * 事会把共享同一个 loop 的所有请求一起按住 2 秒 —— 而且它不是异常，{@code catch} 救不了一个
  * 正在阻塞的线程。这与 M2 给 {@code ApiKeyResolver} 的 Redis 读取所做处置是同一条理由。
  *
  * <p><b>为什么不用「真 Redis 卡住」来证</b>：那需要让一个 socket 接受连接却永不回应，
  * 而本项目不允许测试依赖 Docker/外部服务（也没有这样的桩），端口不会「半开」，因此做不到
- * 确定性驱动。这里改用一个**确定性的等价物**：把「阻塞的判定」直接做成一个可控的阻塞替身
- * （{@code BlockingRateLimiter}），并把它订阅在一个**专用单线程调度器**上扮演 event loop。
+ * 确定性驱动。这里改用一个<b>确定性的等价物</b>：把「阻塞的判定」直接做成一个可控的阻塞替身
+ * （{@code BlockingRateLimiter}），并把它订阅在一个<b>专用单线程调度器</b>上扮演 event loop。
  * 判据因此是执行层面的、与 Redis 无关：判定停在哪个线程上、以及那个线程期间还能不能干活。
  *
  * <p>两条互补的判据：
@@ -149,7 +149,7 @@ class RateLimitEventLoopTest {
     }
 
     /**
-     * 一个**真的会阻塞**的 {@link RateLimiter} 替身：记录判定发生在哪个线程与第几次调用，
+     * 一个<b>真的会阻塞</b>的 {@link RateLimiter} 替身：记录判定发生在哪个线程与第几次调用，
      * 并可选地在进入时回调（用来投递 event loop 探针）。父类构造器收到的三个 null 永远不会被触碰。
      */
     private static final class BlockingRateLimiter extends RateLimiter {

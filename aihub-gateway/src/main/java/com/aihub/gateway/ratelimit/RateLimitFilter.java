@@ -24,26 +24,26 @@ import reactor.core.scheduler.Schedulers;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 数据面限流（设计文档 §8.1 ②）。守 {@code /v1/**}，**排在鉴权之后**：限流的策略维度是
+ * 数据面限流（设计文档 §8.1 ②）。守 {@code /v1/**}，<b>排在鉴权之后</b>：限流的策略维度是
  * {@code tenant + api_key}（决策 7 修订），桶维度是 {@code tenant + sha256(secret)}，
  * 这些值都来自 {@link ApiKeyAuthFilter} 的解析结果。
  *
- * <p>超限回 **429 + OpenAI 形状错误体**（决策 13：数据面不套 admin 信封），并带上
+ * <p>超限回 <b>429 + OpenAI 形状错误体</b>（决策 13：数据面不套 admin 信封），并带上
  * IETF 风格的 {@code RateLimit-*} 与 {@code Retry-After}。
  *
  * <p><b>降级不等于放行</b>：Redis 不可用时 {@link RateLimiter} 会给出本机桶的判定，
- * 过滤器**照常执行**那个判定（拒绝就是拒绝）。放开全部请求不是「降级」，是「关掉限流」，
+ * 过滤器<b>照常执行</b>那个判定（拒绝就是拒绝）。放开全部请求不是「降级」，是「关掉限流」，
  * 会让上游被瞬间打挂 —— 那才是真正的不可用；反过来，因为 Redis 挂了就拒绝所有人同样是不可用。
  *
- * <p><b>自身故障必须放行</b>（fail-open）：限流是**保护**手段，它自己坏了不能变成全量 5xx。
+ * <p><b>自身故障必须放行</b>（fail-open）：限流是<b>保护</b>手段，它自己坏了不能变成全量 5xx。
  * 与鉴权的 fail-closed 相反，这是刻意的取舍（保护层的故障方向应当朝向「让请求过去」，
- * 而信任层的故障方向应当朝向「拒绝」）。守卫覆盖的是**整个判定动作**：{@code acquire} 抛异常、
+ * 而信任层的故障方向应当朝向「拒绝」）。守卫覆盖的是<b>整个判定动作</b>：{@code acquire} 抛异常、
  * 以及它返回 {@code null}（契约被打破）都算自身故障 —— 后者若不加判断，就是一个 NPE → 500。
  *
  * <p><b>线程模型：判定整体在 {@link #LIMITER_SCHEDULER} 上执行，绝不占 event loop。</b>
- * 这条链上一个判定要做两件**阻塞**的事：策略解析会调 {@code ConfigClient.current()}（两级缓存
+ * 这条链上一个判定要做两件<b>阻塞</b>的事：策略解析会调 {@code ConfigClient.current()}（两级缓存
  * 未命中时是同步 Redis GET，必要时还有一次同步回源），而 {@code RedisRateLimiter} 是阻塞的
- * Lua 调用。{@code spring.data.redis.timeout} 是 2 秒：Redis **卡住**（不是拒绝）时，在 event loop
+ * Lua 调用。{@code spring.data.redis.timeout} 是 2 秒：Redis <b>卡住</b>（不是拒绝）时，在 event loop
  * 上做这些事会把共享同一个 loop 的所有请求一起按住 2 秒 —— {@code /healthz} 也不例外，
  * 而且这不是异常，{@code catch} 救不了一个正在阻塞的线程。这与 M2 给 {@code ApiKeyResolver} 的
  * Redis 读取所做的处置是同一件事（同一套理由：`StringRedisTemplate` 是阻塞驱动，而调用方是
@@ -74,16 +74,16 @@ public class RateLimitFilter implements WebFilter {
     public static final String REJECTED_METRIC = "aihub.ratelimit.rejected";
 
     /**
-     * 判定发生在哪一级的标签（G12）。**只加在会取两个值的计数器上 —— 目前是
-     * {@link #REJECTED_METRIC}**（拒绝可能来自 Redis 桶，也可能来自降级的本机桶）。
+     * 判定发生在哪一级的标签（G12）。<b>只加在会取两个值的计数器上 —— 目前是
+     * {@link #REJECTED_METRIC}</b>（拒绝可能来自 Redis 桶，也可能来自降级的本机桶）。
      *
-     * <p><b>为什么需要它</b>：{@code degraded} 这个名字在 M3 里有**两个**互不相同的信号 ——
+     * <p><b>为什么需要它</b>：{@code degraded} 这个名字在 M3 里有<b>两个</b>互不相同的信号 ——
      * {@link RateLimitDecision#degraded()}（这一跳在哪一级判定，逐请求）与
      * {@link RateLimiter#redisDegraded()}（熔断状态，粘性一秒）。一个只按「degraded 为真」报警的
      * 面板会在 Redis 变黑期间每个请求响一次。
      *
      * <p><b>为什么只加在那里</b>：{@link #DEGRADED_METRIC} 只在判定来自本机桶时才 +1，
-     * {@code source=local} 对它是一个**常量**标签 —— 多出来的那个维度永远只有一个取值，
+     * {@code source=local} 对它是一个<b>常量</b>标签 —— 多出来的那个维度永远只有一个取值，
      * 不区分任何两个时间序列（复审 Fix 4）。把会变的维度放在会变的地方，标签才有信息量。
      */
     public static final String SOURCE_TAG = "source";
@@ -159,11 +159,11 @@ public class RateLimitFilter implements WebFilter {
     }
 
     /**
-     * 调用限流器并落地它的直接后果：指标与响应头。**只会在 {@link #LIMITER_SCHEDULER} 上执行**
+     * 调用限流器并落地它的直接后果：指标与响应头。<b>只会在 {@link #LIMITER_SCHEDULER} 上执行</b>
      * （由 {@link #filter} 的 {@code subscribeOn} 保证），因此这里的阻塞调用不占 event loop。
      *
      * <p>结果写进 {@code outcome}；自身故障折算成 {@code fault} 交给 {@link #finish} fail-open。
-     * 这里**刻意不把异常继续向上抛**（除了 {@code Error}）：判定链的故障必须变成放行，
+     * 这里<b>刻意不把异常继续向上抛</b>（除了 {@code Error}）：判定链的故障必须变成放行，
      * 而放行要带着下游链的 {@code Mono} 一起组合，那一步只能在 {@code finish} 里做。
      */
     private void acquire(ServerWebExchange exchange, long tenantId, Long apiKeyId, String hash,
@@ -188,7 +188,7 @@ public class RateLimitFilter implements WebFilter {
     /**
      * 判定的结局：自身故障 → fail-open，超限 → 429，其余 → 交给下游链。
      *
-     * <p>放行与拒绝在这里分岔，而**判定本身已经落地**（{@link #acquire}）—— 因此下游链拿到的
+     * <p>放行与拒绝在这里分岔，而<b>判定本身已经落地</b>（{@link #acquire}）—— 因此下游链拿到的
      * 响应头一定是最新那一次判定的，不存在「先转发后写头」的竞态。
      */
     private Mono<Void> finish(ServerWebExchange exchange, WebFilterChain chain, long tenantId,
@@ -220,7 +220,7 @@ public class RateLimitFilter implements WebFilter {
         private RuntimeException fault;
     }
 
-    /** 观测：降级计数 + 节流 WARN、拒绝计数。**绝不改变判定结论**（写失败只记一条 WARN）。 */
+    /** 观测：降级计数 + 节流 WARN、拒绝计数。<b>绝不改变判定结论</b>（写失败只记一条 WARN）。 */
     private void reportDecision(RateLimitDecision decision) {
         try {
             if (decision.degraded()) {
@@ -235,7 +235,7 @@ public class RateLimitFilter implements WebFilter {
         }
     }
 
-    /** 放行与拒绝**都**写这两条：客户端据此知道自己离限额还有多远。 */
+    /** 放行与拒绝<b>都</b>写这两条：客户端据此知道自己离限额还有多远。 */
     private static void writeDecisionHeaders(ServerWebExchange exchange, RateLimitDecision decision) {
         exchange.getResponse().getHeaders().set(LIMIT_HEADER, decision.limit() + ", " + decision.burst());
         exchange.getResponse().getHeaders().set(REMAINING_HEADER, String.valueOf(decision.remaining()));
@@ -249,7 +249,7 @@ public class RateLimitFilter implements WebFilter {
     }
 
     /**
-     * 限流机制自身故障 → 放行。**只记日志与计数，绝不设置状态码**：一旦在这里写响应，
+     * 限流机制自身故障 → 放行。<b>只记日志与计数，绝不设置状态码</b>：一旦在这里写响应，
      * 保护层的故障就变成了数据面的 5xx，而那正是本设计要避免的方向。
      */
     private Mono<Void> failOpen(WebFilterChain chain, ServerWebExchange exchange, Throwable fault) {
@@ -266,10 +266,10 @@ public class RateLimitFilter implements WebFilter {
     }
 
     /**
-     * 降级计数（判定落在本机桶，即 Redis 不可用）。**刻意不带 {@code source} 标签**：
+     * 降级计数（判定落在本机桶，即 Redis 不可用）。<b>刻意不带 {@code source} 标签</b>：
      * 这条计数器只在判定来自本机桶时才 +1，因此 {@code source=local} 是一个常量标签 ——
      * 它不区分任何两个时间序列，只是把同一个名字又写了一遍（复审 Fix 4）。
-     * 「这一跳在哪一级判定」这个**会变**的信息由 {@link #REJECTED_METRIC} 携带，那里才是它有意义的地方。
+     * 「这一跳在哪一级判定」这个<b>会变</b>的信息由 {@link #REJECTED_METRIC} 携带，那里才是它有意义的地方。
      */
     private Counter degradedCounter() {
         return registry.counter(DEGRADED_METRIC);
@@ -280,7 +280,7 @@ public class RateLimitFilter implements WebFilter {
                 decision.degraded() ? SOURCE_LOCAL : SOURCE_REDIS);
     }
 
-    /** 降级日志节流：每个窗口最多一行，但**每个窗口都有一行**（长故障必须持续可见）。 */
+    /** 降级日志节流：每个窗口最多一行，但<b>每个窗口都有一行</b>（长故障必须持续可见）。 */
     private void logDegradedAtMostOncePerWindow() {
         long now = System.currentTimeMillis();
         long last = lastDegradeLogMillis.get();

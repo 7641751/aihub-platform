@@ -13,7 +13,7 @@ public interface MeteringSink {
     /**
      * 落库。
      *
-     * @return true = 新写入一行；false = **幂等重复**（`(request_id, created_at)` 已存在），不是错误
+     * @return true = 新写入一行；false = <b>幂等重复</b>（`(request_id, created_at)` 已存在），不是错误
      */
     boolean persist(MeteringEvent event);
 }

@@ -36,7 +36,7 @@ import static org.mockito.Mockito.when;
  * {@code StringRedisTemplate} 这一个阻塞边界换成桩），直接驱动 {@code filter(exchange, chain)}。
  *
  * <p>之所以另开一个类而不是塞进 {@code ApiKeyAuthFilterTest}：本类要求 {@link ApiKeyResolver}
- * 可被替身挡住（例如返回空 Mono），并且需要在**进程内**观测 exchange 属性；而
+ * 可被替身挡住（例如返回空 Mono），并且需要在<b>进程内</b>观测 exchange 属性；而
  * {@code ApiKeyAuthFilterTest} 的 {@code @Primary} 假 adminClient 是类级的、socket 客户端也看不见
  * exchange 属性。两者关注点不同，合在一起只会互相绑手绑脚。
  *
@@ -44,14 +44,14 @@ import static org.mockito.Mockito.when;
  * {@link ApiKeyAuthFilter#ATTRIBUTE_KEY_VIEW}（Finding E）、过滤器顺序（Finding D）、
  * 以及 Redis 阻塞 I/O 落在线程池而非 event loop 上（Finding A）。
  *
- * <p><b>（D4 起）空 Mono 兜底是对客 503</b>：空 Mono = 「判不了」，与
+ * <p><b>（BUG-D4 起）空 Mono 兜底是对客 503</b>：空 Mono = 「判不了」，与
  * {@code AdminResolution.UNAVAILABLE} 同一条诊断通道，见
  * {@link #emptyResolverResultIsStillRejectedAsServiceUnavailable}；三态 → 状态码的完整映射由
  * {@code authoritativeMissIsStillAnsweredAs401InvalidApiKey} /
  * {@code controlPlaneFaultIsAnsweredAs503ServiceUnavailable} /
  * {@code unusableViewFromAnAuthoritativeFoundIsStillAnsweredAs401} 三条钉住。
  *
- * <p>Finding A 的观测对象有一次是**发后不管**的异步调用，所以那两条断言必须先等观测点发生
+ * <p>Finding A 的观测对象有一次是<b>发后不管</b>的异步调用，所以那两条断言必须先等观测点发生
  * （{@link #awaitObserved}），否则断言本身就是在赌调度顺序。
  */
 class ApiKeyFilterContractTest {
@@ -62,7 +62,7 @@ class ApiKeyFilterContractTest {
     private static final ApiKeyView VALID_VIEW =
             new ApiKeyView("ak_valid", 7L, "acme", ApiKeyView.STATUS_ACTIVE, null, 42L);
 
-    /** 视图是 admin 的**权威结论**，但按 {@code ApiKeyView.usable()} 判定已过期 —— 对客仍然是 401，不是 503。 */
+    /** 视图是 admin 的<b>权威结论</b>，但按 {@code ApiKeyView.usable()} 判定已过期 —— 对客仍然是 401，不是 503。 */
     private static final ApiKeyView EXPIRED_VIEW =
             new ApiKeyView("ak_expired", 7L, "acme", ApiKeyView.STATUS_ACTIVE,
                     Instant.now().minusSeconds(60), 42L);
@@ -70,11 +70,11 @@ class ApiKeyFilterContractTest {
     private static final String VALID_SECRET = "valid-secret";
 
     /**
-     * 契约：{@code ApiKeyResolver} 永不返回空 Mono。这里**故意**打破契约（替身返回
-     * {@code Mono.empty()}）：空 Mono 意味着我们**判不了**这把 key 是否有效，因此请求必须拿到
+     * 契约：{@code ApiKeyResolver} 永不返回空 Mono。这里<b>故意</b>打破契约（替身返回
+     * {@code Mono.empty()}）：空 Mono 意味着我们<b>判不了</b>这把 key 是否有效，因此请求必须拿到
      * 503 + {@code service_unavailable} + OpenAI 错误体（{@code api_error}）——
      * 既不是 200（放行），也不是「没有状态码就挂住」，更不是把平台故障谎报成
-     * 401「你的 key 是错的」。{@code 503} 与 {@code 401} 一样是**拒绝**：下游链一样到不了。
+     * 401「你的 key 是错的」。{@code 503} 与 {@code 401} 一样是<b>拒绝</b>：下游链一样到不了。
      *
      * <p>把 {@code ApiKeyAuthFilter} 里的 {@code .switchIfEmpty(Mono.just(UNRESOLVED))} 删掉，
      * 本用例会以「响应状态码为 null / 链从未被调用」变红，而不是超时挂死。
@@ -96,8 +96,8 @@ class ApiKeyFilterContractTest {
     }
 
     /**
-     * 映射的红线之一：{@link AdminResolution.Status#NOT_FOUND}（admin **权威地**说没有这把 key）
-     * 必须仍然是 {@code 401 invalid_api_key} —— 本轮**只**把「结论未知」改成 503，
+     * 映射的红线之一：{@link AdminResolution.Status#NOT_FOUND}（admin <b>权威地</b>说没有这把 key）
+     * 必须仍然是 {@code 401 invalid_api_key} —— 本轮<b>只</b>把「结论未知」改成 503，
      * 不能顺手把所有失败都改成 503（那会让「你的 key 是错的」这个诊断信号消失）。
      * 下游链同样到不了。
      */
@@ -117,8 +117,8 @@ class ApiKeyFilterContractTest {
     }
 
     /**
-     * 映射的红线之二（本轮的**全部**改动就在这里）：{@link AdminResolution.Status#UNAVAILABLE}
-     * （超时 / 传输失败 / 5xx / 畸形 / 签名失败 = 我们**判不了**）必须回
+     * 映射的红线之二（本轮的<b>全部</b>改动就在这里）：{@link AdminResolution.Status#UNAVAILABLE}
+     * （超时 / 传输失败 / 5xx / 畸形 / 签名失败 = 我们<b>判不了</b>）必须回
      * {@code 503 service_unavailable} + {@code api_error}。
      *
      * <p>判别力：把过滤器里的 {@code UNAVAILABLE} 分支改回 401（见
@@ -126,7 +126,7 @@ class ApiKeyFilterContractTest {
      *
      * <p><b>这不是削弱鉴权</b>：503 仍然是拒绝 —— 下游链、限流器、路由器、上游全都没被触到，
      * 客户端也拿不到 200。变的只是诊断通道：以前平台故障伪装成「你的 key 错了」。
-     * 因此响应体里**不许**出现 {@code invalid_api_key}。
+     * 因此响应体里<b>不许</b>出现 {@code invalid_api_key}。
      */
     @Test
     void controlPlaneFaultIsAnsweredAs503ServiceUnavailable() {
@@ -148,10 +148,10 @@ class ApiKeyFilterContractTest {
     }
 
     /**
-     * 映射的红线之三：admin **权威地**给了一份视图，但视图本身 {@code usable() == false}
-     * —— 那是「我们**决定了**这把 key 无效」，仍然是 {@code 401 invalid_api_key}，**不是** 503。
+     * 映射的红线之三：admin <b>权威地</b>给了一份视图，但视图本身 {@code usable() == false}
+     * —— 那是「我们<b>决定了</b>这把 key 无效」，仍然是 {@code 401 invalid_api_key}，<b>不是</b> 503。
      *
-     * <p>本用例是**过期**那一支：{@code status} 是 {@code ACTIVE}（admin 的权威结论就是「这把 key 存在」），
+     * <p>本用例是<b>过期</b>那一支：{@code status} 是 {@code ACTIVE}（admin 的权威结论就是「这把 key 存在」），
      * 只是 {@code expireAt} 已经过去，于是 {@code usable()} 为 false。因此本用例在过滤器契约层
      * 覆盖了 {@code usable()} 的过期判据（此前只有集成级的
      * {@code ApiKeyAuthFilterTest.expiredApiKeyIsRejected} 覆盖它）。
@@ -176,7 +176,7 @@ class ApiKeyFilterContractTest {
 
     /**
      * 契约：成功鉴权必须把解析结果写进 {@code ATTRIBUTE_KEY_VIEW}（M2 计量 / M3 配额要读它）。
-     * 这是**真观测属性**：断言的是下游链拿到的那个 exchange 里的值，不是重述过滤器代码。
+     * 这是<b>真观测属性</b>：断言的是下游链拿到的那个 exchange 里的值，不是重述过滤器代码。
      * 删掉 {@code getAttributes().put(...)}，本用例立刻变红。
      */
     @Test
@@ -198,7 +198,7 @@ class ApiKeyFilterContractTest {
 
     /**
      * 契约：过滤器顺序是承重的（必须早于 handler mapping 里的路由解析）。
-     * 读的是**运行时**类上的 {@code @Order}，不是源码里那行字面量：注解被摘掉、或数值被改成
+     * 读的是<b>运行时</b>类上的 {@code @Order}，不是源码里那行字面量：注解被摘掉、或数值被改成
      * 「排在 RoutingFunction 之后」都会变红；同时断言它确实实现 {@link WebFilter}（Spring 只按这个
      * 接口收集过滤器，不实现它就等于没接线）。
      */
@@ -265,7 +265,7 @@ class ApiKeyFilterContractTest {
     }
 
     /**
-     * 替身 {@link ApiKeyResolver}，直接给出一个**三态结论** —— 这是钉「三态 → 对客状态码」映射
+     * 替身 {@link ApiKeyResolver}，直接给出一个<b>三态结论</b> —— 这是钉「三态 → 对客状态码」映射
      * 最直接的驱动方式：不起 Spring 上下文、不碰 socket、不需要 Redis。
      */
     private static ApiKeyResolver resolverReturning(AdminResolution resolution) {

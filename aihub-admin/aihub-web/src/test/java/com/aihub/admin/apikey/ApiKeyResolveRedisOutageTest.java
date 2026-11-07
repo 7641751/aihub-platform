@@ -34,18 +34,18 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * D1 的**控制面这一半**：Redis 不可用时，{@code ApiKeyService.resolve}（即
+ * BUG-D1 的<b>控制面这一半</b>：Redis 不可用时，{@code ApiKeyService.resolve}（即
  * {@code POST /internal/api-keys/resolve} 的全部业务逻辑）必须在网关给内部跳的 3 秒预算
- * （{@code AdminClientConfig.responseTimeout(3s)}）**之内**回答。
+ * （{@code AdminClientConfig.responseTimeout(3s)}）<b>之内</b>回答。
  *
  * <p><b>为什么这是一个真实缺陷的判据，而不是一条形式化的时延断言</b>：compose 全栈验收实测到的是
- * 「网关的 WARN→ERROR 恰好 3.01 秒」—— 网关在 3 秒预算到点时掐掉连接，把 admin 那条**健康**的回答
+ * 「网关的 WARN→ERROR 恰好 3.01 秒」—— 网关在 3 秒预算到点时掐掉连接，把 admin 那条<b>健康</b>的回答
  * 当成传输故障，于是 valid key 变 401。判据因此必须落在 admin 这一侧的真实耗时上：只要 resolve 的
- * 最坏耗时超过 3 秒，网关上就一定复现 D1。
+ * 最坏耗时超过 3 秒，网关上就一定复现 BUG-D1。
  *
  * <p><b>Redis 是怎么"不可用"的</b>：本类起一个只 {@code accept()}、永不回包的
  * {@link ServerSocket}（黑障）。这比"指向一个没人监听的端口"更接近实测现场 —— 后者会立刻
- * {@code ECONNREFUSED}（毫秒级），而 compose 里 {@code stop redis} 之后到旧容器 IP 的包是被**丢弃**
+ * {@code ECONNREFUSED}（毫秒级），而 compose 里 {@code stop redis} 之后到旧容器 IP 的包是被<b>丢弃</b>
  * 的：TCP 连得上、命令永远等不到回应，于是每个 Redis 命令都耗掉整个
  * {@code spring.data.redis.timeout}。实测日志里那句
  * {@code QueryTimeoutException: Redis command timed out} 正是这个形状。
@@ -65,7 +65,7 @@ import static org.mockito.Mockito.when;
  *   <tr><td>不存在的 key（只读缓存）</td><td>2420 ms</td><td>804 ms</td></tr>
  *   <tr><td>一次故障之后的第二个 resolve</td><td>4203 ms</td><td>1 ms</td></tr>
  * </table>
- * 「命中 4404 − 不存在 2420 ≈ 2 秒」正好是**回写缓存**那一跳的代价，两条一起证明读写**各自**
+ * 「命中 4404 − 不存在 2420 ≈ 2 秒」正好是<b>回写缓存</b>那一跳的代价，两条一起证明读写<b>各自</b>
  * 都在拖慢 resolve。修后残余的约 0.8 秒是 Redis 客户端那一次（唯一的）连接/命令超时，
  * 之后粘性降级生效，第二个请求 1 ms。
  */
@@ -75,7 +75,7 @@ class ApiKeyResolveRedisOutageTest {
     private static final long GATEWAY_INTERNAL_HOP_BUDGET_MILLIS = 3_000L;
 
     /**
-     * 断言阈值刻意**小于**预算的一半：判据是"admin 的回答落在预算内并留出余量"，
+     * 断言阈值刻意<b>小于</b>预算的一半：判据是"admin 的回答落在预算内并留出余量"，
      * 而不是"刚好没超 3 秒"。修前实测约 4.0s（命中）/ 2.0s（未命中），修后约 0.5s。
      */
     private static final long RESOLVE_BUDGET_MILLIS = 1_500L;
@@ -113,7 +113,7 @@ class ApiKeyResolveRedisOutageTest {
     }
 
     /**
-     * 命中路径：Redis 不可用时回源 MySQL 拿到视图，并且**回答必须落在网关的 3 秒内部跳预算内**。
+     * 命中路径：Redis 不可用时回源 MySQL 拿到视图，并且<b>回答必须落在网关的 3 秒内部跳预算内</b>。
      *
      * <p>修前这里约 4.0 秒 —— "读缓存"与"回写缓存"各等一次 2 秒的 Redis 命令超时。
      */
@@ -138,7 +138,7 @@ class ApiKeyResolveRedisOutageTest {
      * 未命中路径（MySQL 里也没有这把 key）：同样必须在预算内回答。
      *
      * <p>它的耗时与上面那条的差就是"回写缓存"那一跳的代价：修前实测这条约 2.0 秒、上面那条约 4.0 秒。
-     * 两条一起证明**读缓存与回写缓存各自都在拖慢 resolve**，而不是只有其中一跳。
+     * 两条一起证明<b>读缓存与回写缓存各自都在拖慢 resolve</b>，而不是只有其中一跳。
      */
     @Test
     void unknownKeyResolveAlsoFitsInsideTheGatewayInternalHopBudgetWhenRedisIsDown() {
@@ -156,7 +156,7 @@ class ApiKeyResolveRedisOutageTest {
     }
 
     /**
-     * 一次故障之后的**后续**请求不能再为 Redis 付钱：这正是"几百毫秒会摊到每一个冷缓存请求上"
+     * 一次故障之后的<b>后续</b>请求不能再为 Redis 付钱：这正是"几百毫秒会摊到每一个冷缓存请求上"
      * 那句话的反面。修前每一个请求都是 4 秒（每次都要撞两次超时）；修后除第一个请求外都直接走 MySQL。
      */
     @Test
@@ -176,7 +176,7 @@ class ApiKeyResolveRedisOutageTest {
 
     /**
      * 真实的 Lettuce 客户端 + 真实的 {@code StringRedisTemplate}，指向黑障端口；
-     * {@code api_key_mapper} / {@code tenant_mapper} 为替身（本类要测的是**缓存这一跳**的代价，
+     * {@code api_key_mapper} / {@code tenant_mapper} 为替身（本类要测的是<b>缓存这一跳</b>的代价，
      * MySQL 那一跳在集成测试里已有覆盖）。命令超时取生产配置里的值。
      *
      * @param found MySQL 的替身答案：{@code null} = 这个 key 在真相源里也不存在

@@ -12,14 +12,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * M5 Task 3 的**零上下文单测**：kb 消息的线格式（固定向量）、分批纯函数、拓扑声明（死信）。
+ * M5 Task 3 的<b>零上下文单测</b>：kb 消息的线格式（固定向量）、分批纯函数、拓扑声明（死信）。
  *
  * <p><b>为什么放在 {@code aihub-web} 而不是 {@code aihub-mq}</b>：{@code aihub-mq} 没有
  * {@code src/test}、其 {@code pom.xml} 也没有 {@code spring-boot-starter-test}（实测）——把测试放那边
- * **编译不过**。{@code aihub-web} 经 {@code aihub-service → aihub-mq} 的传递依赖能看到这些类。
+ * <b>编译不过</b>。{@code aihub-web} 经 {@code aihub-service → aihub-mq} 的传递依赖能看到这些类。
  *
  * <p><b>本类刻意不启 Spring</b>（纯 JUnit + AssertJ）：{@code KbTopologyConfig} 用 {@code new} 直接实例化，
- * 因此**不占 Spring 上下文预算**（套件里 {@code Tomcat started on port} 必须保持 7）。
+ * 因此<b>不占 Spring 上下文预算</b>（套件里 {@code Tomcat started on port} 必须保持 7）。
  */
 class KbMessageCodecTest {
 
@@ -32,7 +32,7 @@ class KbMessageCodecTest {
         assertThat(KbMessageCodec.decodeParse("parse:7")).isEqualTo(7L);
     }
 
-    /** 嵌入消息的线格式：{@code embed:{docId}:{seqFrom}:{seqTo}}，用**区间**表达批次（D10）。 */
+    /** 嵌入消息的线格式：{@code embed:{docId}:{seqFrom}:{seqTo}}，用<b>区间</b>表达批次（D10）。 */
     @Test
     void embedPayloadCarriesTheBatchRangeAndRoundTrips() {
         assertThat(KbMessageCodec.embed(7L, 0, 9)).isEqualTo("embed:7:0:9");
@@ -42,7 +42,7 @@ class KbMessageCodecTest {
     // ---------------------------------------------------------------- 2) 畸形/错路由载荷必须抛（进 DLQ）
 
     /**
-     * 错路由的消息必须**响亮失败**：静默 ACK 一条解不开的消息等于永久丢数据（照 {@code MeteringConsumer}
+     * 错路由的消息必须<b>响亮失败</b>：静默 ACK 一条解不开的消息等于永久丢数据（照 {@code MeteringConsumer}
      * 的纪律）。判据是「抛 {@link IllegalArgumentException}」，而不是「返回 null / 0」。
      */
     @Test
@@ -78,7 +78,7 @@ class KbMessageCodecTest {
 
     // ---------------------------------------------------------------- 3) 分批纯函数（D10）
 
-    /** 25 段 / 每批 10 ⇒ 3 批，**最后一批可以不满**（seqFrom 0,10,20；末批 seqTo=24）。 */
+    /** 25 段 / 每批 10 ⇒ 3 批，<b>最后一批可以不满</b>（seqFrom 0,10,20；末批 seqTo=24）。 */
     @Test
     void embedBatchesSplitsIntoFixedSizeRangesWithAPartialTail() {
         assertThat(KbTopology.embedBatches(7L, 25, 10))
@@ -96,7 +96,7 @@ class KbMessageCodecTest {
                 .as("0 段不该走到这里（Task 4 会先判 FAILED）").isEmpty();
     }
 
-    /** 批次大小必须为正：0/负会让 `ceil` 除零或死循环，所以**快速失败**。 */
+    /** 批次大小必须为正：0/负会让 `ceil` 除零或死循环，所以<b>快速失败</b>。 */
     @Test
     void embedBatchesRejectsNonPositiveBatchSize() {
         assertThatThrownBy(() -> KbTopology.embedBatches(7L, 5, 0))
@@ -108,7 +108,7 @@ class KbMessageCodecTest {
     // ---------------------------------------------------------------- 4) 拓扑声明（两个业务队列都挂死信）
 
     /**
-     * 两个业务队列**都**必须挂 {@code x-dead-letter-exchange} + routing key（裁定 #6 / 验收判据）。
+     * 两个业务队列<b>都</b>必须挂 {@code x-dead-letter-exchange} + routing key（裁定 #6 / 验收判据）。
      * 只挂一个会让那个阶段的坏消息无限 requeue 把 broker 与日志同时打爆。
      */
     @Test
@@ -126,7 +126,7 @@ class KbMessageCodecTest {
     }
 
     /**
-     * 声明的名字与路由键**逐字**取自 {@link KbTopology}（常量是唯一真相源：单侧改名不会编译失败，
+     * 声明的名字与路由键<b>逐字</b>取自 {@link KbTopology}（常量是唯一真相源：单侧改名不会编译失败，
      * 只会变成「消息永远投不到队列」，因此这里把「声明 == 常量」钉住）。
      */
     @Test
@@ -148,7 +148,7 @@ class KbMessageCodecTest {
         assertThat(deadLetterBinding.getRoutingKey()).isEqualTo(KbTopology.DEAD_LETTER_ROUTING_KEY);
     }
 
-    /** 队列必须是 durable 的（重启后拓扑仍在，消息不丢），且解析/嵌入是**两条**独立队列（D16）。 */
+    /** 队列必须是 durable 的（重启后拓扑仍在，消息不丢），且解析/嵌入是<b>两条</b>独立队列（D16）。 */
     @Test
     void theBusinessQueuesAreDurableAndDistinct() {
         KbTopologyConfig config = new KbTopologyConfig();

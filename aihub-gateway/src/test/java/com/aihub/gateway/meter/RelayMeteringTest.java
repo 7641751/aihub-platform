@@ -139,7 +139,7 @@ class RelayMeteringTest {
      * M2 决策 8 留下的缺口（{@code api_key_id} 恒为 NULL）在 Task 11 关闭：数值主键取自
      * {@code ApiKeyView.apiKeyId()}（Task 2 就已就位的共享契约）。
      *
-     * <p>{@code channel_id} 在这里仍然是 NULL —— 本用例没有经过控制器，**没有任何候选被选中**。
+     * <p>{@code channel_id} 在这里仍然是 NULL —— 本用例没有经过控制器，<b>没有任何候选被选中</b>。
      * 「谁服务了这次请求」只能由 {@code onChannelSelected} 给出（见下面那条故障转移用例）。
      */
     @Test
@@ -178,7 +178,7 @@ class RelayMeteringTest {
     }
 
     /**
-     * 视图存在但**没有**数值主键（契约允许的 {@code null}，例如 Task 2 之前铸造的 key）时，
+     * 视图存在但<b>没有</b>数值主键（契约允许的 {@code null}，例如 Task 2 之前铸造的 key）时，
      * {@code api_key_id} 保持 NULL：宁可空着，也不能编一个 id 让用量聚合到别人头上。
      */
     @Test
@@ -193,10 +193,10 @@ class RelayMeteringTest {
     }
 
     /**
-     * 决策 15：超长 model **只**在计量事件里被截断（{@code request_log.model} 是 {@code VARCHAR(128)}），
+     * 决策 15：超长 model <b>只</b>在计量事件里被截断（{@code request_log.model} 是 {@code VARCHAR(128)}），
      * 否则这一行 INSERT 会失败 → 重投 → 死信队列，而 DLQ 是任何持合法 API key 的客户端都能触碰的入口。
      *
-     * <p>事件里剩下的是**前缀**（前 128 个字符），不是摘要也不是空值 —— 前缀才能让人在库里认出是哪个模型。
+     * <p>事件里剩下的是<b>前缀</b>（前 128 个字符），不是摘要也不是空值 —— 前缀才能让人在库里认出是哪个模型。
      * 截断只发生在这里：转发给上游的请求体由 {@code RelayRequestBody} 原样保留（端到端证据见
      * {@code RelayMeteringFlowTest#oversizedModelIsTruncatedInTheEventButForwardedVerbatim}）。
      */
@@ -218,9 +218,9 @@ class RelayMeteringTest {
     }
 
     /**
-     * 多渠道（M3）起事件里必须带上**实际服务**的那条渠道。判别性在于第二次选择：故障转移会在一次
+     * 多渠道（M3）起事件里必须带上<b>实际服务</b>的那条渠道。判别性在于第二次选择：故障转移会在一次
      * 请求里走过好几条候选，若实现用 {@code compareAndSet(null, ...)}（或只记首选），事件里留下的是
-     * **首选**那条（11），而真正产生响应的那条是 12 —— {@code request_log.channel_id} 从此与事实不符。
+     * <b>首选</b>那条（11），而真正产生响应的那条是 12 —— {@code request_log.channel_id} 从此与事实不符。
      */
     @Test
     void theChannelThatServedTheRequestIsCarriedIntoTheEvent() {

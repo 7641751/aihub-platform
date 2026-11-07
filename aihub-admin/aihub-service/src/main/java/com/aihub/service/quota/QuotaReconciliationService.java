@@ -23,22 +23,22 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * 每日对账（决策 D12）：按 {@code request_log} **重算**某一天的 {@code billing_daily}，并把
- * 「周期至今的重算用量」与 Redis 预扣桶里的估算用量比对，**只报告偏差，绝不改账**。
+ * 每日对账（决策 D12）：按 {@code request_log} <b>重算</b>某一天的 {@code billing_daily}，并把
+ * 「周期至今的重算用量」与 Redis 预扣桶里的估算用量比对，<b>只报告偏差，绝不改账</b>。
  *
  * <p><b>为什么是「报告」而不是「修正」（D12）</b>：计量是「至少一次 + 幂等」，02:00 时
- * {@code request_log} 可能还没补全（DLQ 延迟到达）。自动改账会在这种时候把**正确**的账改**错**。
- * 先报告、人工确认、再执行修正是更安全的顺序。因此本类**从不**写 {@code quota.token_used} /
+ * {@code request_log} 可能还没补全（DLQ 延迟到达）。自动改账会在这种时候把<b>正确</b>的账改<b>错</b>。
+ * 先报告、人工确认、再执行修正是更安全的顺序。因此本类<b>从不</b>写 {@code quota.token_used} /
  * {@code request_used}（有 {@code QuotaReconciliationTest#aDeviationBeyondTheToleranceIsCountedAndAuditedButDoesNotChangeTheQuota}
  * 钉住）。
  *
  * <h2>⚠️ 两个不同 scope（裁定 1：先定死口径）</h2>
- * <p>被重算的是**一天**，而 Redis 桶 {@code aihub:quota:<tenant>:<YYYYMM>} 装的是**当月累计**。
- * 把「这一天的 tokens」直接与桶比，**每月除最后一天外都会误报**。因此：
+ * <p>被重算的是<b>一天</b>，而 Redis 桶 {@code aihub:quota:<tenant>:<YYYYMM>} 装的是<b>当月累计</b>。
+ * 把「这一天的 tokens」直接与桶比，<b>每月除最后一天外都会误报</b>。因此：
  * <ul>
- *   <li>{@link ReconciliationReport#requests()} / {@link ReconciliationReport#tokens()} = **当天**的重算值
+ *   <li>{@link ReconciliationReport#requests()} / {@link ReconciliationReport#tokens()} = <b>当天</b>的重算值
  *       （跨全部租户，来自 {@code billing_daily} 的该日合计）；</li>
- *   <li>{@link ReconciliationReport#mismatches()} = **周期至今**的口径
+ *   <li>{@link ReconciliationReport#mismatches()} = <b>周期至今</b>的口径
  *       （{@code SUM(billing_daily.tokens WHERE stat_date ∈ [周期首日, statDate])} vs 桶的 {@code tok}）。</li>
  * </ul>
  * 两个 scope 刻意不同，且{@code aMatchingPeriodToDateIsNotReportedEvenWhenTheDayItselfDiffers} 钉住
@@ -46,19 +46,19 @@ import java.util.Objects;
  *
  * <h2>⚠️ 偏差判据（裁定 5，含除零）</h2>
  * <p>{@code ratio = |周期至今重算值 − 桶值| / max(周期至今重算值, 1)}，{@code ratio > tolerance} 才算
- * （**等于不算**，边界只定义一次）。**当重算值为 0 而桶值 &gt; 0 时必须仍能报出** —— 那是
- * 「预扣了但没落账」，最严重的一类，**不许**把它当除零静默跳过（分母的 {@code max(..., 1)} 就是为此）。
+ * （<b>等于不算</b>，边界只定义一次）。<b>当重算值为 0 而桶值 &gt; 0 时必须仍能报出</b> —— 那是
+ * 「预扣了但没落账」，最严重的一类，<b>不许</b>把它当除零静默跳过（分母的 {@code max(..., 1)} 就是为此）。
  *
  * <h2>候选租户（只比对「受限」的租户）</h2>
- * <p>候选集 = **该 period 下两个限额任一为正**的 {@code quota} 行。理由：桶只对受限租户创建
+ * <p>候选集 = <b>该 period 下两个限额任一为正</b>的 {@code quota} 行。理由：桶只对受限租户创建
  * （{@code 0 = 不限}，决策 D15 —— 不限的租户连记账都不做，见 {@code InternalQuotaController}）。
  * 若把「不限」的租户也拉进来，其「有落账、无桶」会被算成 100% 偏差，纯噪声。
  * <b>已知边界</b>：某租户的 {@code quota} 行被删（转为不限）但桶里仍残留 {@code tok} 时，本类不再比它 ——
  * 该窗口里的残留会漏报，登记为边界而非假装不存在。
  *
  * <h2>已知近似值（裁定 9 / CONVENTIONS §6.5）</h2>
- * <p>{@code request_log} 里 {@code error_code = usage_missing / client_disconnected} 的行是**已知近似值**，
- * 重算**不去区分**它们 —— 于是偏差计数器**天然包含**这部分近似数据。
+ * <p>{@code request_log} 里 {@code error_code = usage_missing / client_disconnected} 的行是<b>已知近似值</b>，
+ * 重算<b>不去区分</b>它们 —— 于是偏差计数器<b>天然包含</b>这部分近似数据。
  * 另外 {@code billing_daily.cost} 由重算语句固定写 {@code 0}（本里程碑没有单价表）。
  *
  * <h2>时间口径</h2>
@@ -113,18 +113,18 @@ public class QuotaReconciliationService {
     /**
      * 对账报告。
      *
-     * @param requests   **当天**的重算请求数（跨全部租户）
-     * @param tokens     **当天**的重算 token 数（跨全部租户）
-     * @param mismatches **周期至今**口径下超阈值的租户 → ratio（{@code ratio > tolerance} 才在表内）
+     * @param requests   <b>当天</b>的重算请求数（跨全部租户）
+     * @param tokens     <b>当天</b>的重算 token 数（跨全部租户）
+     * @param mismatches <b>周期至今</b>口径下超阈值的租户 → ratio（{@code ratio > tolerance} 才在表内）
      */
     public record ReconciliationReport(long requests, long tokens, Map<Long, Double> mismatches) {
     }
 
     /**
-     * 重算 {@code statDate} 一天的 {@code billing_daily}，并按**周期至今**口径比对偏差。
+     * 重算 {@code statDate} 一天的 {@code billing_daily}，并按<b>周期至今</b>口径比对偏差。
      *
      * @param statDate UTC 自然日（由调用方按 UTC 折算；本类不做 {@code now()} —— 见 {@code QuotaReconciliationJob}）
-     * @return 非空报告；{@code mismatches} 为空表示没有租户超阈值（此时**不写审计行、不加偏差计数**）
+     * @return 非空报告；{@code mismatches} 为空表示没有租户超阈值（此时<b>不写审计行、不加偏差计数</b>）
      */
     public ReconciliationReport reconcile(LocalDate statDate) {
         Objects.requireNonNull(statDate, "statDate");
@@ -172,7 +172,7 @@ public class QuotaReconciliationService {
 
     // ---------------------------------------------------------------- 内部
 
-    /** 该 period 下**受限**的配额行（两个限额任一为正）。不限的租户没有桶，拉进来只会制造噪声。 */
+    /** 该 period 下<b>受限</b>的配额行（两个限额任一为正）。不限的租户没有桶，拉进来只会制造噪声。 */
     private List<QuotaEntity> limitedQuotasOf(String period) {
         return quotaMapper.selectList(new LambdaQueryWrapper<QuotaEntity>().eq(QuotaEntity::getPeriod, period))
                 .stream()

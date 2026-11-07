@@ -20,9 +20,9 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * 桶 key 的**布局**契约，两级各一条（控制器评审 G4）。
+ * 桶 key 的<b>布局</b>契约，两级各一条（控制器评审 G4）。
  *
- * <p>两级存储的键前缀**刻意不同**，因为一个 key 的字符串本身就应当说明它在哪一级：
+ * <p>两级存储的键前缀<b>刻意不同</b>，因为一个 key 的字符串本身就应当说明它在哪一级：
  * <ul>
  *   <li>Redis 桶：{@code aihub:ratelimit:{tenantId}:{sha256}}（决策 8），前缀由 {@link RateLimiter}
  *       在 Redis 那一侧加上；</li>
@@ -30,19 +30,19 @@ import static org.mockito.Mockito.when;
  *       在它自己那一侧加上。</li>
  * </ul>
  *
- * <p>G4 的判据是**本机键上恰好有一个 {@code local:ratelimit:} 前缀**，而不是「两个前缀叠在同一串里」
+ * <p>G4 的判据是<b>本机键上恰好有一个 {@code local:ratelimit:} 前缀</b>，而不是「两个前缀叠在同一串里」
  * （{@code local:ratelimit:aihub:ratelimit:…}）。因此 {@link RateLimiter#acquire} 交给本机桶的是
- * **身份**（{@code {tenantId}:{keyHash}}），Redis 布局那一份键是 Redis 路径自己的事 ——
+ * <b>身份</b>（{@code {tenantId}:{keyHash}}），Redis 布局那一份键是 Redis 路径自己的事 ——
  * 前缀属于各自的存储，谁都不复用对方那一个。桶 key 没有任何解析方（只用于查表），因此改布局是安全的。
  */
 class BucketKeyLayoutTest {
 
     /**
-     * G4 的正面钉子：**门面**交给本机桶的是身份（{@code tenantId:hash}），本机前缀由本机桶自己补一次，
+     * G4 的正面钉子：<b>门面</b>交给本机桶的是身份（{@code tenantId:hash}），本机前缀由本机桶自己补一次，
      * 于是本机键里恰好只有一个 {@code local:ratelimit:} 前缀 —— {@code aihub:ratelimit:}（Redis 布局的
-     * 身份）**不出现**在它里面。
+     * 身份）<b>不出现</b>在它里面。
      * <p>注意不能直接对 {@link LocalRateLimiter#tryConsume} 传一个已带本机前缀的键来断言 ——
-     * 那一层**本来就该**再补一次（它不知道调用方是谁），那样断言的只是一句同义反复。
+     * 那一层<b>本来就该</b>再补一次（它不知道调用方是谁），那样断言的只是一句同义反复。
      * 契约在门面这一层，所以钉子也必须在门面这一层。
      */
     @SuppressWarnings("unchecked")
@@ -66,7 +66,7 @@ class BucketKeyLayoutTest {
     }
 
     /**
-     * 前缀必须是**另一个**前缀：两个存储混用同一串时，日志与抓包里无法判断一个 key 在哪一级。
+     * 前缀必须是<b>另一个</b>前缀：两个存储混用同一串时，日志与抓包里无法判断一个 key 在哪一级。
      * 这条不是风格问题 —— 它是 {@link LocalRateLimiter#KEY_PREFIX} 存在的全部理由。
      */
     @Test
@@ -76,7 +76,7 @@ class BucketKeyLayoutTest {
     }
 
     /**
-     * 门面 → 本机桶这条链的**真实**键：死端口的替身版（不需要 Lettuce）。
+     * 门面 → 本机桶这条链的<b>真实</b>键：死端口的替身版（不需要 Lettuce）。
      * 断言的是「桶布局是 tenant + sha256(secret)」而不是「tenant + apiKeyId」（决策 7 与决策 8 是
      * 两个维度，混用会让 key 级策略把桶也切开）。
      */
@@ -97,8 +97,8 @@ class BucketKeyLayoutTest {
     }
 
     /**
-     * 端到端形状：真门面 + 真 Lettuce 客户端指向死端口 → 本机桶，且**同一个
-     * {@code (tenantId, keyHash)} 只产生一个桶**。它证明的是「门面到本机桶这条链真的接通了、
+     * 端到端形状：真门面 + 真 Lettuce 客户端指向死端口 → 本机桶，且<b>同一个
+     * {@code (tenantId, keyHash)} 只产生一个桶</b>。它证明的是「门面到本机桶这条链真的接通了、
      * 维度也没多算」，同时把本机键的字面量钉在真实 Lettuce 路径上。
      */
     @Test

@@ -21,17 +21,17 @@ import java.time.Duration;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * M5 Task 7 的**线上契约**：PDF 走 PDFBox 抽文本层 —— 有文本层就正常入库，**没有**就 `FAILED("无可提取文本")`。
+ * M5 Task 7 的<b>线上契约</b>：PDF 走 PDFBox 抽文本层 —— 有文本层就正常入库，<b>没有</b>就 `FAILED("无可提取文本")`。
  *
- * <p><b>夹具是"在测试里现场生成"的，不提交任何 `.pdf`</b>（控制器 2026-10-05 订正）：这样夹具是**可读、可复核、
- * 可复现**的代码，而不是一个来路不明的二进制 blob（本项目一贯不提交非文本产物）。两份夹具：
+ * <p><b>夹具是"在测试里现场生成"的，不提交任何 `.pdf`</b>（控制器 2026-10-05 订正）：这样夹具是<b>可读、可复核、
+ * 可复现</b>的代码，而不是一个来路不明的二进制 blob（本项目一贯不提交非文本产物）。两份夹具：
  * <ul>
  *   <li>{@link #textPdf(int)} —— A4 页 + 若干行 HELVETICA 文本（文本层存在）；</li>
- *   <li>{@link #pdfWithoutTextLayer()} —— A4 页 + **一个矩形**、不写任何文本算子（等价于扫描件的 YAGNI 形态）。</li>
+ *   <li>{@link #pdfWithoutTextLayer()} —— A4 页 + <b>一个矩形</b>、不写任何文本算子（等价于扫描件的 YAGNI 形态）。</li>
  * </ul>
  *
- * <p>复用**已有** Spring 上下文（{@code @TestPropertySource} 那把字面量与其它 kb 用例逐字相同、**不加** {@code @Import}）
- * ⇒ 判据是全量套件 {@code Tomcat started on port} 仍是 **7**。断言一律走**数据库状态**，不抢队列。
+ * <p>复用<b>已有</b> Spring 上下文（{@code @TestPropertySource} 那把字面量与其它 kb 用例逐字相同、<b>不加</b> {@code @Import}）
+ * ⇒ 判据是全量套件 {@code Tomcat started on port} 仍是 <b>7</b>。断言一律走<b>数据库状态</b>，不抢队列。
  */
 @TestPropertySource(properties = {
         "aihub.console.secret=console-it-secret-0123456789abcdefghijklmn"
@@ -100,7 +100,7 @@ class KbPdfIntegrationTest extends KbIntegrationTestBase {
         }
     }
 
-    /** A4 单页 + 一个填充矩形，**不写任何文本算子** ⇒ 抽取结果为空 ⇒ D14 的"无可提取文本"。 */
+    /** A4 单页 + 一个填充矩形，<b>不写任何文本算子</b> ⇒ 抽取结果为空 ⇒ D14 的"无可提取文本"。 */
     private static byte[] pdfWithoutTextLayer() throws IOException {
         try (PDDocument document = new PDDocument()) {
             PDPage page = new PDPage(PDRectangle.A4);

@@ -36,18 +36,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 
 /**
- * M5 Task 3 的**线上契约**：上传事务**提交后**，一条 {@code parse:{docId}} 真的被投出去并被解析。
+ * M5 Task 3 的<b>线上契约</b>：上传事务<b>提交后</b>，一条 {@code parse:{docId}} 真的被投出去并被解析。
  *
- * <p><b>真容器 + 真 HTTP + 真令牌 + 真 broker</b>，复用**已有**的 Spring 上下文（继承
+ * <p><b>真容器 + 真 HTTP + 真令牌 + 真 broker</b>，复用<b>已有</b>的 Spring 上下文（继承
  * {@link AbstractIntegrationTest}）。{@code @TestPropertySource} 那把字面量与 Task 2 的
- * {@code KbUploadIntegrationTest} / {@code ConsoleLoginIntegrationTest} **逐字相同**、且本类
- * **不加** {@code @Import} ⇒ 共用同一个上下文（判据：全量套件 {@code Tomcat started on port} 仍是 7）。
+ * {@code KbUploadIntegrationTest} / {@code ConsoleLoginIntegrationTest} <b>逐字相同</b>、且本类
+ * <b>不加</b> {@code @Import} ⇒ 共用同一个上下文（判据：全量套件 {@code Tomcat started on port} 仍是 7）。
  *
  * <p><b>⚠️ 判据自 Task 4 起改为数据库状态（计划 Task 3 javadoc 已登记）</b>：Task 4 的
- * {@code KbParseConsumer} 会在**每个** Spring 上下文里订阅 {@code kb.parse}，于是"从队列收消息"的断言
+ * {@code KbParseConsumer} 会在<b>每个</b> Spring 上下文里订阅 {@code kb.parse}，于是"从队列收消息"的断言
  * 会被消费者抢走（实测：这两条原断言在 Task 4 后稳定红 —— {@code Expecting value to be true but was false}
- * 于 {@code awaitParseMessageFor}）。⇒ 改成等**数据库状态**：{@code kb_document.status} 走到
- * {@code READY} 就等于"消息已发出**且**被消费**且**已嵌入"，比"盯着队列"既稳又不与消费者抢。
+ * 于 {@code awaitParseMessageFor}）。⇒ 改成等<b>数据库状态</b>：{@code kb_document.status} 走到
+ * {@code READY} 就等于"消息已发出<b>且</b>被消费<b>且</b>已嵌入"，比"盯着队列"既稳又不与消费者抢。
  */
 @TestPropertySource(properties = {
         "aihub.console.secret=console-it-secret-0123456789abcdefghijklmn"
@@ -101,10 +101,10 @@ class KbPublishIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 控制器裁决（2026-10-03）：**重复上传也会重新触发解析** —— 这是"发布丢了 ⇒ 行停在 PENDING"的
-     * **唯一现成补救手段**（DLQ 只管**消费端**失败、计数器只**观测**，两者都不会把消息重新推下去）。
+     * 控制器裁决（2026-10-03）：<b>重复上传也会重新触发解析</b> —— 这是"发布丢了 ⇒ 行停在 PENDING"的
+     * <b>唯一现成补救手段</b>（DLQ 只管<b>消费端</b>失败、计数器只<b>观测</b>，两者都不会把消息重新推下去）。
      *
-     * <p>代价如实登记：对一份**已经 READY** 的文档再传一次，会多做一次解析（有界，且 Task 4/5 的写入按设计幂等）。
+     * <p>代价如实登记：对一份<b>已经 READY</b> 的文档再传一次，会多做一次解析（有界，且 Task 4/5 的写入按设计幂等）。
      */
     @Test
     void reUploadingTheSameBytesPublishesAgainSoAStuckRowCanBeRetried() throws Exception {

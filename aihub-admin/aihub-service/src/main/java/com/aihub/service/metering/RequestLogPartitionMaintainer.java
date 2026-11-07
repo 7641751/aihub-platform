@@ -17,13 +17,13 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
- * {@code request_log} 的月分区维护：**启动补齐 + 每日定时**（计划「决策登记」第 3/11/15 条）。
+ * {@code request_log} 的月分区维护：<b>启动补齐 + 每日定时</b>（计划「决策登记」第 3/11/15 条）。
  *
  * <p>为什么必须有：V1 只建到 {@code p202611}，之后所有行都会静默落进 {@code pmax} ——
  * 查询还能查到（所以不会有人发现），但按月归档/裁剪分区的路被堵死，pmax 会无限膨胀。
  * 「静默」是这里唯一的敌人，因此每次补齐都打日志，补不齐就抛。
  *
- * <p>时间基准是 **UTC**（与 {@code created_at} 的存储口径一致），不要用 JVM 默认时区。
+ * <p>时间基准是 <b>UTC</b>（与 {@code created_at} 的存储口径一致），不要用 JVM 默认时区。
  */
 @Component
 public class RequestLogPartitionMaintainer implements ApplicationRunner {
@@ -61,7 +61,7 @@ public class RequestLogPartitionMaintainer implements ApplicationRunner {
     }
 
     /**
-     * 保证 {@code [today, today + monthsAhead]} 的每个自然月都有**专属**分区。
+     * 保证 {@code [today, today + monthsAhead]} 的每个自然月都有<b>专属</b>分区。
      *
      * @throws IllegalStateException 表结构不符（缺 pmax）或补建后仍不覆盖
      */

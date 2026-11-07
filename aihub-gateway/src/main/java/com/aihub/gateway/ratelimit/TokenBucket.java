@@ -3,9 +3,9 @@ package com.aihub.gateway.ratelimit;
 import com.aihub.common.ratelimit.RateLimitScript;
 
 /**
- * 令牌桶的**纯算术**。Redis Lua 脚本（{@link RateLimitScript} 里的 {@code SCRIPT}）与 Redis 不可用
+ * 令牌桶的<b>纯算术</b>。Redis Lua 脚本（{@link RateLimitScript} 里的 {@code SCRIPT}）与 Redis 不可用
  * 时的本机实现（{@link LocalRateLimiter}）都遵守它，因此「补充速率 / 封顶 / 退避时间」在降级前后
- * **逐字一致** —— 这是设计文档 §9「限流降级为本地令牌桶（单机近似）」能被称为「近似」而不是
+ * <b>逐字一致</b> —— 这是设计文档 §9「限流降级为本地令牌桶（单机近似）」能被称为「近似」而不是
  * 「另一种算法」的前提。
  *
  * <p><b>为什么用整数毫令牌</b>：Lua 的数字只有 double，Java 侧如果用 {@code double} 累加，
@@ -17,17 +17,17 @@ import com.aihub.common.ratelimit.RateLimitScript;
  *
  * <h2>「新桶是满的」是一条独立规则，不能靠「从 0 号毫秒补充」凑出来</h2>
  * 新桶（{@code state == null}；Lua 侧是 Hash 不存在，即 {@code HGET} 返回 {@code false}）必须
- * **直接以满桶起步**：{@code tokensMilli = capacity * 1000}。不能只把它当成 {@code (0, 0)} 再靠
+ * <b>直接以满桶起步</b>：{@code tokensMilli = capacity * 1000}。不能只把它当成 {@code (0, 0)} 再靠
  * {@code elapsed * qps} 补出来，原因有两条：
  * <ul>
  *   <li>{@code qps = 0} 时永远补不出令牌，于是「只能突发 burst 次」会退化成「一次都不放行」——
  *       这直接违反决策 7 对 {@code burst} 的定义（qps=0 时仍允许 burst 次突发）；</li>
- *   <li>更普遍地，{@code now * qps} 够不够满取决于时钟的**绝对值**。生产时钟是 epoch 毫秒
+ *   <li>更普遍地，{@code now * qps} 够不够满取决于时钟的<b>绝对值</b>。生产时钟是 epoch 毫秒
  *       （约 1.7e12），任意正 qps 都够；但注入的假时钟（例如从 1000 开始）配小 qps 就不够了 ——
  *       于是「新桶是满的」会变成一条只在生产成立的隐式巧合，测试里换个时钟就变红。</li>
  * </ul>
  *
- * <p>因此 {@code null} 与 {@code (0, 0)} 是**两个不同的语义**：前者是「这个 key 从没见过」（满桶），
+ * <p>因此 {@code null} 与 {@code (0, 0)} 是<b>两个不同的语义</b>：前者是「这个 key 从没见过」（满桶），
  * 后者是一个真实存在的空状态（0 个令牌、基准时刻为 0），在 {@code qps = 0} 下它就是 0 个令牌。
  */
 public final class TokenBucket {
@@ -41,17 +41,17 @@ public final class TokenBucket {
     }
 
     /**
-     * 桶的状态：{@code tokensMilli} 是**当前令牌数 × 1000**，{@code lastRefillMillis} 是上次补充时刻。
+     * 桶的状态：{@code tokensMilli} 是<b>当前令牌数 × 1000</b>，{@code lastRefillMillis} 是上次补充时刻。
      */
     public record State(long tokensMilli, long lastRefillMillis) {
     }
 
     /**
-     * 尝试消费一个令牌。**纯函数**：不修改传入的 state，也不读任何全局状态 —— 同样的输入必得同样的
+     * 尝试消费一个令牌。<b>纯函数</b>：不修改传入的 state，也不读任何全局状态 —— 同样的输入必得同样的
      * 结果。因此「连续消费」必须由调用方把 {@link #nextState} 的结果喂回来（Redis 侧则由一个原子
      * 脚本在一次往返里完成读改写）。
      *
-     * <p>时钟回拨（{@code now < lastRefill}）时**不补充**也不报错，只把时间戳前移 —— 也就是说回拨
+     * <p>时钟回拨（{@code now < lastRefill}）时<b>不补充</b>也不报错，只把时间戳前移 —— 也就是说回拨
      * 期间桶只减不增。这比「按负的 elapsed 扣令牌」安全：后者会让桶瞬间变成负数，随后需要一个
      * 很长的窗口才能恢复到能放行。
      *

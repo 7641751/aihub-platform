@@ -17,24 +17,24 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 钉住**集成套件自己**跑的连接时区方言。
+ * 钉住<b>集成套件自己</b>跑的连接时区方言。
  *
  * <p>为什么需要这条用例（2026-09-29 独立评审 I-1）：{@code connectionTimeZone} /
  * {@code serverTimezone} 这个参数决定驱动怎么把 {@code datetime(3)} 的墙上时间解释成瞬时。
  * 生产 URL 钉了 {@code serverTimezone=UTC}（{@code application.yml:8} / {@code docker-compose.yml:65}），
- * 而在这条用例出现之前，测试 URL 是 Testcontainers 返回的**裸 URL**（无该参数 ⇒ LOCAL ⇒ 按
- * **JVM 默认时区**解释）—— 两个方言**相反**，却没有任何地方写下来。结果是：那些「时区基准」用例
+ * 而在这条用例出现之前，测试 URL 是 Testcontainers 返回的<b>裸 URL</b>（无该参数 ⇒ LOCAL ⇒ 按
+ * <b>JVM 默认时区</b>解释）—— 两个方言<b>相反</b>，却没有任何地方写下来。结果是：那些「时区基准」用例
  * 的红/绿取决于跑测试的 JVM 时区，谁也说不清套件到底在断言哪个环境。
  *
- * <p>现在 {@link AbstractIntegrationTest} 把方言显式钉成生产方（UTC），本类负责让它**可观测**：
+ * <p>现在 {@link AbstractIntegrationTest} 把方言显式钉成生产方（UTC），本类负责让它<b>可观测</b>：
  * <ol>
  *   <li><b>字符串级</b>：{@code spring.datasource.url} 必须带 {@code serverTimezone=UTC}。
- *       这条在**任何** JVM 时区下都成立、也能抓到有人把参数删掉。</li>
+ *       这条在<b>任何</b> JVM 时区下都成立、也能抓到有人把参数删掉。</li>
  *   <li><b>行为级</b>：驱动真的按 UTC 解释 {@code datetime}（{@code Timestamp} 载体的读数 = 该墙上时间的
  *       UTC 折）。这条在非 UTC 的 JVM 上才与方言 LOCAL 可区分 —— JVM 自己就是 UTC 时两种方言行为完全一致，
  *       见 {@link #suiteRunsOnTheProductionUtcConnectionFlavourNotOnTheJvmZoneDefault()} 的注释。</li>
  *   <li><b>环境级</b>：数据库会话时钟就是 UTC（{@code now(3)} 与 {@code utc_timestamp(3)} 一致）——
- *       这是 V1 三张配置表的 {@code DEFAULT CURRENT_TIMESTAMP(3)} 写 UTC 墙上时间的**唯一**依据，
+ *       这是 V1 三张配置表的 {@code DEFAULT CURRENT_TIMESTAMP(3)} 写 UTC 墙上时间的<b>唯一</b>依据，
  *       而应用侧没有任何东西钉它（登记为独立评审 I-3 的残余风险）。</li>
  * </ol>
  */

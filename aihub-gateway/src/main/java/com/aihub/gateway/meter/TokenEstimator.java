@@ -4,7 +4,7 @@ package com.aihub.gateway.meter;
  * 无 usage 时的 token 估算。口径取自 DeepSeek 官方文档：1 个英文字符 ≈ 0.3 token、
  * 1 个汉字 ≈ 0.6 token，向上取整（非空内容至少 1）。
  *
- * <p>它**只是估算**：只在拿不到上游 usage 时使用，落库时由
+ * <p>它<b>只是估算</b>：只在拿不到上游 usage 时使用，落库时由
  * {@code error_code = usage_missing} / {@code client_disconnected} 标出这个事实。
  * 设计文档 §8.1 ⑤ 明确要求「客户端断连 → 按已收 chunk 估算 token」。
  */

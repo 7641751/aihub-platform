@@ -21,14 +21,14 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * T1（M6 压测桩）的契约测试：把 {@code load/stub/ChatStub.java} 当作**单文件程序**起起来
- * （`java <file>`，与 compose 里用的启动方式**同一份命令**），断言它满足压测所需的最小契约。
+ * T1（M6 压测桩）的契约测试：把 {@code load/stub/ChatStub.java} 当作<b>单文件程序</b>起起来
+ * （`java <file>`，与 compose 里用的启动方式<b>同一份命令</b>），断言它满足压测所需的最小契约。
  *
- * <p>刻意**不起 Spring**（不占上下文预算）：这是一个纯 HTTP 黑盒测试。
+ * <p>刻意<b>不起 Spring</b>（不占上下文预算）：这是一个纯 HTTP 黑盒测试。
  *
  * <p>为什么这些断言是"契约"而不是"实现细节"：压测的每一类数据都依赖它们 ——
- * 非流式数据要合规的 `usage`（计量对账），流式 TTFT 要**逐块 SSE**，
- * "流中途断开"的故障注入要能在**没有 `[DONE]`** 的情况下收尾。
+ * 非流式数据要合规的 `usage`（计量对账），流式 TTFT 要<b>逐块 SSE</b>，
+ * "流中途断开"的故障注入要能在<b>没有 `[DONE]`</b> 的情况下收尾。
  */
 class ChatStubContractTest {
 

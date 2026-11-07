@@ -22,11 +22,11 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * admin 的配置快照接口在**网关这一侧**的契约：签名请求 + 响应解析。
+ * admin 的配置快照接口在<b>网关这一侧</b>的契约：签名请求 + 响应解析。
  *
- * <p>为什么必须有这个类：{@code AdminClient.Http.parseSnapshot} 此前**没有任何执行覆盖**
+ * <p>为什么必须有这个类：{@code AdminClient.Http.parseSnapshot} 此前<b>没有任何执行覆盖</b>
  * ——它按字面键名读 JSON（{@code data.channels[].apiKeyCipher} 等），一旦 admin 侧的序列化形态变了
- * （重命名 record 分量、换 naming strategy、包一层只有 admin 认识的 DTO），网关**不会报错**，
+ * （重命名 record 分量、换 naming strategy、包一层只有 admin 认识的 DTO），网关<b>不会报错</b>，
  * 只会静默拿到一份空快照并回落遗留单渠道。这里用「Jackson 序列化共享 record」这件与 admin 完全相同的
  * 机制造出响应体，再让它过一遍真实解析器，等价于一次线上往返。
  *

@@ -35,11 +35,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * admin 侧的**发布方**（D4/D5）：抬水位 + 把失效消息真的投到 {@code aihub:config:invalidate}。
+ * admin 侧的<b>发布方</b>（M4 决策 4 / 决策 5）：抬水位 + 把失效消息真的投到 {@code aihub:config:invalidate}。
  *
  * <p><b>为什么这是一条真实的订阅</b>：成功路径不断言「方法被调用过」（那只是 Mockito 的断言），
  * 而是在真 Redis（{@code AbstractIntegrationTest} 的 Testcontainers 单例）上装一条
- * {@link RedisMessageListenerContainer}，断言**线上真的出现了那条消息**、且它的版本号等于
+ * {@link RedisMessageListenerContainer}，断言<b>线上真的出现了那条消息</b>、且它的版本号等于
  * {@code bumpAndPublish} 的返回值。跨服务契约的价值全在这里：gateway 侧订阅方（Task 4）看到的
  * 字节必须能被同一个 codec 解开。仅本任务允许这样装订阅来断言「消息发出去了」。
  *
@@ -50,11 +50,11 @@ import static org.mockito.Mockito.when;
  *
  * <p>四个用例都不需要额外的 Docker 容器（复用基类的单例）：成功路径与「无活动事务立即发布」路径用真
  * Redis，两条失败路径（Redis 抛异常、reason 为空被 codec 拒绝）用替身 Redis —— 「发布失败绝不让业务写失败」
- * 是**异常路径**，不能靠真 Redis 去制造。
+ * 是<b>异常路径</b>，不能靠真 Redis 去制造。
  */
 class ConfigChangePublisherTest extends AbstractIntegrationTest {
 
-    /** 订阅建立的判据：Spring 的监听容器是**异步**订阅的，见 {@link #awaitSubscription}。 */
+    /** 订阅建立的判据：Spring 的监听容器是<b>异步</b>订阅的，见 {@link #awaitSubscription}。 */
     private static final Duration SUBSCRIPTION_TIMEOUT = Duration.ofSeconds(5);
 
     private static final String SUBSCRIPTION_PROBE = "subscription-probe";
@@ -97,7 +97,7 @@ class ConfigChangePublisherTest extends AbstractIntegrationTest {
     }
 
     /**
-     * {@code publishAfterCommit} 的**另一个分支**：没有活动事务时必须**立即**抬水位并广播，绝不静默
+     * {@code publishAfterCommit} 的<b>另一个分支</b>：没有活动事务时必须<b>立即</b>抬水位并广播，绝不静默
      * 不发布（{@code ConfigChangePublisher} 的 javadoc 把两个分支都写成「被钉死」，而这条直到现在没有
      * 任何用例 —— 集成测试里的写路径全部经过 {@code @Transactional} 服务，只覆盖 after-commit 那一半。
      * Task 8 的独立评审把它登记为 N2）。
@@ -129,12 +129,12 @@ class ConfigChangePublisherTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 「发布失败绝不让业务写失败」的判据（D4）：Redis 抛 {@link RuntimeException} 时
-     * {@code bumpAndPublish} 必须**正常返回**（业务写已经提交，把广播失败变成业务失败只会让用户
+     * 「发布失败绝不让业务写失败」的判据（M4 决策 4）：Redis 抛 {@link RuntimeException} 时
+     * {@code bumpAndPublish} 必须<b>正常返回</b>（业务写已经提交，把广播失败变成业务失败只会让用户
      * 以为没存上），同时失败既被计数、也留下一条 WARN（观测面是「计数器 + WARN」两件，缺一不可：
      * 只删掉 {@code log.warn} 时本用例必须变红）。
      *
-     * <p>用替身而不是真 Redis：这里要制造的是「Redis 命令抛异常」这一条**确定的**路径，
+     * <p>用替身而不是真 Redis：这里要制造的是「Redis 命令抛异常」这一条<b>确定的</b>路径，
      * 真 Redis 只能靠拔网线/黑障端口去逼近它，慢且不确定。水位那一跳用替身 Mapper 返回
      * {@code null}（空库语义），因此生效版本就是「现在」。
      */
@@ -165,10 +165,10 @@ class ConfigChangePublisherTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 空 reason **不会**变成一次静默的失效：{@code encode} 对 {@code null} 快速失败
+     * 空 reason <b>不会</b>变成一次静默的失效：{@code encode} 对 {@code null} 快速失败
      * （{@link org.springframework.data.redis.core.StringRedisTemplate#convertAndSend} 根本没被调用，
      * 所以线上不会出现订阅端解不开的 {@code "42|"}），异常又被 {@code publish} 自己的
-     * {@code catch (RuntimeException)} 转成计数 + WARN —— **没有异常逃到调用方，也没有静默成功**。
+     * {@code catch (RuntimeException)} 转成计数 + WARN —— <b>没有异常逃到调用方，也没有静默成功</b>。
      *
      * <p>这条路径今天可达（{@code publish} / {@code bumpAndPublish} 是公开 API，reason 是自由参数），
      * 所以它必须被一个用例钉住，而不是靠文档提醒「别传 null」。
@@ -194,7 +194,7 @@ class ConfigChangePublisherTest extends AbstractIntegrationTest {
 
     /**
      * 抓 {@link ConfigChangePublisher} 自己打的 WARN（照搬 {@code ConfigSnapshotServiceTest} 的
-     * {@code ListAppender} 形状）：把 appender 挂到**这个类的 logger** 上，动作跑完立刻摘掉 ——
+     * {@code ListAppender} 形状）：把 appender 挂到<b>这个类的 logger</b> 上，动作跑完立刻摘掉 ——
      * logback 的 logger 是 JVM 全局对象，不摘会污染同一 JVM 里的其它用例。
      */
     private static List<ILoggingEvent> capturePublisherWarnings(Runnable action) {
@@ -225,7 +225,7 @@ class ConfigChangePublisherTest extends AbstractIntegrationTest {
      * 服务端（订阅走的是另一个连接 + 线程池，是异步的），紧接着 publish 的消息会被静默丢掉 ——
      * 那会让本用例偶发变红。
      *
-     * <p>做法：反复发一条**带唯一后缀的哨兵**，直到 {@code poll} 拿到的**第一条就是刚刚这条哨兵** ——
+     * <p>做法：反复发一条<b>带唯一后缀的哨兵</b>，直到 {@code poll} 拿到的<b>第一条就是刚刚这条哨兵</b> ——
      * 说明队列里连更早的残留都没有（发布连接与订阅连接各一条，Redis 保序），于是随后的真消息一定是
      * 紧接着被投递的那一条。哨兵不含分隔符，{@link ConfigInvalidateCodec#decode} 对它返回 {@code null}，
      * 因此它不可能被误当成一条有效失效。

@@ -17,14 +17,14 @@ import java.time.Duration;
 import java.util.Optional;
 
 /**
- * 渠道探测（Task 11）：用渠道自己的 {@code base_url} + 密钥向上游打**一次**请求，回报可达性与耗时。
- * 它是**诊断动作**，不是数据面调用 —— 因此**停用的渠道照样可探测**，且**不写审计**
- * （{@code AuditAction} 里没有 PROBE 常量，本任务**不新增**共享常量）。
+ * 渠道探测（Task 11）：用渠道自己的 {@code base_url} + 密钥向上游打<b>一次</b>请求，回报可达性与耗时。
+ * 它是<b>诊断动作</b>，不是数据面调用 —— 因此<b>停用的渠道照样可探测</b>，且<b>不写审计</b>
+ * （{@code AuditAction} 里没有 PROBE 常量，本任务<b>不新增</b>共享常量）。
  *
  * <p><b>绝不回显密钥</b>：明文只在 {@link HttpRequest} 的 {@code Authorization} 头里出现一次（真实打上游
- * 必须认证），**不进** {@link ProbeResult}、不进响应体、不进日志。{@link #message} 只放**简短、非敏感**的
+ * 必须认证），<b>不进</b> {@link ProbeResult}、不进响应体、不进日志。{@link #message} 只放<b>简短、非敏感</b>的
  * 原因串（例如 {@code "upstream returned 502"} / {@code "probe timed out"}），绝不带 baseUrl、密钥或
- * 上游响应体。本类**没有 logger** —— 与 {@link ChannelKeyService} 同款纪律：它手里同时握着明文与密文，
+ * 上游响应体。本类<b>没有 logger</b> —— 与 {@link ChannelKeyService} 同款纪律：它手里同时握着明文与密文，
  * 一句 debug 就能让「明文渠道密钥不进日志」在无声中失效。
  *
  * <p><b>边界（控制器裁定 4）</b>：
@@ -33,7 +33,7 @@ import java.util.Optional;
  *   <li><b>单次</b>请求、<b>超时上限 3 秒</b>（{@link #PROBE_TIMEOUT_CAP}，取渠道 {@code timeout_ms}
  *       与上限的较小值）—— 必须有界，不许跟着渠道的 60s 默认值无限等；</li>
  *   <li>渠道密钥解不开（{@link ChannelKeyService#decrypt} 返回空 Optional）⇒ 按「不可达 + 非敏感原因」
- *       处理，**不让异常穿到控制器**；</li>
+ *       处理，<b>不让异常穿到控制器</b>；</li>
  *   <li>{@code base_url} 畸形 ⇒ 同样按「不可达」处理，而不是 500。</li>
  * </ul>
  *
@@ -44,7 +44,7 @@ import java.util.Optional;
 @Service
 public class ChannelProbeService {
 
-    /** 探测的**硬上界**：任何一次探测都不许超过它（渠道 {@code timeout_ms} 更大也只按它算）。 */
+    /** 探测的<b>硬上界</b>：任何一次探测都不许超过它（渠道 {@code timeout_ms} 更大也只按它算）。 */
     static final Duration PROBE_TIMEOUT_CAP = Duration.ofSeconds(3);
 
     /** 上游探针路径：OpenAI 兼容的 {@code GET /models}（M1 的透传目标同源）。 */
@@ -70,7 +70,7 @@ public class ChannelProbeService {
     }
 
     /**
-     * 探测结果。**刻意没有密钥字段**（明文、密文、主密钥都不许出现）：可达性、上游状态码、耗时、
+     * 探测结果。<b>刻意没有密钥字段</b>（明文、密文、主密钥都不许出现）：可达性、上游状态码、耗时、
      * 一句非敏感原因，仅此四样。
      *
      * @param httpStatus 收到响应时为上游状态码，未收到（超时 / 连接失败 / 未发出）为 {@code null}
@@ -124,7 +124,7 @@ public class ChannelProbeService {
         }
     }
 
-    /** @return 渠道配置的超时（毫秒），但**绝不**超过 {@link #PROBE_TIMEOUT_CAP}；非法值回落到上限。 */
+    /** @return 渠道配置的超时（毫秒），但<b>绝不</b>超过 {@link #PROBE_TIMEOUT_CAP}；非法值回落到上限。 */
     private static Duration boundedTimeout(Integer timeoutMs) {
         if (timeoutMs == null || timeoutMs <= 0) {
             return PROBE_TIMEOUT_CAP;

@@ -27,18 +27,18 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * {@code GET /internal/config/snapshot} 的**线上契约**：真容器 + 真 HMAC + 真 JSON。
+ * {@code GET /internal/config/snapshot} 的<b>线上契约</b>：真容器 + 真 HMAC + 真 JSON。
  *
  * <p>未签名 / 错签名 / 用别的密钥签名一律 401（fail-closed），签名口径与
  * {@link com.aihub.admin.web.internal.InternalAuthFilter} 一致（应用内路径 + GET + 时间戳）。
  *
  * <p><b>为什么这里要逐字段核对 JSON 的键名</b>：网关侧的解码器
- * （{@code AdminClient.Http.parseSnapshot}）是按**字面键名**读 JSON 的
+ * （{@code AdminClient.Http.parseSnapshot}）是按<b>字面键名</b>读 JSON 的
  * （{@code data.channels[].apiKeyCipher} 等）。两侧唯一的编译期纽带是共享 record，而
  * 「Spring 把 record 序列化成什么」是可以被悄悄改掉的（自定义 naming strategy、
- * 只有 admin 认识的 DTO、{@code @JsonIgnore}…），改错以后网关**不会报错**，只会静默拿到
- * 一份空快照并回落遗留单渠道。因此本类用网关解码器的**同一组字面路径**把响应体走一遍，
- * 并断言每个 JSON 对象的键集合**恰好**是网关要读的那些（多一个少一个都红）。
+ * 只有 admin 认识的 DTO、{@code @JsonIgnore}…），改错以后网关<b>不会报错</b>，只会静默拿到
+ * 一份空快照并回落遗留单渠道。因此本类用网关解码器的<b>同一组字面路径</b>把响应体走一遍，
+ * 并断言每个 JSON 对象的键集合<b>恰好</b>是网关要读的那些（多一个少一个都红）。
  *
  * <p>密文用真实的 {@link ChannelKeyService#encrypt} 产出，主密钥由字节算出（tracked 文件里
  * 没有任何明文密钥 / 密文 / 主密钥字面量）；INACTIVE 行则用来钉住 G5 在网络边界上的表现。
@@ -52,7 +52,7 @@ class InternalConfigSnapshotIntegrationTest extends AbstractIntegrationTest {
     private static final String SYNTHETIC_PLAINTEXT = "sk-channel-plaintext-synthetic";
 
     /**
-     * 额度用例独有的周期（Task 13）。用一个**不会与别的用例相撞**的 {@code YYYYMM}，
+     * 额度用例独有的周期（Task 13）。用一个<b>不会与别的用例相撞</b>的 {@code YYYYMM}，
      * 使「本用例的额度行在线上」这条断言可以按 {@code (tenantId, period)} 定向查。
      */
     private static final String QUOTA_PERIOD = "202601";
@@ -117,7 +117,7 @@ class InternalConfigSnapshotIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 网关解码器的**线上往返**（本模块能做到的最强形式）：
+     * 网关解码器的<b>线上往返</b>（本模块能做到的最强形式）：
      * 用 {@code AdminClient.Http.parseSnapshot} 读的那一组字面路径遍历真实响应体，
      * 断言值来自真实数据、密文逐字相等、且 INACTIVE 行根本没出现在线上。
      */
@@ -220,7 +220,7 @@ class InternalConfigSnapshotIntegrationTest extends AbstractIntegrationTest {
         return restTemplate.exchange(PATH, HttpMethod.GET, new HttpEntity<>(headers), String.class);
     }
 
-    /** 签名口径：{@code GET} + **应用内路径** + 秒级时间戳（与 InternalAuthFilter 一致）。 */
+    /** 签名口径：{@code GET} + <b>应用内路径</b> + 秒级时间戳（与 InternalAuthFilter 一致）。 */
     private static HttpHeaders signed() {
         String timestamp = String.valueOf(Instant.now().getEpochSecond());
         HttpHeaders headers = new HttpHeaders();
@@ -272,7 +272,7 @@ class InternalConfigSnapshotIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 插入一条额度行（Task 13）。{@code quota} 表**没有** {@code status} 列：「没有行」本身就是「不限」（D15），
+     * 插入一条额度行（Task 13）。{@code quota} 表<b>没有</b> {@code status} 列：「没有行」本身就是「不限」（D15），
      * 所以这里也没有 status 参数；{@code uk_quota_tenant_period} 保证 {@code (tenant_id, period)} 唯一。
      */
     private void insertQuota(Long tenantId, String period, long tokenLimit, long requestLimit) {

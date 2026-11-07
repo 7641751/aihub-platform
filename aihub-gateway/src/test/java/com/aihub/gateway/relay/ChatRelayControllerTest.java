@@ -203,14 +203,14 @@ class ChatRelayControllerTest {
     }
 
     /**
-     * 决策 1 / Task 2 的契约：{@code x-request-id} 是**网关自产**的计量幂等键，上游的同名头绝不透传。
+     * 决策 1 / Task 2 的契约：{@code x-request-id} 是<b>网关自产</b>的计量幂等键，上游的同名头绝不透传。
      *
      * <p>这里的失败模式是静默的、且正好与本任务编辑过的那张白名单有关：{@code RequestIdFilter}
-     * 在 {@code relay()} **之前**用 {@code headers().set(...)} 写入自产 id，而 {@code relay()} 用
+     * 在 {@code relay()} <b>之前</b>用 {@code headers().set(...)} 写入自产 id，而 {@code relay()} 用
      * {@code put(...)} 拷贝白名单头 —— 一旦有人把 {@code "x-request-id"} 加回
-     * {@link ChatRelayController} 的 {@code RELAYED_HEADERS}，上游的值就会**覆盖**网关的值：
+     * {@link ChatRelayController} 的 {@code RELAYED_HEADERS}，上游的值就会<b>覆盖</b>网关的值：
      * 客户端看到的 id 与计量事件的 {@code request_id} 从此分叉（幂等键/对账全部对不上），
-     * 而状态码、body、既有用例**全绿**，没有任何测试会红。
+     * 而状态码、body、既有用例<b>全绿</b>，没有任何测试会红。
      *
      * <p>因此本用例同时钉两件事：① 客户端看到的是 UUID 且不是上游伪造值；② 该 UUID 就是本次请求
      * 计量事件里的 {@code request_id}。用 {@code enqueueWithHeaders} 构造上游伪造头，
@@ -241,8 +241,8 @@ class ChatRelayControllerTest {
     }
 
     /**
-     * M2 的透传白名单是**精确名**（前缀匹配会把白名单变成开放集合）。M3 补进了
-     * {@code retry-after-ms} 与 IETF 的 {@code RateLimit-*} 三兄弟，但**不得**顺手放宽成前缀匹配
+     * M2 的透传白名单是<b>精确名</b>（前缀匹配会把白名单变成开放集合）。M3 补进了
+     * {@code retry-after-ms} 与 IETF 的 {@code RateLimit-*} 三兄弟，但<b>不得</b>顺手放宽成前缀匹配
      * —— 这条用例用一个「差一点」的头名（{@code retry-after-ms-x}）证明白名单仍然是封闭集合。
      *
      * <p>{@code x-ratelimit-limit-requests} 同时也在构造里：它是 M2 就有的六个 OpenAI 名字之一，
@@ -276,11 +276,11 @@ class ChatRelayControllerTest {
     }
 
     /**
-     * **字面量钉子**：白名单的成员资格是一个契约，既不许静默放宽（前缀匹配 / 上游随手新增的头
+     * <b>字面量钉子</b>：白名单的成员资格是一个契约，既不许静默放宽（前缀匹配 / 上游随手新增的头
      * 自动穿过），也不许静默收窄（某人删掉一个名字，只会在某个下游 SDK 那里表现为「莫名其妙地
      * 拿不到退避建议」，没有任何测试会红）。
      *
-     * <p>断言整个集合而不是「包含某几个」：新增一个头必须**有意**改这里，改的时候要回答
+     * <p>断言整个集合而不是「包含某几个」：新增一个头必须<b>有意</b>改这里，改的时候要回答
      * 「为什么这个头可以穿过网关」。同时它也钉住 {@code x-request-id} 不在其中（参见
      * {@link #forgedUpstreamRequestIdNeverOverwritesTheGatewayMintedOne}）。
      */

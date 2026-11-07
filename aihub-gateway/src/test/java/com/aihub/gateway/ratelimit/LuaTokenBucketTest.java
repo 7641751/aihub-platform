@@ -6,10 +6,10 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 网关侧看到的脚本与键布局必须与共享模块里的那一份**逐字节一致**。这里的断言主要是
+ * 网关侧看到的脚本与键布局必须与共享模块里的那一份<b>逐字节一致</b>。这里的断言主要是
  * 「委托没被写歪」：任何一次「顺手在 gateway 里改一下脚本」都会先在这里变红。
  *
- * <p>脚本的**行为**证据在 admin 侧的真 Redis 集成测试里（{@code RedisTokenBucketIntegrationTest}）：
+ * <p>脚本的<b>行为</b>证据在 admin 侧的真 Redis 集成测试里（{@code RedisTokenBucketIntegrationTest}）：
  * 网关测试不允许依赖 Docker，所以本类只钉结构与约定，不假装跑过 Redis。
  */
 class LuaTokenBucketTest {
@@ -23,7 +23,7 @@ class LuaTokenBucketTest {
     }
 
     /**
-     * 时间**必须**来自 ARGV，不许用 Redis 的 {@code TIME}：否则一次拒绝的判定时刻与网关日志里的
+     * 时间<b>必须</b>来自 ARGV，不许用 Redis 的 {@code TIME}：否则一次拒绝的判定时刻与网关日志里的
      * 时刻来自两个时钟，排查限流问题时无法对齐（决策 9）。
      */
     @Test

@@ -39,12 +39,12 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * 字节透传代理：把请求体原样交给**某一条候选渠道**的上游，再把上游的**状态码、响应体字节与
- * Content-Type** 原样交回客户端。
+ * 字节透传代理：把请求体原样交给<b>某一条候选渠道</b>的上游，再把上游的<b>状态码、响应体字节与
+ * Content-Type</b> 原样交回客户端。
  * <p>因此流式（SSE）与非流式（JSON）用同一段代码覆盖，客户端 {@code Accept} 不参与决策
  * —— 由请求体里的 {@code stream} 字段决定上游返回什么，我们只负责透传。
  * <p>上游的错误响应（401/429/502…）同样原样透传，不再被折叠成通用 500。
- * <p>M2 起它同时是**计量观察者**：在响应体流上挂一个只读 tap（{@code RelayMetering}），
+ * <p>M2 起它同时是<b>计量观察者</b>：在响应体流上挂一个只读 tap（{@code RelayMetering}），
  * 请求收尾时把计量事件交给 {@code MeteringPublisher}。tap 只复制字节，不改写任何被转发的字节。
  *
  * <p><b>M3 起它是渠道感知的</b>（本里程碑的核心）：
@@ -52,18 +52,18 @@ import java.util.Set;
  *   <li>候选来自 {@link RouteResolver#candidates(String)}（健康渠道按 priority/weight 排序，
  *       熔断渠道作为最后手段排在末尾），经 {@link RelayAttempts#servable} 与
  *       {@link ChannelDescriptor#usable()} 过滤，并被 {@link RelayAttempts#MAX_ATTEMPTS} 截断；
- *       尝试循环本身保证**每条候选最多被订阅一次**（见 {@link #attempt}），因此一次请求的上游调用数
+ *       尝试循环本身保证<b>每条候选最多被订阅一次</b>（见 {@link #attempt}），因此一次请求的上游调用数
  *       结构性地上界于 {@code min(候选数, MAX_ATTEMPTS)}；</li>
- *   <li>每条渠道用它**自己的** base-url / 超时（{@link UpstreamClientFactory#forChannel}）与
- *       **自己解密出来的密钥**（逐请求注入 {@code Authorization}，绝不挂在共享客户端上）；</li>
- *   <li>上游 5xx / 超时 / 连不上 → 试下一个候选；上游 **429** → 先给该渠道打熔断标记（30s）再试下一个；
- *       上游 **4xx（非 429）** → 不切换，原样透传；</li>
+ *   <li>每条渠道用它<b>自己的</b> base-url / 超时（{@link UpstreamClientFactory#forChannel}）与
+ *       <b>自己解密出来的密钥</b>（逐请求注入 {@code Authorization}，绝不挂在共享客户端上）；</li>
+ *   <li>上游 5xx / 超时 / 连不上 → 试下一个候选；上游 <b>429</b> → 先给该渠道打熔断标记（30s）再试下一个；
+ *       上游 <b>4xx（非 429）</b> → 不切换，原样透传；</li>
  *   <li><b>切换的前提是「响应尚未提交」</b>。{@link #relay} 开始写字节之后响应即提交，因此
  *       「上游响应头到达但 body 还没写」这段窗口是唯一的合法切换时机 —— 一旦有字节转发出去，
  *       任何后续异常都只会走顶层的收尾分支。这就是「仅在未输出任何 token 时允许切换」的机器实现；</li>
  *   <li>没有候选可用（且快照里没有遗留渠道）→ 404 {@code model_not_found}（OpenAI 形状）；
  *       有候选但连不上 → 502 {@code upstream_unreachable}；所有候选都返回了响应 →
- *       **最后一个候选的响应原样透传**。</li>
+ *       <b>最后一个候选的响应原样透传</b>。</li>
  * </ul>
  */
 @RestController
@@ -73,22 +73,22 @@ public class ChatRelayController {
 
     /**
      * 需要从上游原样回传给客户端的头。
-     * <p>{@code content-type} 也走这条白名单，**不做解析**：{@code HttpHeaders#contentType()} 用
+     * <p>{@code content-type} 也走这条白名单，<b>不做解析</b>：{@code HttpHeaders#contentType()} 用
      * {@code MediaType.parseMediaType} 解析上游值，遇到畸形值（如 {@code not a media type}）会抛
      * {@code InvalidMediaTypeException}，把上游状态码/响应体一起吞成 500。原样拷贝没有这个问题；
      * 上游没发 {@code Content-Type} 时我们也不补默认值 —— 透传的字面意思就是「上游发什么就回什么」。
      * <p>其余头（如 Content-Length、Transfer-Encoding）由本服务自行决定。
      * <p>{@code x-request-id} 曾经也在这张白名单里。M2 起网关自己生成 {@code x-request-id}
-     * （见 {@code RequestIdFilter}）并把它作为计量幂等键，因此**不再透传上游的同名头**：
+     * （见 {@code RequestIdFilter}）并把它作为计量幂等键，因此<b>不再透传上游的同名头</b>：
      * 同一响应里同名的两个值无法共存，而幂等键必须是网关自产的那一个。
-     * <p>限流/退避头是**显式列举的精确名**，不是前缀匹配（{@code x-ratelimit-*} 在这里只是
+     * <p>限流/退避头是<b>显式列举的精确名</b>，不是前缀匹配（{@code x-ratelimit-*} 在这里只是
      * 命名上的族，匹配机制仍是 {@code Set#contains}）：白名单要的是「只回传已知且安全的头」，
      * 前缀匹配会让上游随手新增的 {@code x-ratelimit-<任意>} 自动穿过网关，等于把白名单
      * 变成开放集合。新增头必须像下面这样显式登记。
-     * <p>加头**不改变**状态码、{@code Content-Type} 与响应体字节：它们只是额外的键值对，
+     * <p>加头<b>不改变</b>状态码、{@code Content-Type} 与响应体字节：它们只是额外的键值对，
      * 不参与「字节级透传」那条路径。
      *
-     * <p><b>包内可见（不是 private）是刻意的</b>：{@code ChatRelayControllerTest} 用**字面量集合**
+     * <p><b>包内可见（不是 private）是刻意的</b>：{@code ChatRelayControllerTest} 用<b>字面量集合</b>
      * 钉住它的成员资格（既不许静默放宽成前缀匹配，也不许静默删掉一个名字）。集合本身不可变
      * （{@code Set.of}），因此放宽可见性不带来任何写入口。
      */
@@ -135,15 +135,15 @@ public class ChatRelayController {
     }
 
     /**
-     * **终端收尾的唯一出口**：先发布计量事件（既有行为一字不变），再用**同一个事件**里的真实用量
+     * <b>终端收尾的唯一出口</b>：先发布计量事件（既有行为一字不变），再用<b>同一个事件</b>里的真实用量
      * 校正本请求的配额预扣（{@link QuotaCorrector#correct}）。
      *
      * <p><b>两个终端发布点必须都走这里（13b 裁定 1）</b>：本类有两个
-     * {@code meteringPublisher.publish} 终点 —— 「一个候选都没有」的**提前终止**（404
+     * {@code meteringPublisher.publish} 终点 —— 「一个候选都没有」的<b>提前终止</b>（404
      * {@code model_not_found}，在 {@code doFinally} 之前就 return）与正常收尾的 {@code doFinally}
-     * （正常 / 取消 / 异常）。{@code QuotaFilter}（order {@code +175}）**在路由之前**已经预扣，
-     * 因此只改 {@code doFinally} 会让每个 {@code model_not_found} 请求**永久吃掉一份估算配额**（静默漏）。
-     * 收尾时的 {@code doFinally}（{@code relay} 内、上游 body 上）只记客户端断连、**不发布**，故不涉及。
+     * （正常 / 取消 / 异常）。{@code QuotaFilter}（order {@code +175}）<b>在路由之前</b>已经预扣，
+     * 因此只改 {@code doFinally} 会让每个 {@code model_not_found} 请求<b>永久吃掉一份估算配额</b>（静默漏）。
+     * 收尾时的 {@code doFinally}（{@code relay} 内、上游 body 上）只记客户端断连、<b>不发布</b>，故不涉及。
      */
     private void publishAndCorrect(MeteringEvent event) {
         meteringPublisher.publish(event);
@@ -226,8 +226,8 @@ public class ChatRelayController {
 
     /**
      * 候选列表：路由结果经「密钥可服务」过滤 + {@link ChannelDescriptor#usable()} 过滤，并截断到
-     * {@link RelayAttempts#MAX_ATTEMPTS}；为空时回落到「遗留单渠道」（**只在快照里真的有遗留渠道、
-     * 且交回来的确实就是那个哨兵、且它确实可用时才回落**）；再为空 → 抛 {@link RouteSelectionException}
+     * {@link RelayAttempts#MAX_ATTEMPTS}；为空时回落到「遗留单渠道」（<b>只在快照里真的有遗留渠道、
+     * 且交回来的确实就是那个哨兵、且它确实可用时才回落</b>）；再为空 → 抛 {@link RouteSelectionException}
      * 由调用方翻成 404。
      *
      * <p>{@code usable()} 那道门不能省（G15）：{@code RouteResolver} 自己也过滤，但中继不该依赖调用方
@@ -235,7 +235,7 @@ public class ChatRelayController {
      * 渠道交给 {@link UpstreamClientFactory} 的后果是「异常穿出请求路径（客户端 500）」或
      * 「每个请求都瞬间超时」。
      *
-     * <p>截断到上界只是上界的**两半之一**（另一半在 {@link #attempt} 的循环结构里）：它让「最后一个
+     * <p>截断到上界只是上界的<b>两半之一</b>（另一半在 {@link #attempt} 的循环结构里）：它让「最后一个
      * 候选」有唯一定义，但不能阻止同一条候选被订阅多次。
      */
     private List<ChannelDescriptor> candidateList(String model) {
@@ -266,17 +266,17 @@ public class ChatRelayController {
     }
 
     /**
-     * 逐个候选尝试（**不嵌套的线性尝试链**）。每次尝试都是延迟订阅（{@code Mono.defer}），因此前一个
+     * 逐个候选尝试（<b>不嵌套的线性尝试链</b>）。每次尝试都是延迟订阅（{@code Mono.defer}），因此前一个
      * 候选只要「没有被写出去一个字节」，就还可以换下一个。
      *
-     * <p>切换的判据是上游**响应头到达之后、响应体写回之前**这个窗口：
+     * <p>切换的判据是上游<b>响应头到达之后、响应体写回之前</b>这个窗口：
      * <ul>
      *   <li>连接失败/超时 → 抛上游失败异常 → 未提交且还有下一个候选就换（否则交给顶层：502 或收尾）；</li>
      *   <li>429 → 打熔断标记（30s）后换下一个；</li>
-     *   <li>5xx → 换下一个（**不打熔断**，决策 10）；</li>
-     *   <li>2xx / 4xx（非 429）→ **直接回写**，不再有下一次；</li>
+     *   <li>5xx → 换下一个（<b>不打熔断</b>，决策 10）；</li>
+     *   <li>2xx / 4xx（非 429）→ <b>直接回写</b>，不再有下一次；</li>
      *   <li>没有下一个候选时（含被 {@link RelayAttempts#MAX_ATTEMPTS} 截断后的最后一个）→
-     *       **把它自己的响应原样回写**，这样客户端拿到的永远是「真实的最后一个失败」。</li>
+     *       <b>把它自己的响应原样回写</b>，这样客户端拿到的永远是「真实的最后一个失败」。</li>
      * </ul>
      * 一旦 {@link #relay} 开始写字节，响应就被提交，此后异常只会走收尾分支 ——
      * 这就是「仅在未输出任何 token 时允许切换」的机器实现。
@@ -284,13 +284,13 @@ public class ChatRelayController {
      * <p><b>上界由本方法的循环结构兑现，而不只是靠截断候选列表</b>
      * （{@link RelayAttempts#MAX_ATTEMPTS}）。单条候选的「请求 + 失败分类」被收在
      * {@link #tryCandidate} 里，且它把逃逸的上游失败折成一个「继续」信号（{@code true}）而不是继续
-     * 外抛。于是「换下一个」只发生在 {@link Mono#flatMap} 的**下游**，同一个失败不可能再回到本方法的
-     * 任何受保护区域里、把同一个下标**第二次**订阅出去：一次客户端请求的上游调用数因此**结构上**
+     * 外抛。于是「换下一个」只发生在 {@link Mono#flatMap} 的<b>下游</b>，同一个失败不可能再回到本方法的
+     * 任何受保护区域里、把同一个下标<b>第二次</b>订阅出去：一次客户端请求的上游调用数因此<b>结构上</b>
      * 等于 {@code min(候选数, 上界)}。
      *
-     * <p>反面教材（本方法修掉的缺陷）：把递归订阅写在受保护区域**内部**、同时又在
+     * <p>反面教材（本方法修掉的缺陷）：把递归订阅写在受保护区域<b>内部</b>、同时又在
      * {@code onErrorResume} 里为同一个逃逸失败再订阅一次，会让 {@code attempt(i)} 展开成
-     * {@code C(m) = 1 + 2·C(m-1)} —— 3 条候选的混合故障（503 → 429 → 连不上）实测打 **7 次**上游，
+     * {@code C(m) = 1 + 2·C(m-1)} —— 3 条候选的混合故障（503 → 429 → 连不上）实测打 <b>7 次</b>上游，
      * 而且把刚刚写下熔断标记的 429 渠道自己又打了一遍。截断候选列表对这种放大完全无能为力（它管得住
      * 「候选有几条」，管不住「同一条被订阅几次」）。
      */
@@ -327,9 +327,9 @@ public class ChatRelayController {
     }
 
     /**
-     * **单条候选**的一次尝试。它返回的是「要不要继续换下一个候选」这个**信号本身**
+     * <b>单条候选</b>的一次尝试。它返回的是「要不要继续换下一个候选」这个<b>信号本身</b>
      * （{@code Mono<Boolean>}），而不是在这里递归订阅下一个候选 —— 逃逸的上游失败在
-     * {@code onErrorResume} 里被折成 {@code true}，于是它**不会**再向外传播，也就**不可能**回到
+     * {@code onErrorResume} 里被折成 {@code true}，于是它<b>不会</b>再向外传播，也就<b>不可能</b>回到
      * 调用方的受保护区域里触发第二次订阅（见 {@link #attempt} 的上界说明）。
      *
      * <p>429 的熔断标记、5xx/4xx 的分类、以及「最后一个候选原样回写」的语义都与改造前逐字相同；
@@ -394,7 +394,7 @@ public class ChatRelayController {
      * 把上游响应原样回写给客户端：状态码 → 白名单头 → 响应体字节，三者都不做语义加工。
      * <p>刻意不用 {@code bodyToMono(String)} 之类会「攒完整体」的读法，而是以 {@link DataBuffer}
      * 逐块透传，才能同时覆盖 SSE 流式与 JSON 非流式两种上游返回。
-     * <p>{@code doOnNext(metering::onChunk)} 只是**只读观察**：{@code UsageCapture} 用
+     * <p>{@code doOnNext(metering::onChunk)} 只是<b>只读观察</b>：{@code UsageCapture} 用
      * {@code DataBuffer.asByteBuffer()} 的只读视图复制字节，不推进原 buffer 的读写位置，
      * 因此被写回客户端的字节与上游发出的完全一致。
      *
@@ -402,11 +402,11 @@ public class ChatRelayController {
      * 因此它之后发生的一切都不允许再换渠道。
      *
      * <p><b>上游 body 被取消 = 客户端断连</b>：Netty 发现客户端不再读我们的响应时会取消这次响应写，
-     * 于是上游 body 的订阅被取消。这个取消有**两种收尾形状**（实测：全量套件下
+     * 于是上游 body 的订阅被取消。这个取消有<b>两种收尾形状</b>（实测：全量套件下
      * {@code SseStreamingTest} 的断连用例偶发红，日志里上游 body 收到 {@code cancel} 而顶层
      * {@code doFinally} 拿到的是 {@code ON_COMPLETE}）：<b>有在飞的写</b> → 写失败（异常，走顶层
      * 的客户端断连分支）；<b>没有在飞的写</b> → 响应写以 {@code onComplete} 收尾，顶层看到的是一次
-     * 「正常完成」—— 一次被客户端掐断的流会被记成 SUCCESS。因此这里在**最靠近取消发生的地方**
+     * 「正常完成」—— 一次被客户端掐断的流会被记成 SUCCESS。因此这里在<b>最靠近取消发生的地方</b>
      * 把它记成客户端断连：计量结果不再取决于哪个形状先到（设计文档 §8.1 ⑤ 要求取消上游 +
      * 按已收内容估算）。
      *

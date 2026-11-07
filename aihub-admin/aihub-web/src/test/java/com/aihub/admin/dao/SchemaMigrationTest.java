@@ -30,8 +30,8 @@ class SchemaMigrationTest extends AbstractIntegrationTest {
 
     @Test
     void flywayAppliesExactlyThreeMigrations() {
-        // D1（M4）：M4 有意引入第二条迁移（审计表 / request_log 索引 / config_version）。
-        // D1（M5）：M5 有意引入第三条迁移（kb_chunk 逐段进度表）。
+        // M4 决策 1：M4 有意引入第二条迁移（审计表 / request_log 索引 / config_version）。
+        // M5 决策 1：M5 有意引入第三条迁移（kb_chunk 逐段进度表）。
         // 护栏要保的是「**没人能悄悄加迁移**」—— 每次新增迁移都必须**显式**改这里，
         // 而不是让「迁移数量」随迁移目录里的文件数自动漂移。description 取迁移文件名
         // 双下划线之后那段（Flyway 把下划线解析成空格）。
@@ -55,9 +55,9 @@ class SchemaMigrationTest extends AbstractIntegrationTest {
         assertThat(tables).containsExactlyInAnyOrder(
                 "tenant", "sys_user", "api_key", "channel", "model_route", "quota",
                 "rate_limit_policy", "request_log", "kb_document", "billing_daily",
-                // V2 新增（决策 D1）：审计表与水位表。
+                // V2 新增（M4 决策 1）：审计表与水位表。
                 "audit_log", "config_version",
-                // V3 新增（M5 决策 D1/D4）：文档入库流水线的逐段进度表。
+                // V3 新增（M5 决策 1 / 决策 4）：文档入库流水线的逐段进度表。
                 "kb_chunk");
     }
 

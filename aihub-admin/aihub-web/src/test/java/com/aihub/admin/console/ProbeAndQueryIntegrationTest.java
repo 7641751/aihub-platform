@@ -44,44 +44,44 @@ import java.util.stream.Collectors;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Task 11 的**线上契约**：请求日志 / 审计 / 每日账单三条**运营查询**端点。真容器（MySQL + Redis +
+ * Task 11 的<b>线上契约</b>：请求日志 / 审计 / 每日账单三条<b>运营查询</b>端点。真容器（MySQL + Redis +
  * RabbitMQ，见 {@link AbstractIntegrationTest}）、真 HTTP、真控制台令牌。
  *
- * <p><b>本类只依赖 HTTP + 既有 mapper/entity + {@code JdbcTemplate}</b>：它**不引用**
+ * <p><b>本类只依赖 HTTP + 既有 mapper/entity + {@code JdbcTemplate}</b>：它<b>不引用</b>
  * {@code RequestLogQueryService} / {@code AuditQueryService} / {@code BillingDailyMapper} 等本任务才
- * 落地的类型，因此能在服务层/控制器存在之前**编译并跑红**（计划 Task 11 的 Step 1 纪律）。
+ * 落地的类型，因此能在服务层/控制器存在之前<b>编译并跑红</b>（计划 Task 11 的 Step 1 纪律）。
  * {@code billing_daily} 夹具用裸 SQL 插（{@link JdbcTemplate}）正是为了这一点。
  *
- * <p><b>RED 的实测形态（诚实登记，不修饰）</b>：实现落地之前，本类的自然 RED **全部**落在
+ * <p><b>RED 的实测形态（诚实登记，不修饰）</b>：实现落地之前，本类的自然 RED <b>全部</b>落在
  * {@code 404 NOT_FOUND / No static resource api/logs | api/audit | api/billing/daily}（端点尚未映射）——
- * **没有一条**落在被测断言上（与 Task 9 / Task 10 同源）。因此每条判据的**判别力完全由变异体提供**
- * （见交付报告的变异实验），**不是**由这套自然 RED 提供。产物：{@code .m4t11-logs/R01-red.log}。
+ * <b>没有一条</b>落在被测断言上（与 Task 9 / Task 10 同源）。因此每条判据的<b>判别力完全由变异体提供</b>
+ * （见交付报告的变异实验），<b>不是</b>由这套自然 RED 提供。产物：{@code .m4t11-logs/R01-red.log}。
  *
- * <p><b>租户语义（{@code docs/CONVENTIONS.md} §10 R3.1）</b>：这三条都是**运营查询**，调用方**必须**
- * 显式给 {@code tenantId}（缺省 400），理由是**防无界扫描**（{@code request_log} / {@code audit_log}
- * 的索引都以 {@code tenant_id} 打头），**不是**授权；令牌里的 {@code tenantId}（R4）在这里不参与判定。
- * 本类的令牌租户固定为 1，查询租户是每次新建的夹具租户 —— 两者刻意不同，以证明查询用的是**显式参数**。
+ * <p><b>租户语义（{@code docs/CONVENTIONS.md} §10 R3.1）</b>：这三条都是<b>运营查询</b>，调用方<b>必须</b>
+ * 显式给 {@code tenantId}（缺省 400），理由是<b>防无界扫描</b>（{@code request_log} / {@code audit_log}
+ * 的索引都以 {@code tenant_id} 打头），<b>不是</b>授权；令牌里的 {@code tenantId}（R4）在这里不参与判定。
+ * 本类的令牌租户固定为 1，查询租户是每次新建的夹具租户 —— 两者刻意不同，以证明查询用的是<b>显式参数</b>。
  *
- * <p><b>可选维度过滤的语义</b>：{@code apiKeyId} / {@code channelId} **缺省 = 不过滤**（返回该租户该
- * 时间窗内的全部行），由**条件式构造**实现 —— 绝不把 {@code null} 交给 {@code eq(...)}（那会生成
- * {@code col = NULL}、恒为 UNKNOWN、**静默返回 0 行**，见 CONVENTIONS §7）。夹具行**带**非空
+ * <p><b>可选维度过滤的语义</b>：{@code apiKeyId} / {@code channelId} <b>缺省 = 不过滤</b>（返回该租户该
+ * 时间窗内的全部行），由<b>条件式构造</b>实现 —— 绝不把 {@code null} 交给 {@code eq(...)}（那会生成
+ * {@code col = NULL}、恒为 UNKNOWN、<b>静默返回 0 行</b>，见 CONVENTIONS §7）。夹具行<b>带</b>非空
  * {@code api_key_id} / {@code channel_id}，所以「缺省不过滤」这条语义在本类里是可判别的。
  *
  * <p><b>时间绑定的纪律（CONVENTIONS §7）</b>：{@code from}/{@code to} 是带 {@code Z} 的绝对时刻，
- * 窗口夹具也按 **UTC 墙上时间**写进 {@code datetime(3)}。窗口只有 ±10 分钟，因此任何「按非 UTC 基准」
+ * 窗口夹具也按 <b>UTC 墙上时间</b>写进 {@code datetime(3)}。窗口只有 ±10 分钟，因此任何「按非 UTC 基准」
  * 的绑定（{@code Timestamp} 在非 UTC 连接上、或 {@code LocalDateTime} 用 JVM 默认时区折算）都会把窗口
  * 整体推走、一行都命中不到 —— 这正是变异体 ④ 要打的断言。
  *
  * <p><b>为什么 {@code @TestPropertySource} 只有一个属性</b>：本类只需要一把合规的控制台签名密钥
- * （{@code application.yml} 对 {@code aihub.console.secret} **刻意没有默认值**，见 D16）。属性集与
+ * （{@code application.yml} 对 {@code aihub.console.secret} <b>刻意没有默认值</b>，见 D16）。属性集与
  * {@code ConsoleLoginIntegrationTest} / {@code ApiKeyAdminIntegrationTest} /
- * {@code RouteAndRateLimitAdminIntegrationTest} **逐字相同**、且本类**不加** {@code @Import} /
- * {@code @TestConfiguration}，因此 Spring **复用**已经存在的那个上下文，套件的 Spring 上下文总数
+ * {@code RouteAndRateLimitAdminIntegrationTest} <b>逐字相同</b>、且本类<b>不加</b> {@code @Import} /
+ * {@code @TestConfiguration}，因此 Spring <b>复用</b>已经存在的那个上下文，套件的 Spring 上下文总数
  * 仍是 7（{@code docs/CONVENTIONS.md} §8 item 5/6 的预算）。
  *
  * <p><b>夹具纪律</b>：容器与各表都是 JVM 级共享的（基类没有全局清理），所以夹具名每条用例唯一、
- * 前后各清一次；断言一律按**本次用例的租户 id** 或**唯一夹具串**查，绝不做全表计数；夹具前缀里
- * **不含** LIKE 元字符（由 {@link #fixtureNamesContainNoLikeMetacharacters()} 钉住）。
+ * 前后各清一次；断言一律按<b>本次用例的租户 id</b> 或<b>唯一夹具串</b>查，绝不做全表计数；夹具前缀里
+ * <b>不含</b> LIKE 元字符（由 {@link #fixtureNamesContainNoLikeMetacharacters()} 钉住）。
  */
 @TestPropertySource(properties = {
         "aihub.console.secret=" + ProbeAndQueryIntegrationTest.SECRET
@@ -89,9 +89,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
 
     /**
-     * 合成控制台签名密钥（≥32 字符），与 {@code ConsoleLoginIntegrationTest.SECRET} **逐字相同** ——
+     * 合成控制台签名密钥（≥32 字符），与 {@code ConsoleLoginIntegrationTest.SECRET} <b>逐字相同</b> ——
      * 值相同才会命中同一个 Spring 上下文缓存键（本类的目的就是复用那个上下文，不新增上下文）。
-     * 刻意**不是** {@code private}：注解值里的常量表达式引用私有常量时 javac 会报访问控制错误。
+     * 刻意<b>不是</b> {@code private}：注解值里的常量表达式引用私有常量时 javac 会报访问控制错误。
      */
     static final String SECRET = "console-it-secret-0123456789abcdefghijklmn";
 
@@ -102,18 +102,18 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
     private static final String AUDIT_TARGET_PREFIX = "m4-q-aud-";
 
     /**
-     * {@code RequestLogQueryService.RequestLogView} 的**期望 JSON 投影**（字段名集合，逐字）。
+     * {@code RequestLogQueryService.RequestLogView} 的<b>期望 JSON 投影</b>（字段名集合，逐字）。
      *
-     * <p>它是「响应里没有密钥材料字段」这条性质的**可证伪**形式：返回记录的字段名集合必须与它逐字相等；
+     * <p>它是「响应里没有密钥材料字段」这条性质的<b>可证伪</b>形式：返回记录的字段名集合必须与它逐字相等；
      * 给视图多加一个字段（例如 {@code keyHash} / {@code apiKeyCipher}），返回 JSON 就多一个名字，断言即红。
-     * 之所以不用 {@code doesNotContain("...")}：那类「某个字符串不可能出现」的断言**结构上不可证伪**
+     * 之所以不用 {@code doesNotContain("...")}：那类「某个字符串不可能出现」的断言<b>结构上不可证伪</b>
      * （理由见 {@link #logsResponseCarriesNoKeyMaterial()} 的 javadoc，评审 I-3）。
      */
     private static final Set<String> REQUEST_LOG_VIEW_FIELDS = Set.of(
             "id", "requestId", "tenantId", "apiKeyId", "channelId", "model", "promptTokens",
             "completionTokens", "totalTokens", "latencyMs", "ttftMs", "status", "errorCode", "createdAt");
 
-    /** {@code AuditQueryService.AuditLogView} 的**期望 JSON 投影**（字段名集合，逐字）。理由同上。 */
+    /** {@code AuditQueryService.AuditLogView} 的<b>期望 JSON 投影</b>（字段名集合，逐字）。理由同上。 */
     private static final Set<String> AUDIT_LOG_VIEW_FIELDS = Set.of(
             "id", "tenantId", "actorType", "actor", "action", "targetType", "targetId", "detail",
             "requestId", "createdAt");
@@ -125,11 +125,11 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
     private static final String ACTOR_ID = "1";
     private static final String TENANT_TARGET_TYPE = "TENANT";
 
-    /** 令牌租户：与查询租户**刻意不同**，用来证明查询用的是显式 {@code tenantId} 参数（R3.1/R4）。 */
+    /** 令牌租户：与查询租户<b>刻意不同</b>，用来证明查询用的是显式 {@code tenantId} 参数（R3.1/R4）。 */
     private static final long TOKEN_TENANT = 1L;
 
     /**
-     * 夹具窗口的**中轴**（UTC 墙上时间）。窗口只有 ±10 分钟 ⇒ 任何「按非 UTC 基准」的时间绑定都会
+     * 夹具窗口的<b>中轴</b>（UTC 墙上时间）。窗口只有 ±10 分钟 ⇒ 任何「按非 UTC 基准」的时间绑定都会
      * 一行都命中不到（见类注释的「时间绑定的纪律」）。
      */
     private static final LocalDateTime MID = LocalDateTime.of(2026, 9, 15, 12, 0, 0);
@@ -187,7 +187,7 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 1) /api/logs 强制 tenantId + 时间范围
 
     /**
-     * R3.1：{@code /api/logs} 是**运营查询** —— 缺 {@code tenantId} 或时间范围一律 **400**（防无界扫描）；
+     * R3.1：{@code /api/logs} 是<b>运营查询</b> —— 缺 {@code tenantId} 或时间范围一律 <b>400</b>（防无界扫描）；
      * 三者齐备才 200。判别力由变异体 {@code M3}（缺省 tenantId 时回落到一个默认租户）提供：
      * 变异后第一条断言的 status 变成 200 ≠ 400，本用例精确变红。
      */
@@ -222,14 +222,14 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 2) /api/logs 分页有界 + created_at DESC
 
     /**
-     * 分页**真的有 {@code LIMIT}**、顺序是 {@code created_at DESC}、上界被钉死。
+     * 分页<b>真的有 {@code LIMIT}</b>、顺序是 {@code created_at DESC}、上界被钉死。
      *
      * <p>关键断言是「3 行夹具、{@code size=2} ⇒ 恰好 2 条且 {@code total==3}」：判别力由变异体
-     * {@code M1}（**删掉 {@code MybatisPlusInterceptor} 的 {@code @Bean}**）提供 —— 没有分页拦截器时
-     * MyBatis-Plus 的 {@code selectPage} **不加 LIMIT**、把全部匹配行塞进 {@code records}（且不算
+     * {@code M1}（<b>删掉 {@code MybatisPlusInterceptor} 的 {@code @Bean}</b>）提供 —— 没有分页拦截器时
+     * MyBatis-Plus 的 {@code selectPage} <b>不加 LIMIT</b>、把全部匹配行塞进 {@code records}（且不算
      * {@code total}），本用例的 {@code records.size()==2} 精确变红。这正是「无界扫描」的入口。
      *
-     * <p>{@code apiKeyId}/{@code channelId} **刻意都不传**：夹具行带非空 {@code api_key_id} /
+     * <p>{@code apiKeyId}/{@code channelId} <b>刻意都不传</b>：夹具行带非空 {@code api_key_id} /
      * {@code channel_id}，所以本用例的「3 条」同时证明「缺省 = 不过滤」这条语义（判别力由变异体
      * {@code M7}：把可选维度写成无条件的 {@code eq(col, null)} ⇒ 静默 0 行提供）。
      */
@@ -291,14 +291,14 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 4) /api/logs 视图不含密钥材料
 
     /**
-     * 日志视图的投影必须**恰好**是这些非敏感字段 —— 既不含密钥材料字段，也不许**多出**任何字段。
+     * 日志视图的投影必须<b>恰好</b>是这些非敏感字段 —— 既不含密钥材料字段，也不许<b>多出</b>任何字段。
      *
      * <p><b>为什么是「JSON 字段集等价断言」而不是 {@code doesNotContain(keyHash)}</b>（评审 I-3）：
      * {@code request_log} 表根本没有 {@code key_hash} / {@code api_key_cipher} 列，{@code RequestLogView}
-     * 也没有这两个字段，且那些哨兵串**从未被写进任何表** —— 所以任何生产变异都不可能让一条「响应里不
-     * 出现 X」的断言变红（**结构上不可证伪**）。真正要防的是「有人给视图加了字段」（例如给
-     * {@code RequestLogView} 补一个 {@code keyHash}/{@code apiKeyCipher}）。把每条返回记录的 **JSON
-     * 字段名集合**与**期望投影**（{@link #REQUEST_LOG_VIEW_FIELDS}）逐字比对，才让「加字段」可证伪 ——
+     * 也没有这两个字段，且那些哨兵串<b>从未被写进任何表</b> —— 所以任何生产变异都不可能让一条「响应里不
+     * 出现 X」的断言变红（<b>结构上不可证伪</b>）。真正要防的是「有人给视图加了字段」（例如给
+     * {@code RequestLogView} 补一个 {@code keyHash}/{@code apiKeyCipher}）。把每条返回记录的 <b>JSON
+     * 字段名集合</b>与<b>期望投影</b>（{@link #REQUEST_LOG_VIEW_FIELDS}）逐字比对，才让「加字段」可证伪 ——
      * 加一个字段，JSON 就多一个名字，本断言立即变红。
      */
     @Test
@@ -382,11 +382,11 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 7) /api/audit 视图不含密钥材料
 
     /**
-     * 审计视图的投影必须**恰好**是这些非敏感字段 —— 与 {@link #logsResponseCarriesNoKeyMaterial()} 同款
+     * 审计视图的投影必须<b>恰好</b>是这些非敏感字段 —— 与 {@link #logsResponseCarriesNoKeyMaterial()} 同款
      * 「JSON 字段集等价断言」（为什么不用 {@code doesNotContain(...)}：见该方法的 javadoc，评审 I-3）。
      *
-     * <p><b>正向对照</b>：给审计行的 {@code detail} 放一条**非敏感**哨兵，并断言响应**确实回显**它 ——
-     * 证明投影是**活的**、{@code detail} 真的通了，而不是「恰好什么都没读出来」。
+     * <p><b>正向对照</b>：给审计行的 {@code detail} 放一条<b>非敏感</b>哨兵，并断言响应<b>确实回显</b>它 ——
+     * 证明投影是<b>活的</b>、{@code detail} 真的通了，而不是「恰好什么都没读出来」。
      */
     @Test
     void auditResponseCarriesNoKeyMaterial() throws Exception {
@@ -422,9 +422,9 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
      * {@code stat_date} 范围返回该租户的行。「缺 tenantId ⇒ 400」的判别力由变异体 {@code M3}（缺省
      * tenantId 回落默认租户）提供；{@code stat_date} 窗口过滤的判别力由本用例的夹具形状提供（见下）。
      *
-     * <p><b>{@code stat_date} 窗口过滤必须可判别（评审 I-1 / M-h）</b>：此前只插**1 行且在窗口内**，
+     * <p><b>{@code stat_date} 窗口过滤必须可判别（评审 I-1 / M-h）</b>：此前只插<b>1 行且在窗口内</b>，
      * 于是删掉整段 {@code .ge/.le(statDate)} 后仍全绿（有无窗口都返回那一行）—— 零判别力。现在同一租户
-     * 插**3 行**：{@code 2026-09-15} 在窗口内（窗口 ±10 分钟折成同一 UTC 自然日 09-15），{@code 2026-08-01}
+     * 插<b>3 行</b>：{@code 2026-09-15} 在窗口内（窗口 ±10 分钟折成同一 UTC 自然日 09-15），{@code 2026-08-01}
      * 早于、{@code 2026-12-31} 晚于窗口。删掉窗口过滤（或只删 {@code .ge}／只删 {@code .le} 其中一半）
      * 都会让窗外行漏进响应，本用例精确变红。
      */
@@ -467,8 +467,8 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 9) 夹具自守
 
     /**
-     * 夹具名前缀里的 {@code _} 对 LIKE 是**单字符通配符**，{@code %} 与 {@code \} 同理。本类的清理与
-     * 断言都建立在「前缀只含字面量」这条**假设**上，所以这里把它变成可执行事实。
+     * 夹具名前缀里的 {@code _} 对 LIKE 是<b>单字符通配符</b>，{@code %} 与 {@code \} 同理。本类的清理与
+     * 断言都建立在「前缀只含字面量」这条<b>假设</b>上，所以这里把它变成可执行事实。
      */
     @Test
     void fixtureNamesContainNoLikeMetacharacters() {
@@ -549,7 +549,7 @@ class ProbeAndQueryIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 可变 {@code detail} 的版本：给「投影是活的」这条**正向对照**用 —— 放一条非敏感哨兵进 {@code detail}
+     * 可变 {@code detail} 的版本：给「投影是活的」这条<b>正向对照</b>用 —— 放一条非敏感哨兵进 {@code detail}
      * 并断言响应确实回显它（证明 {@code AuditLogView.detail} 真的通了，而不是「恰好什么都没读出来」）。
      */
     private AuditLogEntity insertAuditLog(long tenantId, LocalDateTime createdAt, String detail) {

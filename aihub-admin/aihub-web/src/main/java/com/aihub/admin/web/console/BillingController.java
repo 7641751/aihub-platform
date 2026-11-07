@@ -23,19 +23,19 @@ import java.util.List;
  * 每日账单的运营查询（{@code GET /api/billing/daily}，Task 11）：由 {@link ConsoleAuthFilter} 守门（只读）。
  *
  * <p><b>必须带 {@code tenantId}</b>（控制器裁定 2）：{@code billing_daily} 有 {@code tenant_id NOT NULL}，
- * 且 {@code /api/billing/daily} 在 {@code docs/CONVENTIONS.md} §10 **R3.1** 里明文归为**运营查询** ⇒
+ * 且 {@code /api/billing/daily} 在 {@code docs/CONVENTIONS.md} §10 <b>R3.1</b> 里明文归为<b>运营查询</b> ⇒
  * 必须显式 {@code tenantId}（缺省 400），与 {@code /api/logs}、{@code /api/audit} 语义统一。
  *
- * <p><b>时间边界用 {@code stat_date}（DATE）而不是 {@code datetime(3)}</b>：账单是**自然日**粒度，
- * 因此把带 {@code Z} 的绝对时刻折成 **UTC 自然日**（{@code LocalDate.ofInstant(instant, ZoneOffset.UTC)}）
+ * <p><b>时间边界用 {@code stat_date}（DATE）而不是 {@code datetime(3)}</b>：账单是<b>自然日</b>粒度，
+ * 因此把带 {@code Z} 的绝对时刻折成 <b>UTC 自然日</b>（{@code LocalDate.ofInstant(instant, ZoneOffset.UTC)}）
  * 去比 —— 这里不涉及 CONVENTIONS §7 的 {@code datetime(3)} 时区陷阱（{@code stat_date} 不是瞬时列）。
  *
  * <p><b>为什么查询逻辑直接在本控制器里、而不是一个 {@code BillingQueryService}</b>：Task 11 的文件集是
- * **封闭**的 —— 计划的 Files 与 Step 5 的 {@code git add} 清单里**没有**账单服务（只有
+ * <b>封闭</b>的 —— 计划的 Files 与 Step 5 的 {@code git add} 清单里<b>没有</b>账单服务（只有
  * {@code BillingDailyEntity}/{@code BillingDailyMapper}/{@code BillingController}）。新建一个未被声明的
- * 文件会让「只 stage 显式路径」失去可核对性，因此这里把这条**极薄**的只读查询放在控制器里，并把
+ * 文件会让「只 stage 显式路径」失去可核对性，因此这里把这条<b>极薄</b>的只读查询放在控制器里，并把
  * 各控制器共用的参数校验助手一并内联（理由详见 {@link LogQueryController} 的类注释）。这是对
- * 「控制器只做 DTO ↔ 服务转换」的一处**已登记偏差**（交付报告「偏差与发现」）。
+ * 「控制器只做 DTO ↔ 服务转换」的一处<b>已登记偏差</b>（交付报告「偏差与发现」）。
  *
  * <p>错误一律走 {@link BizException} → {@code GlobalExceptionHandler}。
  */
@@ -49,7 +49,7 @@ public class BillingController {
         this.billingDailyMapper = billingDailyMapper;
     }
 
-    /** 账单视图：只回计量列，**不含**任何密钥材料（该表本来也没有）。 */
+    /** 账单视图：只回计量列，<b>不含</b>任何密钥材料（该表本来也没有）。 */
     public record BillingDailyView(Long id, Long tenantId, LocalDate statDate, Long requests, Long tokens,
                                    BigDecimal cost) {
     }

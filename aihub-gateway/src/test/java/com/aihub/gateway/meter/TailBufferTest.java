@@ -7,7 +7,7 @@ import java.nio.charset.StandardCharsets;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 尾部滑窗：usage 帧在流的**末尾**，所以超过上限时必须丢**头部**字节、保留最近的字节。
+ * 尾部滑窗：usage 帧在流的<b>末尾</b>，所以超过上限时必须丢<b>头部</b>字节、保留最近的字节。
  * 若实现成「超过上限就停止累积」，长回答的 usage 帧会被永远丢掉 —— 那正是本类要防的错。
  */
 class TailBufferTest {

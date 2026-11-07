@@ -15,18 +15,18 @@ import java.nio.charset.StandardCharsets;
  * 不引入 JSON 转换器（也就不会因为两侧 Jackson 配置不同而"静默解析成空对象"）。
  *
  * <p><b>载荷解不开时抛异常</b>（不是 log + return）：<b>静默 ACK 一条解不开的消息等于永久丢数据</b>。
- * 这里只记一条 ERROR（载荷已由 {@link KbMessageCodec} 截断转义）后**原样抛出**，交给容器的重试策略
+ * 这里只记一条 ERROR（载荷已由 {@link KbMessageCodec} 截断转义）后<b>原样抛出</b>，交给容器的重试策略
  * （3 次指数退避），仍失败则 reject → 进 {@code aihub.kb.dlq} 等人排查。照 {@code MeteringConsumer} 的纪律，
- * **绝不 `catch … { log; return; }`**。
+ * <b>绝不 `catch … { log; return; }`</b>。
  *
  * <p><b>本类是"薄适配器"</b>：真正的解析流水线在 {@code aihub-service} 的 {@link KbParseSink} 实现里
  * （{@code mq} 看不到 {@code dao}/{@code service}）。这样每个 Spring 上下文都会订阅 {@code kb.parse}
  * —— {@code KbPublishIntegrationTest} 那种"从队列收消息"的断言到 Task 4 起会被本消费者抢走，
- * 因此 Task 4+ 的断言一律走**数据库状态**。
+ * 因此 Task 4+ 的断言一律走<b>数据库状态</b>。
  *
  * <p><b>容器工厂是"专用"的</b>（M5 Task 6）：{@code containerFactory = "kbListenerContainerFactory"} ⇒
  * 走 {@link KbTopologyConfig#kbListenerContainerFactory}（挂了失败终态恢复器 {@link KbMessageRecoverer}），
- * 而不是框架默认工厂 ⇒ **计量链路的死信行为不受影响**（裁定 #2）。
+ * 而不是框架默认工厂 ⇒ <b>计量链路的死信行为不受影响</b>（裁定 #2）。
  */
 @Component
 public class KbParseConsumer {

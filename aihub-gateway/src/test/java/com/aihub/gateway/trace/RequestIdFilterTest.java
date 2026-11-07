@@ -42,7 +42,7 @@ class RequestIdFilterTest {
     }
 
     /**
-     * 客户端自带的 {@code x-request-id} **不得**被回显：它是我们的计量幂等键，
+     * 客户端自带的 {@code x-request-id} <b>不得</b>被回显：它是我们的计量幂等键，
      * 让调用方指定等于允许外部制造重复（甚至冲突）的幂等键。
      */
     @Test

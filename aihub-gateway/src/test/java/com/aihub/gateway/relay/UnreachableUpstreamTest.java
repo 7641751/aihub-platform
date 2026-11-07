@@ -21,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 上游完全不可达（连接被拒）时必须返回网关自造的 502，而不是框架 500。
- * <p>本类**不能**复用 {@code ChatRelayControllerTest} 里的静态 {@code FakeUpstream}：那个字段在整类
+ * <p>本类<b>不能</b>复用 {@code ChatRelayControllerTest} 里的静态 {@code FakeUpstream}：那个字段在整类
  * 级别固定了 {@code aihub.upstream.base-url}，而这里需要指向一个没有监听的端口。端口 1 在 Windows
  * 上必然连接被拒（且无特权进程监听），所以用属性写死即可，无需 Docker。
  * <p>M1 计划里本就排了这个类（后续任务的鉴权重放等场景会在此扩展），这里先把错误路径钉住。

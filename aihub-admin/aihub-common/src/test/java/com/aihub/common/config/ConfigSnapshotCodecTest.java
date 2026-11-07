@@ -60,9 +60,9 @@ class ConfigSnapshotCodecTest {
     }
 
     /**
-     * 额度往返**必须把 {@code quotas} 带回来**（变异体②的判别点）：只编码不解码会让 {@code quotas}
+     * 额度往返<b>必须把 {@code quotas} 带回来</b>（变异体②的判别点）：只编码不解码会让 {@code quotas}
      * 变成空表 —— 而空表正是「所有租户都不限」（D15）的默认值，于是「额度悄悄丢了」在生产上
-     * **不可观测**。这条断言要求解码后的额度与原文逐字段相等。
+     * <b>不可观测</b>。这条断言要求解码后的额度与原文逐字段相等。
      */
     @Test
     void roundTripsTheQuotasSection() {
@@ -115,7 +115,7 @@ class ConfigSnapshotCodecTest {
     }
 
     /**
-     * 额度查找**只认「租户 + 周期」**：跨周期取错会让错误的预算生效。变异体④（ConfigCache 只按
+     * 额度查找<b>只认「租户 + 周期」</b>：跨周期取错会让错误的预算生效。变异体④（ConfigCache 只按
      * tenantId 找）在网关侧的对应断言落在 {@code ConfigCacheTest}，这里钉住共享 record 本身的查找语义。
      */
     @Test

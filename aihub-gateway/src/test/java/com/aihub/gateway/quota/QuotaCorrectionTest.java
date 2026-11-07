@@ -47,15 +47,15 @@ import static org.mockito.Mockito.when;
  * 实际校正的两半：
  * <ol>
  *   <li><b>算术与关联存储</b>（纯单元）：真实用量取自 {@code MeteringEvent.totalTokens()}；estimate
- *       取自 {@link QuotaReservationRegistry}（过滤器写入、这里**消费即移除**）；缺失条目只计数不崩；
- *       {@code adjust} 每请求**恰一次**；失败只计数不抛。</li>
+ *       取自 {@link QuotaReservationRegistry}（过滤器写入、这里<b>消费即移除</b>）；缺失条目只计数不崩；
+ *       {@code adjust} 每请求<b>恰一次</b>；失败只计数不抛。</li>
  *   <li><b>控制器两个终端发布点都校正</b>（13b 裁定 1）：提前终止（{@code model_not_found}，
  *       不经过 {@code doFinally}）与正常收尾（{@code doFinally}）都必须调用校正器。若只改
- *       {@code doFinally}，每个 {@code model_not_found} 请求会**永久吃掉一份估算配额**。</li>
+ *       {@code doFinally}，每个 {@code model_not_found} 请求会<b>永久吃掉一份估算配额</b>。</li>
  * </ol>
  *
  * <p><b>网关测试不依赖 Docker</b>（CONVENTIONS §8 item 3）：与 Redis 交互只以 Mockito mock 钉
- * **调用约定**（键布局 + 增量符号）；「桶里的最终值等于真实用量」由 admin 侧真 Redis 用例负责
+ * <b>调用约定</b>（键布局 + 增量符号）；「桶里的最终值等于真实用量」由 admin 侧真 Redis 用例负责
  * （同键布局，见 {@code QuotaPreDeductionIntegrationTest} 所在模块）。
  */
 class QuotaCorrectionTest {
@@ -168,7 +168,7 @@ class QuotaCorrectionTest {
         assertThat(meters.counter(QuotaCorrector.FAILED_METRIC).count()).isEqualTo(1.0);
     }
 
-    /** 校正器退出时配额关闭：**不**消费、**不**计缺失（否则关掉配额会把 MISSING 顶到失真）。 */
+    /** 校正器退出时配额关闭：<b>不</b>消费、<b>不</b>计缺失（否则关掉配额会把 MISSING 顶到失真）。 */
     @Test
     void whenQuotaIsDisabledTheCorrectorDoesNothing() {
         QuotaConfigProperties disabled = new QuotaConfigProperties(false, 65536, Duration.ofMinutes(2), 1_000);
@@ -202,8 +202,8 @@ class QuotaCorrectionTest {
     // --- 两个终端发布点都校正（13b 裁定 1） ----------------------------------------------
 
     /**
-     * **提前终止路径**：没有候选渠道 → 404 {@code model_not_found}，在 {@code doFinally} 之前就 return。
-     * {@code QuotaFilter} 此时已经预扣，因此这条路径**必须**校正，否则每个这种请求永久吃掉一份估算配额。
+     * <b>提前终止路径</b>：没有候选渠道 → 404 {@code model_not_found}，在 {@code doFinally} 之前就 return。
+     * {@code QuotaFilter} 此时已经预扣，因此这条路径<b>必须</b>校正，否则每个这种请求永久吃掉一份估算配额。
      * 判别性：删掉 {@code ChatRelayController} 里 {@code :163} 那处的 {@code publishAndCorrect} ⇒ 本用例红。
      */
     @Test
@@ -224,8 +224,8 @@ class QuotaCorrectionTest {
     }
 
     /**
-     * **正常收尾路径**（{@code doFinally}）：真实上游 → 200，校正器必须被调用恰一次，
-     * 且回写给客户端的字节**不被校正改写**（M1 铁律）。
+     * <b>正常收尾路径</b>（{@code doFinally}）：真实上游 → 200，校正器必须被调用恰一次，
+     * 且回写给客户端的字节<b>不被校正改写</b>（M1 铁律）。
      */
     @Test
     void theNormalCompletionPathAlsoCorrectsTheReservation() {

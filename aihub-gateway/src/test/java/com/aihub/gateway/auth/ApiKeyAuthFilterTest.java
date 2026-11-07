@@ -89,11 +89,11 @@ class ApiKeyAuthFilterTest {
     }
 
     /**
-     * Task 2 的过滤器**顺序**契约（{@code RequestIdFilter} 的 {@code HIGHEST_PRECEDENCE + 50} 早于
+     * Task 2 的过滤器<b>顺序</b>契约（{@code RequestIdFilter} 的 {@code HIGHEST_PRECEDENCE + 50} 早于
      * {@code ApiKeyAuthFilter} 的 {@code +100}）当初只用一次性探针验证过、随后被删掉，于是没有任何
      * 提交物守备它。它值得守备：401 是最需要 {@code x-request-id} 来排查的一类响应，而顺序一改，
      * 401 就会变成「没有 request id 的失败请求」——线上只能靠时间戳猜，且计量事件也不会产生。
-     * <p>本用例**不需要**假 admin、也**不需要** Redis：缺 {@code Authorization} 头在过滤器里直接短路
+     * <p>本用例<b>不需要</b>假 admin、也<b>不需要</b> Redis：缺 {@code Authorization} 头在过滤器里直接短路
      * 成 401，解析器（会碰 Redis/admin）根本不会被调用。
      */
     @Test
@@ -125,10 +125,10 @@ class ApiKeyAuthFilterTest {
     }
 
     /**
-     * Finding I6：{@code GET /v1/models} 的**鉴权成功**分支此前只在手工验证里跑过 ——
+     * Finding I6：{@code GET /v1/models} 的<b>鉴权成功</b>分支此前只在手工验证里跑过 ——
      * {@code ModelsControllerTest} 跑在 {@code aihub.auth.enabled=false} 上，本类（鉴权开着）
      * 只断言了 401。少了这条，「带着合法 key 打 /v1/models 仍然 401」在测试里毫无痕迹。
-     * 断言 200 **加上**配置驱动的模型 id：只断言 200 的话，一个恰好返回空 200 的实现也能绿。
+     * 断言 200 <b>加上</b>配置驱动的模型 id：只断言 200 的话，一个恰好返回空 200 的实现也能绿。
      */
     @Test
     void authenticatedModelsRequestIsAllowed() throws Exception {
@@ -167,10 +167,10 @@ class ApiKeyAuthFilterTest {
     }
 
     /**
-     * 回归（**区分性**用例）：守备判定用的路径必须与 handler mapping 一致（解码后、剥掉 path parameter）。
-     * {@code /%761/chat/completions} 的**原始**路径是 {@code /%761/...}（不以 {@code /v1/} 开头 →
+     * 回归（<b>区分性</b>用例）：守备判定用的路径必须与 handler mapping 一致（解码后、剥掉 path parameter）。
+     * {@code /%761/chat/completions} 的<b>原始</b>路径是 {@code /%761/...}（不以 {@code /v1/} 开头 →
      * 旧的字符串前缀守卫会放行），但 handler mapping 按解码后路径匹配到 controller
-     * → 无密钥直达上游。这条是 Finding 1 的**唯一**回归防护：恢复旧守卫时它必然变红。
+     * → 无密钥直达上游。这条是 Finding 1 的<b>唯一</b>回归防护：恢复旧守卫时它必然变红。
      */
     @Test
     void percentEncodedGuardedPathCannotBypassTheGuard() throws Exception {
@@ -178,15 +178,15 @@ class ApiKeyAuthFilterTest {
     }
 
     /**
-     * 回归（**区分性**用例）：{@code /v1;x=/chat/completions} 同样命中 controller，但它的原始路径
-     * 以 {@code "/v1;"} 开头、**不以 {@code "/v1/"} 开头** —— 于是
+     * 回归（<b>区分性</b>用例）：{@code /v1;x=/chat/completions} 同样命中 controller，但它的原始路径
+     * 以 {@code "/v1;"} 开头、<b>不以 {@code "/v1/"} 开头</b> —— 于是
      * {@code value().startsWith("/v1/")} 对它是 {@code false}，取反后走
-     * {@code !enabled || !startsWith} 的**放行**分支，旧守卫同样会被绕过。
+     * {@code !enabled || !startsWith} 的<b>放行</b>分支，旧守卫同样会被绕过。
      *
      * <p><b>本 javadoc 曾把这条写成「形状覆盖，不是区分性用例」，并声称「旧守卫也会拒绝它」——
-     * 那是错的（2026-11-01 实测修正）</b>。它只在守卫写成 {@code startsWith("/v1")}（**不带尾斜杠**）
+     * 那是错的（2026-11-01 实测修正）</b>。它只在守卫写成 {@code startsWith("/v1")}（<b>不带尾斜杠</b>）
      * 时才是非区分性的：那时 {@code /v1;x=} 以 {@code /v1} 开头，确实被拦住。带尾斜杠的旧守卫
-     * 与本条路径的正确守卫判据正好相反，因此本条**是**区分性用例。
+     * 与本条路径的正确守卫判据正好相反，因此本条<b>是</b>区分性用例。
      *
      * <p>实测记录（{@code -Dsurefire.runOrder=reversealphabetical}，11 例）：
      * <ul>
@@ -215,7 +215,7 @@ class ApiKeyAuthFilterTest {
 
     /**
      * 不带 Authorization 打「过滤器看不见、handler mapping 却看得见」的路径变体：既必须 401，
-     * 又必须**没有触到上游**。只断言状态码的话，将来把绕过改成另一种拒绝（例如 400/403）就会假绿。
+     * 又必须<b>没有触到上游</b>。只断言状态码的话，将来把绕过改成另一种拒绝（例如 400/403）就会假绿。
      */
     private void assertRejectedWithoutTouchingUpstream(String path) throws Exception {
         upstream.clearLastRequest();

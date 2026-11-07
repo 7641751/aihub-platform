@@ -21,24 +21,24 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Chroma（向量库）的 REST 客户端（M5 决策 D3：**真 Chroma**，不许用假 HTTP 上游替代）。
+ * Chroma（向量库）的 REST 客户端（M5 决策 D3：<b>真 Chroma</b>，不许用假 HTTP 上游替代）。
  *
  * <p><b>契约按 2026-10-02/03 的两次实测钉死</b>（`docs/superpowers/plans/2026-10-02-m5-kb-pipeline.md`
- * 「Chroma 契约」表 + `.m5t5-logs/step0-04-contract-probe.txt` 的原始输出），**不是照文档猜的**：
+ * 「Chroma 契约」表 + `.m5t5-logs/step0-04-contract-probe.txt` 的原始输出），<b>不是照文档猜的</b>：
  * <ul>
  *   <li>建/取集合：{@code POST /api/v1/collections} 体 {@code {"name":…,"get_or_create":true}} ⇒ 返回 {@code id}(UUID)；
  *       <b>除"按集合名"的路由外，所有集合级路由都吃这个 {@code collection_id}，不吃名字</b>；</li>
- *   <li>写：{@code POST /api/v1/collections/{id}/upsert} ⇒ **重放同一批 ids 时 count 不变**（幂等 ⇒ D15 的前提成立）；</li>
+ *   <li>写：{@code POST /api/v1/collections/{id}/upsert} ⇒ <b>重放同一批 ids 时 count 不变</b>（幂等 ⇒ D15 的前提成立）；</li>
  *   <li>取：{@code POST /api/v1/collections/{id}/get} 体 {@code {"where":{"doc_id":N},"include":["metadatas"]}}
- *       ⇒ 返回的 {@code ids} 与写入时**逐字一致**（即 {@code "{docId}:{seq}"}）；</li>
- *   <li>删：{@code POST /api/v1/collections/{id}/delete} 体 {@code {"where":{"doc_id":N}}} ⇒ **只删该 doc**（实测 3→1）；</li>
+ *       ⇒ 返回的 {@code ids} 与写入时<b>逐字一致</b>（即 {@code "{docId}:{seq}"}）；</li>
+ *   <li>删：{@code POST /api/v1/collections/{id}/delete} 体 {@code {"where":{"doc_id":N}}} ⇒ <b>只删该 doc</b>（实测 3→1）；</li>
  *   <li>⚠️ <b>计数：{@code count} 是 {@code GET}</b> —— 实测用 {@code POST} 调它得到 <b>405</b>，别照直觉写。
- *       而且它**不支持 where 过滤** ⇒ 本类的 {@link #countByDocId(long)} 是"取回该 doc 的 ids 再数长度"。</li>
+ *       而且它<b>不支持 where 过滤</b> ⇒ 本类的 {@link #countByDocId(long)} 是"取回该 doc 的 ids 再数长度"。</li>
  * </ul>
  *
  * <p><b>metadata 与 id 的形状是跨仓库契约</b>（计划附录 A）：`vector_id = "{docId}:{seq}"`；
- * metadata **必填** `doc_id`(long)/`tenant_id`(long)/`seq`(int)；**文本不进 Chroma**（只回查 MySQL）。
- * 检索侧（另一个仓库的 Python）靠 `where={"tenant_id": N}` 隔离租户 ⇒ **改这几个字段名就是破坏性变更**。
+ * metadata <b>必填</b> `doc_id`(long)/`tenant_id`(long)/`seq`(int)；<b>文本不进 Chroma</b>（只回查 MySQL）。
+ * 检索侧（另一个仓库的 Python）靠 `where={"tenant_id": N}` 隔离租户 ⇒ <b>改这几个字段名就是破坏性变更</b>。
  */
 @Service
 public class KbVectorStoreClient {
@@ -141,7 +141,7 @@ public class KbVectorStoreClient {
         return tenants;
     }
 
-    /** 按 metadata 的 `doc_id` 全删该 doc（D8 的清理顺序里**第一步**）。 */
+    /** 按 metadata 的 `doc_id` 全删该 doc（D8 的清理顺序里<b>第一步</b>）。 */
     public void deleteByDocId(long docId) {
         ObjectNode where = MAPPER.createObjectNode();
         where.put("doc_id", docId);

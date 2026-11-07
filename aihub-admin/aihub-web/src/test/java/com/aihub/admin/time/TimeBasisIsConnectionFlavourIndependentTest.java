@@ -26,28 +26,28 @@ import java.time.ZoneOffset;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 判别器：**故意把连接时区钉成一个固定的非 UTC 区**，跑同一条生产读写路径，证明时间基准与连接时区无关。
+ * 判别器：<b>故意把连接时区钉成一个固定的非 UTC 区</b>，跑同一条生产读写路径，证明时间基准与连接时区无关。
  *
  * <p>背景（2026-09-29 独立评审 I-1）：生产 URL 钉了 {@code serverTimezone=UTC}，而在那个方言下
  * 「把 {@code datetime} 读成 {@code LocalDateTime} + 显式 UTC 折」与「读成 {@code Timestamp} + {@code toInstant()}」
- * **逐位相等**（实测 {@code old − new = 0}）—— 只要连接时区是 UTC，修复前后就没有可观测差异。
- * 旧代码的错误只在一个条件下出现：**连接时区不是 UTC**。而
+ * <b>逐位相等</b>（实测 {@code old − new = 0}）—— 只要连接时区是 UTC，修复前后就没有可观测差异。
+ * 旧代码的错误只在一个条件下出现：<b>连接时区不是 UTC</b>。而
  * {@link com.aihub.admin.support.AbstractIntegrationTest} 现在跑生产方言（UTC），
  * 因此判别力必须由本类提供：它用 {@link TestContainers#nonUtcFlavouredJdbcUrl()}
  * （{@code connectionTimeZone=Asia/Shanghai}，固定区）起一个独立上下文，让
  * {@code ConfigSnapshotService.currentVersion()} 与 {@code ApiKeyService} 的实体↔列换算
- * **真的落在一个非 UTC 的连接时区上**。
+ * <b>真的落在一个非 UTC 的连接时区上</b>。
  *
  * <p><b>为什么钉固定区而不是裸 URL（LOCAL）</b>：LOCAL 的行为取决于跑测试的 JVM 默认时区 ——
- * 在一台 UTC 的机器或 CI 镜像上，LOCAL 与 UTC 行为完全一致，本类会**悄悄失去判别力**
+ * 在一台 UTC 的机器或 CI 镜像上，LOCAL 与 UTC 行为完全一致，本类会<b>悄悄失去判别力</b>
  * （这正是评审 I-1(b) 指出的盲区）。固定区让判别在任何 JVM 时区下都成立；
  * 本类的 {@link #theConnectionZoneIsDeliberatelyNonUtcSoTheDiscriminationDoesNotDependOnTheHostJvm()}
  * 同时把「历史方言 LOCAL 确实随 JVM 时区变化」这个事实量出来并留在证据里。
  *
  * <p>本类能判别什么：把 {@code ConfigSnapshotService.maxUpdatedAt} 换回 {@code Timestamp}、
- * 或把 {@code ApiKeyEntity.expireAt} 换回裸 {@code Instant}，两条判别用例都会红 —— **任何 JVM 时区下**。
- * 它不能判别什么：列的**基准**是否正确（会话时区不是 UTC 时这是另一件事），那一半由
- * {@code ConfigSnapshotServiceTest} 的**数据库自身时钟**断言承担。
+ * 或把 {@code ApiKeyEntity.expireAt} 换回裸 {@code Instant}，两条判别用例都会红 —— <b>任何 JVM 时区下</b>。
+ * 它不能判别什么：列的<b>基准</b>是否正确（会话时区不是 UTC 时这是另一件事），那一半由
+ * {@code ConfigSnapshotServiceTest} 的<b>数据库自身时钟</b>断言承担。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class TimeBasisIsConnectionFlavourIndependentTest {
@@ -103,8 +103,8 @@ class TimeBasisIsConnectionFlavourIndependentTest {
      * <p>这里刻意分成两半：
      * <ol>
      *   <li>本上下文的方言（{@code connectionTimeZone=Asia/Shanghai}）—— 固定在 +08:00，
-     *       **不随 JVM 默认时区变化**，因此这个判别在 UTC 的 CI 镜像上同样成立；</li>
-     *   <li>历史方言（裸 URL ⇒ LOCAL）—— 它按 **JVM 默认时区**解释，把它量出来是为了留下
+     *       <b>不随 JVM 默认时区变化</b>，因此这个判别在 UTC 的 CI 镜像上同样成立；</li>
+     *   <li>历史方言（裸 URL ⇒ LOCAL）—— 它按 <b>JVM 默认时区</b>解释，把它量出来是为了留下
      *       「套件在评审之前跑的是哪个方言」的证据，同时说明它为什么不能当判别器。</li>
      * </ol>
      */
@@ -151,7 +151,7 @@ class TimeBasisIsConnectionFlavourIndependentTest {
 
     /**
      * Fix 1 的判别器（非 UTC 连接时区版）：水位来自裸 SQL 写入的 {@code channel.updated_at}，
-     * {@code currentVersion()} 必须把它当 **UTC** 墙上时间读。
+     * {@code currentVersion()} 必须把它当 <b>UTC</b> 墙上时间读。
      *
      * <p>若实现改回 {@code Timestamp} 载体，驱动会按连接时区（本上下文 = +08:00）折这一格 ⇒ 差
      * {@code −8 h}，本条红 —— 且与 JVM 默认时区无关。
@@ -188,7 +188,7 @@ class TimeBasisIsConnectionFlavourIndependentTest {
     }
 
     /**
-     * Fix 2 的判别器（非 UTC 连接时区版）：{@code api_key.expire_at} 的**原始列**必须与兄弟列同基准
+     * Fix 2 的判别器（非 UTC 连接时区版）：{@code api_key.expire_at} 的<b>原始列</b>必须与兄弟列同基准
      * （UTC 墙上时间）。
      *
      * <p>读的是列而不是实体：实体往返在两种基准下都自洽（写入与读回走同一次连接时区换算、互相抵消），

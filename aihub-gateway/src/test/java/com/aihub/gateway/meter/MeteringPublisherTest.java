@@ -11,10 +11,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 
 /**
- * {@code MeteringPublisher} 是控制器唯一依赖的发布门面，而它被调用的位置是**响应收尾**
+ * {@code MeteringPublisher} 是控制器唯一依赖的发布门面，而它被调用的位置是<b>响应收尾</b>
  * （{@code doFinally}，Netty event loop）。Task 4 的测试清单里没有它，于是两条最关键的纪律无人守备：
  * <ol>
- *   <li>{@code aihub.metering.enabled=false} 必须**完全短路**（连编码都不做、绝不碰投递器）——
+ *   <li>{@code aihub.metering.enabled=false} 必须<b>完全短路</b>（连编码都不做、绝不碰投递器）——
  *       本地排查时关掉计量，却仍在往 MQ 投事件，是最容易骗过自己的一种坏法；</li>
  *   <li>{@code publish} 绝不把异常抛回请求路径（设计决策 C：计量是派生数据，任何异常只记日志）。
  *       这条不成立时，一个计量故障会变成 500 —— 用户请求被派生数据拖挂。</li>
@@ -34,7 +34,7 @@ class MeteringPublisherTest {
                 MeteringEvent.STATUS_SUCCESS, null, 1_700_000_000_000L);
     }
 
-    /** 关闭计量时**什么都不做**：不给投递器任何东西，也不落盘。 */
+    /** 关闭计量时<b>什么都不做</b>：不给投递器任何东西，也不落盘。 */
     @Test
     void disabledPublisherHandsNothingToTheTransport() throws Exception {
         RecordingTransport transport = new RecordingTransport();
@@ -68,7 +68,7 @@ class MeteringPublisherTest {
 
     /**
      * 投递器抛异常时 {@code publish} 必须吞掉：它是 {@code doFinally} 里被调用的，异常一旦逃出去
-     * 就会把一次**已经成功转发**的请求变成错误响应（或污染 {@code doFinally} 的信号）。
+     * 就会把一次<b>已经成功转发</b>的请求变成错误响应（或污染 {@code doFinally} 的信号）。
      */
     @Test
     void publishSwallowsDispatcherFailuresInsteadOfThrowing() {

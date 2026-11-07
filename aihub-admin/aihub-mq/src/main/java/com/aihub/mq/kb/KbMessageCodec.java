@@ -1,11 +1,11 @@
 package com.aihub.mq.kb;
 
 /**
- * kb 消息的线格式：**文本分隔符、无 JSON**（与 {@code MeteringEventCodec} 同风格）。
+ * kb 消息的线格式：<b>文本分隔符、无 JSON</b>（与 {@code MeteringEventCodec} 同风格）。
  *
  * <p><b>为什么不是 JSON</b>：{@code aihub-mq} 的依赖面只有 {@code aihub-common} +
- * {@code spring-boot-starter-amqp}（**没有 Jackson**，实测 pom）——引 Jackson 只为编解码是净增依赖。
- * 文本分隔符是**唯一与现有依赖面一致**的选择（D11）。
+ * {@code spring-boot-starter-amqp}（<b>没有 Jackson</b>，实测 pom）——引 Jackson 只为编解码是净增依赖。
+ * 文本分隔符是<b>唯一与现有依赖面一致</b>的选择（D11）。
  *
  * <p>两种载荷：
  * <ul>
@@ -14,7 +14,7 @@ package com.aihub.mq.kb;
  * </ul>
  *
  * <p><b>畸形 / 错路由的载荷必须抛 {@link IllegalArgumentException}</b>（不是返回 {@code null}）：
- * 静默 ACK 一条解不开的消息等于**永久丢数据**。抛出后交给容器的重试策略，仍失败则 reject → 进 DLQ
+ * 静默 ACK 一条解不开的消息等于<b>永久丢数据</b>。抛出后交给容器的重试策略，仍失败则 reject → 进 DLQ
  * （照 {@code MeteringConsumer} 的纪律）。
  */
 public final class KbMessageCodec {
@@ -93,7 +93,7 @@ public final class KbMessageCodec {
     }
 
     /**
-     * 给日志用的短描述：载荷来自 broker，**长度与内容都不受本进程控制**，所以截断后再拼进异常消息，
+     * 给日志用的短描述：载荷来自 broker，<b>长度与内容都不受本进程控制</b>，所以截断后再拼进异常消息，
      * 免得一条超大/带换行的消息在 3 次重试里把日志冲爆、或伪造日志行。
      */
     private static String describe(String payload) {

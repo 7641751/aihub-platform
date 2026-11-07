@@ -7,8 +7,8 @@ import java.util.Optional;
 import java.util.function.Supplier;
 
 /**
- * {@code (tenantId, period) → 本周期额度}。额度**只能**来自配置快照（Task 13a 已把 {@code quota} 表
- * 镜像进快照）：网关**不连数据库**（没有该依赖），也**不每请求回源 admin**（那是 Task 14 的
+ * {@code (tenantId, period) → 本周期额度}。额度<b>只能</b>来自配置快照（Task 13a 已把 {@code quota} 表
+ * 镜像进快照）：网关<b>不连数据库</b>（没有该依赖），也<b>不每请求回源 admin</b>（那是 Task 14 的
  * Redis 不可用兜底路径）。因此这里收的是一个 {@link Supplier}（{@code ConfigClient::current}），
  * 每次调用惰性读快照 —— 控制面改了额度，下一个请求就生效。
  *
@@ -27,7 +27,7 @@ public class QuotaResolver {
     }
 
     /**
-     * 本 {@code (tenantId, period)} 生效的额度；空 = **不限**（无行，或两个限额都为 0）。
+     * 本 {@code (tenantId, period)} 生效的额度；空 = <b>不限</b>（无行，或两个限额都为 0）。
      *
      * @param period UTC 的 {@code YYYYMM}（{@code QuotaPeriod.of}）
      */

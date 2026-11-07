@@ -8,23 +8,23 @@ import java.time.LocalDateTime;
 
 /**
  * 对应 Flyway V1 的 {@code quota} 表（{@code V1__init_schema.sql:77-90}）：
- * 租户的**周期预算**，唯一键 {@code uk_quota_tenant_period (tenant_id, period)}。
+ * 租户的<b>周期预算</b>，唯一键 {@code uk_quota_tenant_period (tenant_id, period)}。
  *
  * <p><b>字段与 V1 的 10 列逐字对应</b>：{@code id / tenant_id / period / token_limit / token_used /
  * request_limit / request_used / version / created_at / updated_at}。其中
- * {@code tokenUsed} / {@code requestUsed} 是**"预留但未接线"的列**：控制面不写（只读），而**数据面也不写它们** ——
- * 真实的预扣累计在数据面的 **Redis 桶**里（{@code aihub:quota:{tenantId}:{YYYYMM}} 的 {@code tok}/{@code req}），
- * 每日对账按 D12 **只读、不改账**，全仓库唯一的 {@code UPDATE quota}（{@code QuotaMapper.compareAndSwapLimits}）
- * 也不碰这两列 ⇒ 它们在**生产环境恒为 0**。
- * ⇒ **要看用量请用只读出口 {@code GET /api/quotas/usage}**（{@code QuotaUsageService}，口径见 CONVENTIONS §6.7），
- * 别拿本实体的已用量字段做看板或计费。{@code version} 是控制面**手写乐观锁**的计数列
+ * {@code tokenUsed} / {@code requestUsed} 是<b>"预留但未接线"的列</b>：控制面不写（只读），而<b>数据面也不写它们</b> ——
+ * 真实的预扣累计在数据面的 <b>Redis 桶</b>里（{@code aihub:quota:{tenantId}:{YYYYMM}} 的 {@code tok}/{@code req}），
+ * 每日对账按 D12 <b>只读、不改账</b>，全仓库唯一的 {@code UPDATE quota}（{@code QuotaMapper.compareAndSwapLimits}）
+ * 也不碰这两列 ⇒ 它们在<b>生产环境恒为 0</b>。
+ * ⇒ <b>要看用量请用只读出口 {@code GET /api/quotas/usage}</b>（{@code QuotaUsageService}，口径见 CONVENTIONS §6.7），
+ * 别拿本实体的已用量字段做看板或计费。{@code version} 是控制面<b>手写乐观锁</b>的计数列
  * （本仓库不注册 {@code MybatisPlusInterceptor}，{@code @Version} 不生效 —— 见
  * {@code QuotaAdminService.update}）。
  *
  * <p>{@code period} 是 UTC 的 {@code YYYYMM}（决策 D13），用 {@link String} 映射 {@code VARCHAR(8)}。
  *
  * <p>{@code createdAt} / {@code updatedAt} 用 {@link LocalDateTime} 映射 {@code DATETIME(3)}，
- * 并由本表在**应用侧显式按 UTC 写入**（与 {@code ChannelEntity} 刻意不映射时间列的做法**不同** ——
+ * 并由本表在<b>应用侧显式按 UTC 写入</b>（与 {@code ChannelEntity} 刻意不映射时间列的做法<b>不同</b> ——
  * 这里必须映射，因为控制面写路径要把 {@code created_at} 钉在代码里，见 CONVENTIONS §7）：
  * 不依赖库的 {@code DEFAULT CURRENT_TIMESTAMP(3)}（那写的是数据库会话时区），也不用 {@code Instant}
  * （那会被驱动按 JDBC 连接时区折算）。写入点见 {@code QuotaAdminService.getOrCreate}。
@@ -37,14 +37,14 @@ public class QuotaEntity {
     private Long tenantId;
     /** UTC 的 {@code YYYYMM}（决策 D13）。 */
     private String period;
-    /** 周期 token 预算；{@code 0} 表示**不限**（决策 D15）。控制面写。 */
+    /** 周期 token 预算；{@code 0} 表示<b>不限</b>（决策 D15）。控制面写。 */
     private Long tokenLimit;
-    /** 周期内已用 token；**"预留但未接线"**（无任何生产写入方，恒为 0）。真实用量在数据面 Redis 桶里，
+    /** 周期内已用 token；<b>"预留但未接线"</b>（无任何生产写入方，恒为 0）。真实用量在数据面 Redis 桶里，
      * 只读出口见 {@code GET /api/quotas/usage}。 */
     private Long tokenUsed;
-    /** 周期请求数上限；{@code 0} 表示**不限**（决策 D15）。控制面写。 */
+    /** 周期请求数上限；{@code 0} 表示<b>不限</b>（决策 D15）。控制面写。 */
     private Long requestLimit;
-    /** 周期内已用请求数；**"预留但未接线"**（无任何生产写入方，恒为 0）。真实用量在数据面 Redis 桶里。 */
+    /** 周期内已用请求数；<b>"预留但未接线"</b>（无任何生产写入方，恒为 0）。真实用量在数据面 Redis 桶里。 */
     private Long requestUsed;
     /** 控制面手写乐观锁的计数列（每次配置更新 +1）。 */
     private Long version;

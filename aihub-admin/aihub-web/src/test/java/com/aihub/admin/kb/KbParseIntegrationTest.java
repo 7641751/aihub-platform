@@ -43,20 +43,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 
 /**
- * M5 Task 4 的**线上契约**：一条 {@code parse:{docId}} 被解析成 {@code kb_chunk} 行、状态走到
+ * M5 Task 4 的<b>线上契约</b>：一条 {@code parse:{docId}} 被解析成 {@code kb_chunk} 行、状态走到
  * {@code EMBEDDING}、并按 {@code ceil(N/batchSize)} 分发 {@code kb.embed}。
  *
- * <p><b>真容器 + 真 HTTP + 真令牌 + 真 broker + 真消费者</b>，复用**已有**的 Spring 上下文
+ * <p><b>真容器 + 真 HTTP + 真令牌 + 真 broker + 真消费者</b>，复用<b>已有</b>的 Spring 上下文
  * （继承 {@link AbstractIntegrationTest}）。{@code @TestPropertySource} 那把字面量与
  * {@code KbUploadIntegrationTest} / {@code KbPublishIntegrationTest} / {@code ConsoleLoginIntegrationTest}
- * **逐字相同**、且本类**不加** {@code @Import} ⇒ 共用同一个上下文（判据：全量套件
+ * <b>逐字相同</b>、且本类<b>不加</b> {@code @Import} ⇒ 共用同一个上下文（判据：全量套件
  * {@code Tomcat started on port} 仍是 7）。
  *
- * <p><b>断言一律走数据库状态</b>（{@code kb_document.status} / {@code kb_chunk} 行数），**不抢 {@code kb.parse} 队列**：
+ * <p><b>断言一律走数据库状态</b>（{@code kb_document.status} / {@code kb_chunk} 行数），<b>不抢 {@code kb.parse} 队列</b>：
  * Task 4 的消费者一落地就会在每个 Spring 上下文里订阅 {@code kb.parse}，抢队列会退化成 flaky。
  * 唯一从队列取消息的是 {@code kb.embed}（本任务还没有 embed 消费者 ⇒ 消息留在队列里）。
  * ⚠️ <b>那条 embed 断言有保质期</b>：Task 5 的消费者一落地就会抢走 {@code kb.embed}，届时必须改成
- * 数据库判据（{@code kb_chunk.embedded_at}）—— 这是**已知的短期判据**，不是遗漏。
+ * 数据库判据（{@code kb_chunk.embedded_at}）—— 这是<b>已知的短期判据</b>，不是遗漏。
  *
  * <p><b>超时必须有界且带诊断</b>：{@link #awaitUntil} 不用 {@code sleep} 硬等，超时把当时的
  * {@code status}/{@code chunk} 数打进失败消息，免得排查只剩"超时了"三个字。
@@ -69,7 +69,7 @@ class KbParseIntegrationTest extends AbstractIntegrationTest {
     /** 本用例专用租户（与 Task 2 的 920001 / Task 3 的 920002 区分，避免共享表上的夹具互相干扰）。 */
     private static final long TENANT = 920_003L;
 
-    /** 每批段数 = {@code aihub.kb.embed.batch-size} 的**默认值**（测试不许覆盖 ⇒ 会 fork 上下文）。 */
+    /** 每批段数 = {@code aihub.kb.embed.batch-size} 的<b>默认值</b>（测试不许覆盖 ⇒ 会 fork 上下文）。 */
     private static final int BATCH_SIZE = 10;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -249,9 +249,9 @@ class KbParseIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 生成一篇长度**恰好 17000 字符**的 markdown。在 {@code size=800 / overlap=100}（步长 700）下，
+     * 生成一篇长度<b>恰好 17000 字符</b>的 markdown。在 {@code size=800 / overlap=100}（步长 700）下，
      * 段数 = {@code ceil((17000-800)/700) + 1 = 25} ⇒ 每条解析消息产出恰好 25 段、3 个 embed 批次。
-     * 长度精确可控是为了让 {@code 25} 这个断言**可复算**（数字必须指得到来源）。
+     * 长度精确可控是为了让 {@code 25} 这个断言<b>可复算</b>（数字必须指得到来源）。
      */
     private static byte[] mdWith(int paragraphs, String marker) {
         int targetLength = 17_000;

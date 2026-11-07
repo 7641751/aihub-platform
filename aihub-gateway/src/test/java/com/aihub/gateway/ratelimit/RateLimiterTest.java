@@ -27,16 +27,16 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * {@link RateLimiter} 是「Redis 挂了怎么办」这条规则的**唯一落点**，因此它的降级语义必须自己有条用例，
+ * {@link RateLimiter} 是「Redis 挂了怎么办」这条规则的<b>唯一落点</b>，因此它的降级语义必须自己有条用例，
  * 不能只靠 {@link RedisRateLimiterTest}（那一类只证明「Redis 这一级会说 null」）与 Task 9 的过滤器
  * （那一类用的是假 limiter，根本碰不到真门面）。
  *
  * <p>本类钉住四件事：
  * <ol>
- *   <li>Redis 抛异常时 {@code acquire} **返回**一个本机桶判定（`source == LOCAL`），既不抛也不拒绝；</li>
- *   <li>降级是**粘性**的：一秒内不再重复撞 Redis（否则每个请求都要等一次 2 秒超时）；</li>
- *   <li>策略解析真的接进了门面（key 级 100/200 而不是租户级 20/40），而**桶 key 不随策略维度变化**；</li>
- *   <li>降级桶**仍然限流**（不是一张万能通行证），超限时照样带退避提示。</li>
+ *   <li>Redis 抛异常时 {@code acquire} <b>返回</b>一个本机桶判定（`source == LOCAL`），既不抛也不拒绝；</li>
+ *   <li>降级是<b>粘性</b>的：一秒内不再重复撞 Redis（否则每个请求都要等一次 2 秒超时）；</li>
+ *   <li>策略解析真的接进了门面（key 级 100/200 而不是租户级 20/40），而<b>桶 key 不随策略维度变化</b>；</li>
+ *   <li>降级桶<b>仍然限流</b>（不是一张万能通行证），超限时照样带退避提示。</li>
  * </ol>
  */
 @SuppressWarnings("unchecked")
@@ -68,7 +68,7 @@ class RateLimiterTest {
     }
 
     /**
-     * 设计文档 §9 的核心：控制面（Redis）不可用**不能**变成数据面不可用。故障只能转化为
+     * 设计文档 §9 的核心：控制面（Redis）不可用<b>不能</b>变成数据面不可用。故障只能转化为
      * 「换一种近似」（本机桶），绝不能转化为异常或拒绝。
      */
     @Test
@@ -125,7 +125,7 @@ class RateLimiterTest {
     }
 
     /**
-     * 策略解析必须真的接进门面，并且**桶的维度与策略的维度是两件事**：key 级策略生效时，
+     * 策略解析必须真的接进门面，并且<b>桶的维度与策略的维度是两件事</b>：key 级策略生效时，
      * 桶 key 仍是 {@code aihub:ratelimit:{tenantId}:{sha256(secret)}}（决策 8）。
      */
     @Test
@@ -182,7 +182,7 @@ class RateLimiterTest {
     }
 
     /**
-     * 降级**不是**「限流失效」：本机桶照样按同一套算术判定，只是作用域变成单机。
+     * 降级<b>不是</b>「限流失效」：本机桶照样按同一套算术判定，只是作用域变成单机。
      * 把降级写成「一律放行」的实现在这条上必红。
      */
     @Test
@@ -201,7 +201,7 @@ class RateLimiterTest {
     }
 
     /**
-     * 端到端版本的降级证据：**真的** Lettuce 客户端指向一个死端口（与 M1/M2 的
+     * 端到端版本的降级证据：<b>真的</b> Lettuce 客户端指向一个死端口（与 M1/M2 的
      * {@code spring.data.redis.port=1} 同一条做法），走完「真连接失败 → {@link RedisRateLimiter}
      * 折算 null → 本机桶判定」整条链路。上面的桩测试钉的是语义，这条钉的是「真驱动抛出来的那种异常
      * 也确实被吃掉了」。

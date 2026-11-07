@@ -37,19 +37,19 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * G15：候选渠道必须过 {@link ChannelDescriptor#usable()} 这道**唯一**的可用性判据，否则中继会把一条
+ * G15：候选渠道必须过 {@link ChannelDescriptor#usable()} 这道<b>唯一</b>的可用性判据，否则中继会把一条
  * 不可用的渠道交给 {@link UpstreamClientFactory}：
  * <ul>
  *   <li>{@code baseUrl} 为空/空白 → WebClient builder 直接拒绝（异常从中继里穿出去 = 客户端 500）；</li>
  *   <li>{@code timeoutMs <= 0} → 被静默夹到 1ms，一条配错的渠道变成「每个请求都瞬间超时」。</li>
  * </ul>
  *
- * <p>为什么这里需要一个**桩** RouteResolver：真实的 {@code RouteResolver} 自己也会过滤
+ * <p>为什么这里需要一个<b>桩</b> RouteResolver：真实的 {@code RouteResolver} 自己也会过滤
  * {@code usable()}，所以端到端用例无法区分「中继过滤了」与「路由过滤了」—— 改动路由（或将来有人
  * 从别处喂候选，例如遗留兜底路径）就会让中继的这道门形同虚设。这里直接喂一条不可用的候选，
  * 判别性是二值的：中继不过滤 → 客户端拿不到 200（工厂收到了一条不可用渠道 / 异常穿出）。
  *
- * <p>用 {@link MockServerWebExchange} 而不是端到端：本类要证的是**中继自己的**一道门，
+ * <p>用 {@link MockServerWebExchange} 而不是端到端：本类要证的是<b>中继自己的</b>一道门，
  * 与鉴权/限流/控制面无关，全部依赖（除了真实的工厂与真实的假上游）都用桩，因此毫秒级且不依赖 Redis。
  */
 class UnusableChannelRelayTest {
@@ -90,8 +90,8 @@ class UnusableChannelRelayTest {
     }
 
     /**
-     * 候选顺序里**第一条**就是不可用的（空白 base-url），第二条带密文密钥且可用。中继必须丢掉第一条、
-     * 直接用第二条服务；工厂**一次都不该**看到第一条。
+     * 候选顺序里<b>第一条</b>就是不可用的（空白 base-url），第二条带密文密钥且可用。中继必须丢掉第一条、
+     * 直接用第二条服务；工厂<b>一次都不该</b>看到第一条。
      */
     @Test
     void anUnusableCandidateIsNeverHandedToTheClientFactory() throws Exception {
@@ -142,12 +142,12 @@ class UnusableChannelRelayTest {
     }
 
     /**
-     * 回落路径的第二道门：{@code configClient.legacyChannel()} 交回来的描述符必须**真的是遗留哨兵**
+     * 回落路径的第二道门：{@code configClient.legacyChannel()} 交回来的描述符必须<b>真的是遗留哨兵</b>
      * （id = {@link LegacyChannel#ID}）。
      *
-     * <p>为什么需要这道门：{@code keyDecryptor.canServe(legacy)} 在这条路径上是**恒真**的
+     * <p>为什么需要这道门：{@code keyDecryptor.canServe(legacy)} 在这条路径上是<b>恒真</b>的
      * （{@code ChannelKeyDecryptor} 对哨兵无条件返回 {@code Optional.of}），因此它钉不住任何东西；
-     * 而「回落路径会不会把一条**任意**渠道当成兜底渠道发出去」是一个能真实出错的判断。这里喂一条
+     * 而「回落路径会不会把一条<b>任意</b>渠道当成兜底渠道发出去」是一个能真实出错的判断。这里喂一条
      * id=99 的真实渠道（base-url 可用、密钥可解），中继必须拒绝它并回 404 —— 而不是悄悄服务它。
      */
     @Test
@@ -173,7 +173,7 @@ class UnusableChannelRelayTest {
     }
 
     /**
-     * 遗留单渠道返回 429 时**不得**写熔断键：哨兵 id
+     * 遗留单渠道返回 429 时<b>不得</b>写熔断键：哨兵 id
      * （{@code -9223372036854775808}）不是 {@code channel} 表里的真实主键，为它写一条
      * {@code aihub:channel:circuit:<哨兵>} 会让「这个键空间里只有真实渠道 id」不再成立。
      *

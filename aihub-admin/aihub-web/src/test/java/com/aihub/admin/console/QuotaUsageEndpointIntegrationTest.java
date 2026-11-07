@@ -34,41 +34,41 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 只读用量出口 {@code GET /api/quotas/usage} 的**线上 HTTP 契约**：真容器（MySQL + Redis + RabbitMQ）、
+ * 只读用量出口 {@code GET /api/quotas/usage} 的<b>线上 HTTP 契约</b>：真容器（MySQL + Redis + RabbitMQ）、
  * 真 HTTP、真控制台令牌、真鉴权过滤器。
  *
  * <h2>这个端点存在的原因</h2>
- * 配额的真实已用量**只在 Redis 桶**（{@code aihub:quota:{tenantId}:{YYYYMM}} 的 {@code tok}/{@code req}）里 ——
- * MySQL 的 {@code quota.token_used}/{@code request_used} 是**死列**（全仓库唯一的
+ * 配额的真实已用量<b>只在 Redis 桶</b>（{@code aihub:quota:{tenantId}:{YYYYMM}} 的 {@code tok}/{@code req}）里 ——
+ * MySQL 的 {@code quota.token_used}/{@code request_used} 是<b>死列</b>（全仓库唯一的
  * {@code UPDATE quota} 不写它们，每日对账按 D12 也"从不写"），因此
- * {@code GET /api/quotas} 返回的 {@code tokenUsed} **恒为 0**。运维要看"这个周期用了多少、还剩多少"，
- * 在此之前**没有任何出口**。
+ * {@code GET /api/quotas} 返回的 {@code tokenUsed} <b>恒为 0</b>。运维要看"这个周期用了多少、还剩多少"，
+ * 在此之前<b>没有任何出口</b>。
  *
  * <h2>口径（刻意写进响应）</h2>
- * 桶里是**预扣估算**累计（{@code QuotaEstimator} 刻意偏保守），不是账单口径；所以响应带
+ * 桶里是<b>预扣估算</b>累计（{@code QuotaEstimator} 刻意偏保守），不是账单口径；所以响应带
  * {@code source="redis-bucket"} 与 {@code estimate=true}，防止被当成财务数字。选它的理由是
- * **所见即所拦**：这正是配额判定（{@code QuotaScript}）读的那个数。
+ * <b>所见即所拦</b>：这正是配额判定（{@code QuotaScript}）读的那个数。
  *
  * <h2>三条不变量（各自的判据见下）</h2>
  * <ol>
- *   <li><b>只读</b>（D12 红线）：不碰 {@code quota.token_used}、不碰桶、**也不惰性物化**
+ *   <li><b>只读</b>（D12 红线）：不碰 {@code quota.token_used}、不碰桶、<b>也不惰性物化</b>
  *       （与 {@code GET /api/quotas} 相反 —— 那个 GET 会插一行零额度行）；</li>
- *   <li><b>R3.2</b>：租户只取令牌里的 {@code tenantId}，**不接受显式覆盖**（显式 {@code ?tenantId=}
+ *   <li><b>R3.2</b>：租户只取令牌里的 {@code tenantId}，<b>不接受显式覆盖</b>（显式 {@code ?tenantId=}
  *       被忽略 —— 用两个桶值不同的租户让这条可证伪）；</li>
  *   <li><b>桶缺失 ≠ 错误</b>：报 {@code used=0} + {@code bucketMissing=true}；
  *       Redis 不可用才报错（那条在零上下文的 {@code QuotaUsageServiceTest} 里钉）。</li>
  * </ol>
  *
  * <h2>为什么本类与 {@code ConsoleLoginIntegrationTest} 共用同一个 Spring 上下文</h2>
- * 属性集与 {@code ConsoleLoginIntegrationTest} / {@code QuotaAdminIntegrationTest} **逐字相同**
- * （引用同一个 {@code SECRET} 常量）、且**不加** {@code @Import} / {@code @TestConfiguration} /
- * {@code @MockitoBean} ⇒ 复用既有上下文，{@code docs/CONVENTIONS.md} §8 的 7 上下文预算**不增加**
+ * 属性集与 {@code ConsoleLoginIntegrationTest} / {@code QuotaAdminIntegrationTest} <b>逐字相同</b>
+ * （引用同一个 {@code SECRET} 常量）、且<b>不加</b> {@code @Import} / {@code @TestConfiguration} /
+ * {@code @MockitoBean} ⇒ 复用既有上下文，{@code docs/CONVENTIONS.md} §8 的 7 上下文预算<b>不增加</b>
  * （全量套件的 {@code Tomcat started on port} 必须仍是 7）。
  *
  * <h2>夹具纪律</h2>
- * {@code quota} 表（{@code (tenant_id, period)} 唯一）与 Redis 容器都是 **JVM 级共享**的，
- * 因此每个用例用**自己的** {@code tenantId}（{@code 903_0xx} 段，与 {@code 901_0xx} /
- * {@code 902_0xx} 不重叠），前后各清一次，且**只清自己那几个租户**的配额行与桶键
+ * {@code quota} 表（{@code (tenant_id, period)} 唯一）与 Redis 容器都是 <b>JVM 级共享</b>的，
+ * 因此每个用例用<b>自己的</b> {@code tenantId}（{@code 903_0xx} 段，与 {@code 901_0xx} /
+ * {@code 902_0xx} 不重叠），前后各清一次，且<b>只清自己那几个租户</b>的配额行与桶键
  * （绝不 {@code FLUSHALL} / 删全前缀）。
  */
 @TestPropertySource(properties = {
@@ -129,8 +129,8 @@ class QuotaUsageEndpointIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 1) 正常路径：限额 + 桶 + remaining
 
     /**
-     * 本类的主判据：响应必须同时给出**限额**（来自 MySQL 行）、**已用量**（来自 Redis 桶）、
-     * **剩余量**（服务端按 Lua 同款规则算）与**口径标记**。
+     * 本类的主判据：响应必须同时给出<b>限额</b>（来自 MySQL 行）、<b>已用量</b>（来自 Redis 桶）、
+     * <b>剩余量</b>（服务端按 Lua 同款规则算）与<b>口径标记</b>。
      *
      * <p><b>判别力</b>：把桶读成 MySQL 的 {@code token_used}（恒 0）⇒ {@code tokenUsed} 断言红；
      * 把 {@code remaining} 改成"两个维度同一套算法"⇒ {@code requestRemaining=-1} 断言红（该维 0 = 不限）；
@@ -160,7 +160,7 @@ class QuotaUsageEndpointIntegrationTest extends AbstractIntegrationTest {
         assertThat(data.path("bucketMissing").asBoolean()).isFalse();
     }
 
-    /** 某一维限额为 0 = 该维**不限**（D15）：它的 remaining 必须是 {@code -1}（与 Lua 的返回约定一致）。 */
+    /** 某一维限额为 0 = 该维<b>不限</b>（D15）：它的 remaining 必须是 {@code -1}（与 Lua 的返回约定一致）。 */
     @Test
     void aZeroLimitDimensionReportsMinusOneRemaining() throws Exception {
         String period = currentPeriod();
@@ -178,9 +178,9 @@ class QuotaUsageEndpointIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 2) R3.2：不接受显式覆盖
 
     /**
-     * 显式 {@code ?tenantId=} 必须被**忽略**：读的仍是**令牌租户**的桶（R3.2，least privilege）。
+     * 显式 {@code ?tenantId=} 必须被<b>忽略</b>：读的仍是<b>令牌租户</b>的桶（R3.2，least privilege）。
      *
-     * <p>可证伪性来自两个租户的桶值**不同**（令牌租户 300、另一个 999）：哪一天有人给这个端点加了
+     * <p>可证伪性来自两个租户的桶值<b>不同</b>（令牌租户 300、另一个 999）：哪一天有人给这个端点加了
      * 请求参数覆盖，断言立刻红 —— 它不是"Spring 忽略未知参数"的同义反复。
      */
     @Test
@@ -199,7 +199,7 @@ class QuotaUsageEndpointIntegrationTest extends AbstractIntegrationTest {
 
     // ---------------------------------------------------------------- 3) 桶缺失 ≠ 错误
 
-    /** 该周期还没发生任何预扣 ⇒ {@code used=0} + {@code bucketMissing=true}（**不是** 404/500）。 */
+    /** 该周期还没发生任何预扣 ⇒ {@code used=0} + {@code bucketMissing=true}（<b>不是</b> 404/500）。 */
     @Test
     void anAbsentBucketIsReportedAsZeroAndFlagged() throws Exception {
         String period = currentPeriod();
@@ -219,10 +219,10 @@ class QuotaUsageEndpointIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 4) D15：不限 + 只读红线
 
     /**
-     * 没有配额行 = 不限（D15）：两个 remaining 都是 {@code -1}，且**不创建桶、也不惰性物化配额行**。
+     * 没有配额行 = 不限（D15）：两个 remaining 都是 {@code -1}，且<b>不创建桶、也不惰性物化配额行</b>。
      *
      * <p>最后那条断言是本端点与 {@code GET /api/quotas} 的分水岭：后者会
-     * {@code insertZeroRowIfAbsent}（读路径上的写），本端点**一个字节都不许写**。
+     * {@code insertZeroRowIfAbsent}（读路径上的写），本端点<b>一个字节都不许写</b>。
      */
     @Test
     void anUnlimitedTenantGetsMinusOneAndNothingIsWritten() throws Exception {
@@ -241,7 +241,7 @@ class QuotaUsageEndpointIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * D12 红线的正面钉：调用前后 {@code quota} 行的 {@code token_used}/{@code version} 与桶的值**逐位不变**。
+     * D12 红线的正面钉：调用前后 {@code quota} 行的 {@code token_used}/{@code version} 与桶的值<b>逐位不变</b>。
      *
      * <p>判别力：把已用量"顺手写回 MySQL"（那正是 D12 明确否掉的修正）⇒ {@code token_used} 断言红。
      */
@@ -316,7 +316,7 @@ class QuotaUsageEndpointIntegrationTest extends AbstractIntegrationTest {
         return consoleTokenService.issue(new ConsoleClaims(USER_ID, tenantId, role, now, now + TOKEN_TTL_SECONDS));
     }
 
-    /** 用**绝对 URL + 自带 port**：不依赖 {@link TestRestTemplate} 的 root uri，避免任何前缀歧义。 */
+    /** 用<b>绝对 URL + 自带 port</b>：不依赖 {@link TestRestTemplate} 的 root uri，避免任何前缀歧义。 */
     private String url(String path) {
         return "http://127.0.0.1:" + port + path;
     }
@@ -336,8 +336,8 @@ class QuotaUsageEndpointIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 直接写**网关那个键**（{@code QuotaKeys} 是共享契约，这里绝不出现字面量），并且**照生产的样子给它
-     * 一个 TTL**：真实路径上 {@code QuotaScript} 的 {@code PEXPIRE} 会设它，而"读用量**不刷新** TTL"
+     * 直接写<b>网关那个键</b>（{@code QuotaKeys} 是共享契约，这里绝不出现字面量），并且<b>照生产的样子给它
+     * 一个 TTL</b>：真实路径上 {@code QuotaScript} 的 {@code PEXPIRE} 会设它，而"读用量<b>不刷新</b> TTL"
      * 是一条真判据 —— 夹具不设 TTL 时 {@code getExpire} 恒为 {@code -1}，那条断言就变成了同义反复。
      */
     private void putBucket(long tenantId, String period, long tokens, long requests) {

@@ -17,21 +17,21 @@ import java.util.stream.IntStream;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * M5 Task 5 的**线上契约**：上传一篇 md，一路走到 {@code READY}，并且**向量真的在 Chroma 里**。
+ * M5 Task 5 的<b>线上契约</b>：上传一篇 md，一路走到 {@code READY}，并且<b>向量真的在 Chroma 里</b>。
  *
- * <p><b>真容器（MySQL/Redis/RabbitMQ/**Chroma**）+ 真 HTTP + 真令牌 + 真 broker + 真消费者 + 真向量库</b>，
+ * <p><b>真容器（MySQL/Redis/RabbitMQ/Chroma）+ 真 HTTP + 真令牌 + 真 broker + 真消费者 + 真向量库</b>，
  * 唯一的假东西是 embeddings 上游（宿主进程内的 {@code FakeEmbeddingUpstream}，D6）。
- * 复用**已有** Spring 上下文（{@code @TestPropertySource} 那把字面量与其它 kb 用例**逐字相同**、
- * 且**不加** {@code @Import}）⇒ 判据是全量套件 {@code Tomcat started on port} 仍是 **7**。
+ * 复用<b>已有</b> Spring 上下文（{@code @TestPropertySource} 那把字面量与其它 kb 用例<b>逐字相同</b>、
+ * 且<b>不加</b> {@code @Import}）⇒ 判据是全量套件 {@code Tomcat started on port} 仍是 <b>7</b>。
  *
  * <p><b>"真的写进去了"只能用向量库本身证</b>（不是队列、也不是自报的状态）：所以这里直接用生产客户端
- * {@code KbVectorStoreClient} 查 Chroma 的 ids/metadatas。断言一律**按 docId 定向**（共享单例 Chroma 里
+ * {@code KbVectorStoreClient} 查 Chroma 的 ids/metadatas。断言一律<b>按 docId 定向</b>（共享单例 Chroma 里
  * 会有别的用例的向量，全量计数会变成顺序依赖）。
  *
  * <p><b>两条"防假绿"的写法</b>（本项目 §8：不可证伪的断言不算断言）：
- * ① 重放用例先把状态与 {@code embedded_at} **手工退回**（否则 {@code EMBEDDING} 守卫会在写向量之前
+ * ① 重放用例先把状态与 {@code embedded_at} <b>手工退回</b>（否则 {@code EMBEDDING} 守卫会在写向量之前
  * 就 ack 丢弃 ⇒ 用例根本覆盖不到 upsert，变成空断言）；
- * ② 用一个**哨兵文档**证明"那条消息已被处理"，而不是睡一觉再看。
+ * ② 用一个<b>哨兵文档</b>证明"那条消息已被处理"，而不是睡一觉再看。
  */
 @TestPropertySource(properties = {
         "aihub.console.secret=console-it-secret-0123456789abcdefghijklmn"
@@ -95,7 +95,7 @@ class KbEmbedIntegrationTest extends KbIntegrationTestBase {
     }
 
     /**
-     * {@code FAILED} 必须**可以重试**（实测缺陷：消费端的带条件迁移只认 {@code PENDING/PARSING}，
+     * {@code FAILED} 必须<b>可以重试</b>（实测缺陷：消费端的带条件迁移只认 {@code PENDING/PARSING}，
      * 于是 {@code FAILED} 行的解析消息被 ack 丢弃 ⇒ 它曾是"只能看、不能重试"的终态）。
      *
      * <p>这里的现场等价于"embed 阶段重试耗尽后的行"：行是 {@code FAILED}、带着 {@code error_msg}。

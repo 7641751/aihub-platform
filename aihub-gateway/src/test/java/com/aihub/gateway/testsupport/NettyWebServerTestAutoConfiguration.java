@@ -19,14 +19,14 @@ import org.springframework.context.annotation.Bean;
  * <p>M3 的 WireMock 验收需要 {@code org.wiremock:wiremock-jetty12}（core 自带的 Jetty 11 绑定与父 POM
  * 管理的 Jetty 12 冲突，见 {@code aihub-gateway/pom.xml}），它把
  * {@code org.eclipse.jetty.ee10.servlet.ServletHolder} 与 {@code org.eclipse.jetty.server.Server}
- * 带进测试 classpath —— 于是 Boot 的 {@code EmbeddedJetty} 条件成立并**先于 Netty 注册**，
+ * 带进测试 classpath —— 于是 Boot 的 {@code EmbeddedJetty} 条件成立并<b>先于 Netty 注册</b>，
  * <b>整个网关测试套件会静默地从 Netty 换成「跑在 Servlet 模式下的 Jetty」</b>。
  *
  * <p>后果不是「换个实现也一样」：在 Servlet 那条写回路径上，
- * {@code ServletServerHttpResponse} 的 async 完成回调会在**每一个响应正常结束时**
+ * {@code ServletServerHttpResponse} 的 async 完成回调会在<b>每一个响应正常结束时</b>
  * 取消写-flush 处理器（{@code ChannelSendOperator.WriteBarrier.cancel}），
  * 于是中继挂在上游 body 上的 {@code doFinally(CANCEL)}（Task 10 用来识别客户端断连的那条）
- * 会在**每次成功响应**上误报「客户端断连」，把 {@code request_log.status} 记成
+ * 会在<b>每次成功响应</b>上误报「客户端断连」，把 {@code request_log.status} 记成
  * {@code CANCELLED/client_disconnected}。实测：只要 classpath 上有 Jetty 的 servlet 绑定，
  * {@code RelayMeteringFlowTest}（3）、{@code SseStreamingTest}（1）、{@code FailoverRelayTest}（1）
  * 这五个既有用例就会稳定变红。
@@ -38,7 +38,7 @@ import org.springframework.context.annotation.Bean;
  * {@code AihubGatewayApplicationTests#theGatewayTestContextRunsOnNettyNotOnAServletContainer()}
  * 会断言容器里跑的就是 {@code NettyWebServer}。
  *
- * <p>刻意**不用**「把 Jetty 从测试 classpath 里排掉」的写法：WireMock 的 Jetty 12 绑定就是它的
+ * <p>刻意<b>不用</b>「把 Jetty 从测试 classpath 里排掉」的写法：WireMock 的 Jetty 12 绑定就是它的
  * HTTP 服务器，排掉它验收测试根本起不来。把「用哪个 Web 服务器」写成显式选择，比依赖
  * 「classpath 上恰好没有别人」稳健得多 —— 将来任何再引入 servlet 容器的测试依赖都不会再偷偷换掉它。
  */

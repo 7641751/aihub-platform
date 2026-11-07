@@ -50,7 +50,7 @@ class AihubGatewayApplicationTests {
 
     /**
      * 主配置（{@code src/main/resources/application.yml}）确实在测试里生效，而不是被测试副本取代。
-     * <p>这里断言的都是**只写在主配置里**、且不含占位符（不受环境变量影响）的键；测试资源目录下只有
+     * <p>这里断言的都是<b>只写在主配置里</b>、且不含占位符（不受环境变量影响）的键；测试资源目录下只有
      * 一份 {@code application.properties}，且只含 {@code management.health.redis.enabled}。
      * 只要主配置被整体复制成测试资源、或者主配置里这些键被删改而测试副本没跟着改，本测试就会红。
      */
@@ -78,16 +78,16 @@ class AihubGatewayApplicationTests {
 
     /**
      * <b>生产默认值必须真的是「开」</b>：`aihub.ratelimit.enabled` 是 M3 头条特性（限流）的总开关，
-     * 而它在**测试里**被 {@code src/test/resources/application.properties} 钉成 {@code false}
-     * （理由见上面那条断言）。于是「生产默认是什么」在整套测试里**没有任何断言** ——
+     * 而它在<b>测试里</b>被 {@code src/test/resources/application.properties} 钉成 {@code false}
+     * （理由见上面那条断言）。于是「生产默认是什么」在整套测试里<b>没有任何断言</b> ——
      * 主配置里把键名写错（例如 {@code aihub.ratelimit.enable}）或者把默认值写成 {@code flase}，
      * 生产环境的限流会被静默关掉，而全量测试照样全绿。本用例就是补上这一条。
      *
-     * <p>为什么不能直接断言 {@code environment.getProperty(...)}：那是**合并后**的结果，
+     * <p>为什么不能直接断言 {@code environment.getProperty(...)}：那是<b>合并后</b>的结果，
      * 测试副本的 {@code false} 优先级更高，永远看不到主配置那一行（这正是缺口存在的原因）。
-     * 所以这里读的是**出厂** {@code src/main/resources/application.yml} 本身
-     * （沿用 {@code UsageCaptureTest} 读同一个文件的口径），并且断言的是那一行的**原文**：
-     * 它必须是 {@code ${AIHUB_RATELIMIT_ENABLED:true}} —— 环境变量的**名字**与**默认值**两者缺一不可。
+     * 所以这里读的是<b>出厂</b> {@code src/main/resources/application.yml} 本身
+     * （沿用 {@code UsageCaptureTest} 读同一个文件的口径），并且断言的是那一行的<b>原文</b>：
+     * 它必须是 {@code ${AIHUB_RATELIMIT_ENABLED:true}} —— 环境变量的<b>名字</b>与<b>默认值</b>两者缺一不可。
      *
      * <p>为什么刻意连占位符原文一起钉：这条键在 {@code RateLimitFilter} 里读作
      * {@code @Value("${aihub.ratelimit.enabled:true}")}，它是唯一读它的地方（不是
@@ -111,7 +111,7 @@ class AihubGatewayApplicationTests {
                 .isEqualTo("${AIHUB_RATELIMIT_ENABLED:true}");
     }
 
-    /** 直接读**出厂** {@code aihub-gateway/src/main/resources/application.yml} 里那一行（原文，未插值）。 */
+    /** 直接读<b>出厂</b> {@code aihub-gateway/src/main/resources/application.yml} 里那一行（原文，未插值）。 */
     private static Object shippedRateLimitEnabledValueFromApplicationYml() {
         try {
             var shipped = new YamlPropertySourceLoader()
@@ -147,7 +147,7 @@ class AihubGatewayApplicationTests {
      * M3 引入 WireMock（{@code wiremock-jetty12}）后 Jetty 的 servlet 与 server 类进了测试 classpath，
      * 于是整个网关测试套件静默改跑「Servlet 模式下的 Jetty」——
      * 在 Servlet 的写回路径上，响应正常结束时的 async 完成回调会取消写-flush 处理器，
-     * 让中继把**每一次成功响应**都误记成客户端断连（{@code CANCELLED/client_disconnected}），
+     * 让中继把<b>每一次成功响应</b>都误记成客户端断连（{@code CANCELLED/client_disconnected}），
      * 既有用例实测红 5 条。
      *
      * <p>修复是显式的：测试 classpath 上用 {@link com.aihub.gateway.testsupport.NettyWebServerTestAutoConfiguration}

@@ -7,7 +7,7 @@ import com.baomidou.mybatisplus.annotation.TableName;
 /**
  * 对应 Flyway V1 的 {@code channel} 表。
  *
- * <p>{@code apiKeyCipher} 是 **AES-GCM 密文**（{@code v{n}:{base64}}）：明文渠道密钥从不入库
+ * <p>{@code apiKeyCipher} 是 <b>AES-GCM 密文</b>（{@code v{n}:{base64}}）：明文渠道密钥从不入库
  * （设计文档 §6.1）。{@code keyVersion} 是 admin 侧记录的版本号，与密文里的标签一致。
  *
  * <p>{@code modelsJson} 用 {@link String} 映射 {@code JSON} 列：M3 的路由只用 {@code model_route}
@@ -16,7 +16,7 @@ import com.baomidou.mybatisplus.annotation.TableName;
  *
  * <p><b>列与字段一一对应</b>（V1 第 45-61 行）：{@code id / name / provider / base_url /
  * api_key_cipher / key_version / models_json / weight / priority / timeout_ms / status}。
- * 刻意**不**映射 {@code created_at} / {@code updated_at}：M3 不读它们，多映射两个字段只会让
+ * 刻意<b>不</b>映射 {@code created_at} / {@code updated_at}：M3 不读它们，多映射两个字段只会让
  * 「INSERT 时到底写了什么」变得难以推理（而且这两列的默认值在库里已经是对的）。
  * 这一条对 {@code ModelRouteEntity} / {@code RateLimitPolicyEntity} 同样成立。
  */

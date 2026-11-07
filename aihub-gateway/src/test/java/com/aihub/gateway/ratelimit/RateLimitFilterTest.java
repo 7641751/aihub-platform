@@ -30,9 +30,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *       —— 与 M1「缓存故障绝不变成 500」是同一条纪律。</li>
  * </ol>
  *
- * <p>本类**只**覆盖过滤器自己的行为（判定怎么变成响应、降级怎么计数、故障怎么放行）：
+ * <p>本类<b>只</b>覆盖过滤器自己的行为（判定怎么变成响应、降级怎么计数、故障怎么放行）：
  * 它自己 {@code new} 过滤器、自己塞 exchange 属性，因此对它而言「过滤器有没有被 Spring 装进链上」
- * 是无意义的 —— 那两条必须由**别的**类证明，别在这里假装：
+ * 是无意义的 —— 那两条必须由<b>别的</b>类证明，别在这里假装：
  * <ul>
  *   <li>「真实 HTTP 穿过真实过滤器链、限流组件真的被装配」→ {@code RateLimitWiringTest}
  *       （{@code @SpringBootTest(RANDOM_PORT)}，不构造任何限流组件）；</li>
@@ -42,13 +42,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>本类里由控制器评审带进来的钉子都在「过滤器自己这一层」能自证的范围内：
  * <ul>
- *   <li>放行与拒绝的分岔：拒绝时**不**调用 {@code chain.filter}，放行时调用 —— test slice 的假链
+ *   <li>放行与拒绝的分岔：拒绝时<b>不</b>调用 {@code chain.filter}，放行时调用 —— test slice 的假链
  *       是这一点的唯一证据；</li>
- *   <li>没有哈希时用 {@code ANONYMOUS_KEY_HASH} 哨兵，**绝不**把 {@code null} 拼进桶 key ——
+ *   <li>没有哈希时用 {@code ANONYMOUS_KEY_HASH} 哨兵，<b>绝不</b>把 {@code null} 拼进桶 key ——
  *       否则所有无哈希请求共享一个桶（还会被字面量 {@code "null"} 拼出 {@code aihub:ratelimit:7:null}）；</li>
  *   <li>降级/拒绝/自身故障三条路径的计数形态（{@code source} 只加在会取两个值的计数器上）；</li>
  *   <li>收窄后的 catch 的边界：{@code RuntimeException} 与 {@code null} 判定 → fail-open，
- *       而 {@code Error} → **向上抛**（{@link #anErrorFromTheLimiterPropagatesInsteadOfFailingOpen()}）。</li>
+ *       而 {@code Error} → <b>向上抛</b>（{@link #anErrorFromTheLimiterPropagatesInsteadOfFailingOpen()}）。</li>
  * </ul>
  *
  * <p><b>线程模型</b>：判定被切到 {@code Schedulers.boundedElastic()} 上执行，本类的用例因此都
@@ -191,7 +191,7 @@ class RateLimitFilterTest {
     }
 
     /**
-     * G3：有视图但**没有**密钥哈希（鉴权关闭时手工塞了 view、或将来某条路径只写 view）时，桶的第二维
+     * G3：有视图但<b>没有</b>密钥哈希（鉴权关闭时手工塞了 view、或将来某条路径只写 view）时，桶的第二维
      * 必须是哨兵而不是真的 {@code null} —— {@code "aihub:ratelimit:7:" + null} 会让所有这类请求共享
      * 一个桶。哨兵还要与「整个请求都没有认证视图」是同一条取值，否则同一个匿名客户端会因为
      * 「有没有 view」而落到两个桶里。
@@ -235,13 +235,13 @@ class RateLimitFilterTest {
     }
 
     /**
-     * G12（复审 Fix 4 之后的形态）：{@code source} 标签只加在**会取两个值**的计数器上 —— 拒绝计数。
+     * G12（复审 Fix 4 之后的形态）：{@code source} 标签只加在<b>会取两个值</b>的计数器上 —— 拒绝计数。
      * 降级的判定（{@code decision.degraded()}）可能来自本机桶，也可能来自 Redis 桶，因此这个标签
      * 在这里才有信息量；而 {@code aihub.ratelimit.degraded} 只在判定来自本机桶时才 +1，
      * {@code source=local} 对它是一个常量标签（复审指出：常量标签不区分任何两个时间序列）。
      *
      * <p>两条断言合起来把「标签加在会变的地方、且取值正确」钉死：同一个 Redis 侧判定必须进
-     * {@code source=redis} 那条时间序列，而带 {@code source=local} 的那条必须**一个都没有**。
+     * {@code source=redis} 那条时间序列，而带 {@code source=local} 的那条必须<b>一个都没有</b>。
      */
     @Test
     void theRejectedCounterCarriesTheVaryingSourceTagAndTheDegradedOneDoesNot() {
@@ -313,7 +313,7 @@ class RateLimitFilterTest {
     /**
      * <b>收窄后的 catch 只兜 {@code RuntimeException}：{@code Error} 必须向上抛</b>（复审 Fix 3）。
      *
-     * <p>收窄这个 catch 时原先**没有任何用例**覆盖 {@code Error} 这一侧（替身字段是
+     * <p>收窄这个 catch 时原先<b>没有任何用例</b>覆盖 {@code Error} 这一侧（替身字段是
      * {@code RuntimeException}，只覆盖了它和 null），于是「收窄」这件事本身就是无证据的声明 ——
      * 把它改回 {@code catch (RuntimeException | Error e)} 全绿。这条用例补上判别力：
      * JVM 级故障不能被当成「限流降级」，否则一个已经失去资源的 JVM 会继续放行请求、把故障扩散。
@@ -339,12 +339,12 @@ class RateLimitFilterTest {
     }
 
     /**
-     * <b>{@code fail_open} 计数器不带任何常量标签</b>：这是本轮**已披露**的一处指标形态变更
+     * <b>{@code fail_open} 计数器不带任何常量标签</b>：这是本轮<b>已披露</b>的一处指标形态变更
      * （复审 Fix 4）。
      *
      * <p>上一轮把 {@code source=local} 从这条计数器上一起拿掉了，而复审只点名了 {@code degraded}
-     * 那条 —— 因此这里把它变成可执行的契约而不是注释：fail-open 发生时**没有任何一级给出过判定**
-     * （Redis 与本机桶都没结论），{@code source=local} 会是一条**假的**来源标注；它与
+     * 那条 —— 因此这里把它变成可执行的契约而不是注释：fail-open 发生时<b>没有任何一级给出过判定</b>
+     * （Redis 与本机桶都没结论），{@code source=local} 会是一条<b>假的</b>来源标注；它与
      * {@code degraded} 是同一个「常量标签不区分任何两个时间序列」的理由。
      * 「去掉标签」会改变既有时序的名字，所以它必须在报告里被明确写出来（本轮已写）。
      */

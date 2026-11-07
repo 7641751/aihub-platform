@@ -9,8 +9,8 @@ import java.time.LocalDateTime;
 /**
  * 对应 Flyway V1 的 {@code request_log}（按月 RANGE COLUMNS 分区，主键 {@code (id, created_at)}）。
  *
- * <p>{@code createdAt} 用 {@link LocalDateTime} 而不是 {@code Instant}：分区列与幂等键都按**UTC
- * 墙上时间**比较，显式用 {@code LocalDateTime.ofInstant(instant, ZoneOffset.UTC)} 换算后，
+ * <p>{@code createdAt} 用 {@link LocalDateTime} 而不是 {@code Instant}：分区列与幂等键都按<b>UTC
+ * 墙上时间</b>比较，显式用 {@code LocalDateTime.ofInstant(instant, ZoneOffset.UTC)} 换算后，
  * 结果与 JVM 默认时区、与 JDBC 驱动的时区推导都无关（CONVENTIONS §7：时间统一 datetime(3) 且按 UTC 存）。
  */
 @TableName("request_log")

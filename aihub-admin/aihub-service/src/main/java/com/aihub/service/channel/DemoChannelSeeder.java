@@ -22,24 +22,24 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 /**
- * **开发专用**的演示数据（两条同模型渠道 + 一条租户级限流策略 + 一条 key 级限流策略），用来做 M3 的验收
- * （多渠道 + 权重 + 故障转移 + 熔断 + **两维限流**）。
+ * <b>开发专用</b>的演示数据（两条同模型渠道 + 一条租户级限流策略 + 一条 key 级限流策略），用来做 M3 的验收
+ * （多渠道 + 权重 + 故障转移 + 熔断 + <b>两维限流</b>）。
  *
  * <p><b>默认关闭</b>（{@code aihub.demo-seed.enabled=false}，见 {@link ConditionalOnProperty}）。
- * 理由：它是一个**写入路径**，不应该在生产启动时自动改数据；而且真渠道的密钥只能由运维提供，
+ * 理由：它是一个<b>写入路径</b>，不应该在生产启动时自动改数据；而且真渠道的密钥只能由运维提供，
  * 不该有默认值。
  *
- * <p><b>为什么不是 Flyway 迁移</b>（决策 12）：迁移脚本是**一次性、不可回滚、随代码分发的**
+ * <p><b>为什么不是 Flyway 迁移</b>（决策 12）：迁移脚本是<b>一次性、不可回滚、随代码分发的</b>
  * 数据变更，而演示渠道依赖环境（base-url、密钥）。更硬的约束是
- * {@code SchemaMigrationTest} 把迁移集合（version + description）**逐条显式钉住** ——
- * 加迁移就必须**有意**改那条断言，护栏因此是显式的，而不是被削弱。
+ * {@code SchemaMigrationTest} 把迁移集合（version + description）<b>逐条显式钉住</b> ——
+ * 加迁移就必须<b>有意</b>改那条断言，护栏因此是显式的，而不是被削弱。
  *
  * <p><b>幂等</b>：按名字 / 按 (模型, 渠道) / 按 (租户, 维度) 判断「已存在就跳过」，因此重复启动
  * 不会产生重复行。
  *
  * <p><b>明文密钥一律来自配置</b>（{@code aihub.demo-seed.primary-api-key} /
  * {@code standby-api-key} ← {@code AIHUB_DEMO_SEED_PRIMARY_API_KEY} / {@code ..._STANDBY_API_KEY}）：
- * 本类**没有任何密钥默认值**，缺了就在启动时**响亮失败**并给出配置指引 —— 落到
+ * 本类<b>没有任何密钥默认值</b>，缺了就在启动时<b>响亮失败</b>并给出配置指引 —— 落到
  * {@code channel.api_key_cipher} 的永远只有 {@link ChannelKeyService#encrypt} 产出的密文。
  * 主密钥（{@code aihub.channel.master-key}）为空时同样响亮失败，绝不写「解不开的密文」。
  *
@@ -196,10 +196,10 @@ public class DemoChannelSeeder implements ApplicationRunner {
     }
 
     /**
-     * **key 级**限流策略（决策 7 修订）：作用于该租户的**第一把** API Key（{@code api_key.id} 最小的那条，
+     * <b>key 级</b>限流策略（决策 7 修订）：作用于该租户的<b>第一把</b> API Key（{@code api_key.id} 最小的那条，
      * 与 V1 的建表顺序一致，因此演示时「先铸的那把 key」就是被覆盖的那把）。
      *
-     * <p>找不到租户或该租户还没有 API Key 时**只 WARN 并跳过**（与 {@link #ensureTenantPolicy} 同款）：
+     * <p>找不到租户或该租户还没有 API Key 时<b>只 WARN 并跳过</b>（与 {@link #ensureTenantPolicy} 同款）：
      * 演示数据不全不能让 admin 启动失败；先铸一把 key 再重启即可。
      */
     private void ensureKeyLevelPolicy(String name, int keyQps, int keyBurst) {

@@ -12,7 +12,7 @@ import java.util.stream.Collectors;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * **「Lua 脚本」与「Java 纯算术」不许漂移**的守恒测试 —— 这是一份跨实现的契约测试，不是任何一侧的
+ * <b>「Lua 脚本」与「Java 纯算术」不许漂移</b>的守恒测试 —— 这是一份跨实现的契约测试，不是任何一侧的
  * 实现测试。
  *
  * <p>本任务的规则被实现了两遍：{@link RateLimitScript#SCRIPT}（Redis 里跑的那份）与
@@ -25,19 +25,19 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <ol>
  *   <li><b>向量表只写一遍</b>（{@link #ARITHMETIC_VECTORS}）：每行是
  *       {@code (tokensMilli, lastRefill, now, qps, burst, allowed, remaining, retryAfterMs)}，
- *       后三个字段是**手算的字面量**（本文件里读得出来怎么算的），不从被测代码里推。
+ *       后三个字段是<b>手算的字面量</b>（本文件里读得出来怎么算的），不从被测代码里推。
  *       它们驱动 {@link TokenBucket} 逐行断言。</li>
- *   <li><b>向量隐含的公式常量再拿去核对脚本**自身**</b>：脚本里的数字字面量集合必须恰好是
+ *   <li><b>向量隐含的公式常量再拿去核对脚本<b>自身</b></b>：脚本里的数字字面量集合必须恰好是
  *       {@code {0, 1, 1000, 3600000}} —— 多一个、少一个、把 {@code 1000} 挪成别的值都会变红；
- *       并且 {@code 1000} 必须**恰好等于** {@link TokenBucket#MILLI}、
- *       {@code 3600000} 必须**恰好等于** Java 侧 qps=0 时返回的退避上界。</li>
+ *       并且 {@code 1000} 必须<b>恰好等于</b> {@link TokenBucket#MILLI}、
+ *       {@code 3600000} 必须<b>恰好等于</b> Java 侧 qps=0 时返回的退避上界。</li>
  *   <li><b>公式形状逐字断言</b>：新桶满桶、补充与封顶 {@code math.min(capacity, tokens + elapsed * qps)}、
  *       扣减 {@code tokens - 1000}、剩余取整 {@code math.floor(tokens / 1000)}、
  *       退避 {@code math.ceil(missing / qps)} 与其下限、{@code qps < 0}/{@code burst < 1} 的钳位。</li>
  * </ol>
  *
- * <h2>这份测试**不能**证明什么（已知缺口，不是遗漏）</h2>
- * 它证明的是「两份实现的常量与算式一致」，**不是**「脚本在真 Redis 上跑出来的结果与纯算术相同」。
+ * <h2>这份测试<b>不能</b>证明什么（已知缺口，不是遗漏）</h2>
+ * 它证明的是「两份实现的常量与算式一致」，<b>不是</b>「脚本在真 Redis 上跑出来的结果与纯算术相同」。
  * 本仓库里没有 Lua 解释器（{@code lua}/{@code luajit} 均不存在），gateway 的测试又明令禁止依赖
  * Docker / 活 Redis，因此「把脚本真的丢给 Redis 跑一遍」只能落在 admin 侧的真 Redis 集成测试
  * （{@code RedisTokenBucketIntegrationTest}，计划里的 Task 14）。两者都必要：少了 Task 14，
@@ -98,7 +98,7 @@ class TokenBucketScriptConformanceTest {
     }
 
     /**
-     * 脚本里的数字字面量**集合**必须恰好是这四个，且它们就是向量表与 Java 侧共用的那四个数字。
+     * 脚本里的数字字面量<b>集合</b>必须恰好是这四个，且它们就是向量表与 Java 侧共用的那四个数字。
      * 多一个常量（例如有人写死一个 500）、少一个、或把 {@code 1000} 挪成别的值，都会先在这里变红。
      */
     @Test
@@ -156,7 +156,7 @@ class TokenBucketScriptConformanceTest {
     }
 
     /**
-     * 向量表第 1 行依赖的规则：新桶（{@code null}，即 Redis 里没这个 key）必须以**满桶**起步，
+     * 向量表第 1 行依赖的规则：新桶（{@code null}，即 Redis 里没这个 key）必须以<b>满桶</b>起步，
      * 与「一个显式满桶状态」得到完全相同的判定。这条规则在 {@code qps = 0} 下尤其要紧 ——
      * 那时「从 0 号毫秒补充」永远补不出令牌，会把「允许 burst 次突发」退化成「一次都不放行」。
      */
@@ -183,7 +183,7 @@ class TokenBucketScriptConformanceTest {
     }
 
     /**
-     * qps=0 时 {@code null}（新桶）与 {@code (0, 0)}（真实存在的空状态）必须**不同** ——
+     * qps=0 时 {@code null}（新桶）与 {@code (0, 0)}（真实存在的空状态）必须<b>不同</b> ——
      * 把这两者混为一谈正是「新桶靠 elapsed 补满」那个错误的前提。
      */
     @Test
@@ -195,7 +195,7 @@ class TokenBucketScriptConformanceTest {
     }
 
     /**
-     * 脚本里作为**算术常量**出现的数字字面量必须恰好是这四个。
+     * 脚本里作为<b>算术常量</b>出现的数字字面量必须恰好是这四个。
      * {@code KEYS[1]} / {@code ARGV[2]} 里的下标不是算术常量（它们由调用方按契约填），因此排除。
      */
     private static List<String> numericLiterals() {

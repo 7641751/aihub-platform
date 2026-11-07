@@ -28,34 +28,34 @@ import java.util.Optional;
  * <p><b>本类型是函数式接口</b>：它只有一条契约「给定 keyHash，给出解析结果」，测试里一个 lambda
  * 就是完整替身，不必再为「可替身」而额外造一个接口 + 一个实现类。真实实现见 {@link Http}。
  *
- * <p>约定：{@link #resolve} **不抛异常**。admin 不可达/超时/返回非 2xx/响应体畸形一律折算成
+ * <p>约定：{@link #resolve} <b>不抛异常</b>。admin 不可达/超时/返回非 2xx/响应体畸形一律折算成
  * {@link Optional#empty()}（视作「这个 key 不存在」）。网络故障与垃圾数据都不该让客户端拿到 500。
  *
  * <p><b>但「视作不存在」只适用于 M1 的兼容形状，不适用于解析路径</b>：{@link #resolve} 把故障与
  * 权威否定 <b>压成了同一个 {@code empty}</b>，调用方无法分辨。解析路径因此必须用
- * {@link #resolveOutcome}（三态）—— 故障进负缓存就是 D1；而「故障对客回 503 而不是 401」
- * （D4）同样只有分辨得出三态才做得到。
+ * {@link #resolveOutcome}（三态）—— 故障进负缓存就是 BUG-D1；而「故障对客回 503 而不是 401」
+ * （BUG-D4）同样只有分辨得出三态才做得到。
  */
 @FunctionalInterface
 public interface AdminClient {
 
     /**
-     * 内部接口路径。**必须是应用内路径**（不含 context path，也不由 base-url 拼出）：admin 的
+     * 内部接口路径。<b>必须是应用内路径</b>（不含 context path，也不由 base-url 拼出）：admin 的
      * {@code InternalAuthFilter} 用 {@code UrlPathHelper.getPathWithinApplication} 取路径再验签，
      * 用 base-url 拼出来的带前缀路径永远验不过 —— 这正是 Task 3 最后一个 commit 钉下的契约。
      */
     String RESOLVE_PATH = "/internal/api-keys/resolve";
 
     /**
-     * 配置快照路径。与 {@code RESOLVE_PATH} 一样**必须是应用内路径**（不含 context path）：
+     * 配置快照路径。与 {@code RESOLVE_PATH} 一样<b>必须是应用内路径</b>（不含 context path）：
      * admin 的 {@code InternalAuthFilter} 用 {@code UrlPathHelper.getPathWithinApplication} 验签。
      */
     String CONFIG_SNAPSHOT_PATH = "/internal/config/snapshot";
 
     /**
-     * 配额兜底预扣路径。与另外两个一样**必须是应用内路径**（不含 context path），METHOD 是 {@code POST}。
+     * 配额兜底预扣路径。与另外两个一样<b>必须是应用内路径</b>（不含 context path），METHOD 是 {@code POST}。
      *
-     * <p>它只在「Redis 不可用 **且** 部署显式打开了兜底」时被调用（{@code aihub.quota.fallback-enabled}，
+     * <p>它只在「Redis 不可用 <b>且</b> 部署显式打开了兜底」时被调用（{@code aihub.quota.fallback-enabled}，
      * 默认开启），正常路径上一次都不会打（那会把每个请求的延迟绑到 admin 上）。
      */
     String QUOTA_RESERVE_PATH = "/internal/quota/reserve";
@@ -63,10 +63,10 @@ public interface AdminClient {
     Mono<Optional<ApiKeyView>> resolve(String keyHash);
 
     /**
-     * 与 {@link #resolve} **同一跳**，但把「admin 权威地说没有这把 key」与「解析不了（平台故障）」
+     * 与 {@link #resolve} <b>同一跳</b>，但把「admin 权威地说没有这把 key」与「解析不了（平台故障）」
      * 分开（见 {@link AdminResolution}）。解析路径必须用这个而不是 {@link #resolve}：只有这里
      * 才分得清「权威否定」与「我们不知道」—— 前者可以进负缓存、对客 401，后者两者都不行
-     * （不进缓存、对客 503，D4）。
+     * （不进缓存、对客 503，BUG-D4）。
      *
      * <p><b>默认实现把 {@code empty} 当作权威否定</b>（即与 {@link #resolve} 完全同义）。这样
      * 所有既有的函数式替身（测试里的 {@code keyHash -> Mono.just(Optional.empty())}）一行都不用改
@@ -80,7 +80,7 @@ public interface AdminClient {
     /**
      * 拉取配置快照（渠道 + 路由 + 限流策略 + 版本号）。
      *
-     * <p>**默认实现返回空**：这样所有既有的替换实现（测试里的 {@code keyHash -> Mono.just(...)}）
+     * <p><b>默认实现返回空</b>：这样所有既有的替换实现（测试里的 {@code keyHash -> Mono.just(...)}）
      * 不必改一行就仍然编译通过；真实实现见 {@link Http}。
      * 空 {@link Optional} 的语义是「控制面拿不到快照」，调用方据此走降级（决策 6）。
      */
@@ -89,14 +89,14 @@ public interface AdminClient {
     }
 
     /**
-     * 配额兜底预扣（Redis 不可用时的回源）。返回的判定与正常路径**语义逐字相同**：admin 侧跑的是
+     * 配额兜底预扣（Redis 不可用时的回源）。返回的判定与正常路径<b>语义逐字相同</b>：admin 侧跑的是
      * 同一段 {@code QuotaScript.RESERVE}、读的是同一张 {@code quota} 表、写的是同一个桶键。
      *
-     * <p>**默认实现返回空 Mono**（与 {@link #configSnapshot()} 同款理由）：这样所有既有的函数式替身
+     * <p><b>默认实现返回空 Mono</b>（与 {@link #configSnapshot()} 同款理由）：这样所有既有的函数式替身
      * （测试里的 {@code keyHash -> Mono.just(...)}）不必改一行就仍然编译通过。
      *
-     * <p>空 {@link Mono} 的语义是「**兜底拿不到判定**」（未配兜底 / 非 2xx / 响应畸形 / 传输故障），
-     * 调用方据此走 D7 的放行 —— **绝不允许**把它当成拒绝。真实实现见 {@link Http}。
+     * <p>空 {@link Mono} 的语义是「<b>兜底拿不到判定</b>」（未配兜底 / 非 2xx / 响应畸形 / 传输故障），
+     * 调用方据此走 D7 的放行 —— <b>绝不允许</b>把它当成拒绝。真实实现见 {@link Http}。
      */
     default Mono<QuotaDecision> reserveQuota(long tenantId, long estimatedTokens) {
         return Mono.empty();
@@ -112,7 +112,7 @@ public interface AdminClient {
         private static final Logger log = LoggerFactory.getLogger(Http.class);
         private static final ObjectMapper MAPPER = new ObjectMapper();
 
-        /** 平台故障的对客口径（D4）：不进负缓存、不谎报成「key 不存在」，见 {@link AdminResolution}。 */
+        /** 平台故障的对客口径（BUG-D4）：不进负缓存、不谎报成「key 不存在」，见 {@link AdminResolution}。 */
         private static final String FAULT_LOGGED_AS =
                 "本次不写入负缓存、对客 fail-closed 回 503 service_unavailable（结论未知，不是「key 不存在」）";
 
@@ -154,9 +154,9 @@ public interface AdminClient {
                                 .map(body -> parseOutcome(response.statusCode().value(), body)));
             }).onErrorResume(ex -> {
                 // 传输层失败（连不上 / 超时 / 签名抛错）**不是**「key 不存在」，是 admin 侧故障。
-                // 对客是 503 service_unavailable（D4：不把平台故障谎报成「你的 key 错了」），
+                // 对客是 503 service_unavailable（BUG-D4：不把平台故障谎报成「你的 key 错了」），
                 // 所以这行 ERROR 是运维侧唯一的区分信号：admin 全挂时它会持续出现，
-                // 而单个坏 key 不会（那条只打 DEBUG）。从 D1 起它还必须**不写负缓存** ——
+                // 而单个坏 key 不会（那条只打 DEBUG）。从 BUG-D1 起它还必须**不写负缓存** ——
                 // 否则一次瞬时故障会被本地负缓存放大成 30 秒的固定拒绝。
                 log.error("admin 回源失败（传输层异常，非「key 不存在」），" + FAULT_LOGGED_AS + ": {}",
                         ex.toString());
@@ -212,12 +212,12 @@ public interface AdminClient {
         }
 
         /**
-         * 把兜底响应折成判定。**只有两种结果是「判定」**：2xx + 带布尔 {@code allowed} 的 {@code data}
+         * 把兜底响应折成判定。<b>只有两种结果是「判定」</b>：2xx + 带布尔 {@code allowed} 的 {@code data}
          * （{@code allowed=true} 放行 / {@code false} 拒绝）；其余一律 {@link Optional#empty()}（拿不到 ⇒ 放行）。
          *
          * <p><b>为什么缺 {@code allowed} 字段必须 fail-open</b>：{@code asBoolean} 的默认值语义太容易写反 ——
          * 一个 {@code path("allowed").asBoolean(false)} 会把「admin 返回了畸形体」静默变成「拒绝」，
-         * 于是**平台故障被伪装成配额用尽**（与 D16 同一类错误的镜像）。这里显式要求该字段是布尔，
+         * 于是<b>平台故障被伪装成配额用尽</b>（与 D16 同一类错误的镜像）。这里显式要求该字段是布尔，
          * 缺失/非布尔即视为「判不了」。
          */
         static Optional<QuotaDecision> parseReserveDecision(int status, String body) {
@@ -303,12 +303,12 @@ public interface AdminClient {
         }
 
         /**
-         * 三态分类 —— **D1 的分界线就在这里**。
+         * 三态分类 —— <b>BUG-D1 的分界线就在这里</b>。
          *
-         * <p>只有两种响应是 admin 的**权威否定**（可以负缓存）：404 + {@code NOT_FOUND} 信封，
+         * <p>只有两种响应是 admin 的<b>权威否定</b>（可以负缓存）：404 + {@code NOT_FOUND} 信封，
          * 以及 2xx 但没有 {@code data}（admin 冷启动的中间状态 / 空信封）。其余一律
          * {@link AdminResolution#unavailable()}：5xx、401/403（内部密钥配错）、没有 NOT_FOUND
-         * 信封的 404（路径写错）、响应畸形。它们**永远不该**被当作「这把 key 不存在」缓存下来。
+         * 信封的 404（路径写错）、响应畸形。它们<b>永远不该</b>被当作「这把 key 不存在」缓存下来。
          *
          * <p>日志级别沿用既有约定：权威否定只打 DEBUG（单个坏 key 不刷屏），平台故障打 ERROR
          * —— 那是运维区分「有人拿错 key」与「我们的控制面坏了」的唯一信号。
@@ -321,7 +321,7 @@ public interface AdminClient {
                     return AdminResolution.notFound();
                 }
                 // 5xx / 401 / 403，以及「路径写错」这类没有 NOT_FOUND 信封的 404：都是**平台故障**。
-                // 客户端看到的是 503 service_unavailable（D4，登记在 CONVENTIONS 第 4/5 节），
+                // 客户端看到的是 503 service_unavailable（BUG-D4，登记在 CONVENTIONS 第 4/5 节），
                 // 但结论未知 ⇒ 不写负缓存，故障清除后下一个请求立刻重试。
                 log.error("admin 回源失败（HTTP {}，服务不可用或配置错误，非「key 不存在」），"
                         + FAULT_LOGGED_AS + "。响应体: {}", status, body);

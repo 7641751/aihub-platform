@@ -8,23 +8,23 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
- * 失败文档的**清理**（M5 Task 6，决策 D8）：把一份文档已经写出去的**派生数据**全部收回。
+ * 失败文档的<b>清理</b>（M5 Task 6，决策 D8）：把一份文档已经写出去的<b>派生数据</b>全部收回。
  *
  * <p><b>顺序是契约</b>（D8）：① 删 Chroma（按 metadata {@code doc_id}）→ ② 删 {@code kb_chunk}。
- * 顺序反了会在「Chroma 删成功、但 {@code kb_chunk} 删失败」时留下**无法定位**的残留 ——
+ * 顺序反了会在「Chroma 删成功、但 {@code kb_chunk} 删失败」时留下<b>无法定位</b>的残留 ——
  * 坐标（{@code kb_chunk} 的 {@code vector_id = "{docId}:{seq}"}）正是事后重入清理的唯一手段，
- * 所以它必须**最后**才丢。
+ * 所以它必须<b>最后</b>才丢。
  *
  * <p><b>幂等可重入</b>：对已经干净的 doc 再清一次必须返回 {@link Result#ok()}，而不是抛异常 ——
  * 恢复器可能被调用多次（重投递 / 运维手工重放），"已经干净"是正常终态而不是错误。
  *
  * <p><b>绝不假装干净</b>（D8）：任一外部步失败（Chroma 不可达 / 非 2xx / 删完仍有记录）⇒
- * 返回 {@link Result#incomplete(String)} 并**保留 {@code kb_chunk}**；原因会被写进 {@code error_msg}
+ * 返回 {@link Result#incomplete(String)} 并<b>保留 {@code kb_chunk}</b>；原因会被写进 {@code error_msg}
  * （由 {@link KbDocumentService#onTerminalFailure} 拼接）。这样"FAILED 但 Chroma 里还留着该 doc 的 chunk"
- * 这个违反不变量（D8）的情形**可被观测、可被重入修正**，而不是被静默掩盖。
+ * 这个违反不变量（D8）的情形<b>可被观测、可被重入修正</b>，而不是被静默掩盖。
  *
- * <p><b>没有 {@code @Transactional}</b>：与 {@code KbEmbedService} 同理 —— 第一步是**网络调用**
- * （Chroma），把它塞进数据库事务会让连接被网络等待占住；而 {@code kb_chunk} 的删除是**单条**语句，
+ * <p><b>没有 {@code @Transactional}</b>：与 {@code KbEmbedService} 同理 —— 第一步是<b>网络调用</b>
+ * （Chroma），把它塞进数据库事务会让连接被网络等待占住；而 {@code kb_chunk} 的删除是<b>单条</b>语句，
  * 自带原子性。失败后的收敛靠"重入"而不是靠回滚。
  */
 @Service
@@ -44,7 +44,7 @@ public class KbDocumentCleanup {
      * 清理结果。
      *
      * @param clean  {@code true} = Chroma 与 {@code kb_chunk} 都已清空（幂等终态）；{@code false} = 未完成
-     * @param detail 未完成时的**非敏感**技术原因（会被写进 {@code error_msg}）；干净时为 {@code null}
+     * @param detail 未完成时的<b>非敏感</b>技术原因（会被写进 {@code error_msg}）；干净时为 {@code null}
      */
     public record Result(boolean clean, String detail) {
 

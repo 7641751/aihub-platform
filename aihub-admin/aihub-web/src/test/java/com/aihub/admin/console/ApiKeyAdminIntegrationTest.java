@@ -68,45 +68,45 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Task 9 的**线上契约**：API Key 的签发 / 列表 / 停用 / 启用 / 删除，以及**吊销时的显式
- * {@code DEL}` 共享缓存。真容器（MySQL + Redis）、真 HTTP、真控制台令牌、真 Redis Pub/Sub。
+ * Task 9 的<b>线上契约</b>：API Key 的签发 / 列表 / 停用 / 启用 / 删除，以及<b>吊销时的显式
+ * {@code DEL}` 共享缓存</b>。真容器（MySQL + Redis）、真 HTTP、真控制台令牌、真 Redis Pub/Sub。
  *
  * <p><b>明文只出现一次</b>：只有 {@code POST /api/api-keys} 的响应里带 {@code data.plaintextKey}；
  * 列表、审计、日志一处都不许再出现。本类的断言分两半 —— 「创建响应里有明文」与
  * 「此后任何响应都不含明文，也不含 {@code SHA-256(secret)}」。
  *
  * <p><b>D11 的核心判据是"立即消失"，不是"最终消失"</b>：网关侧本地 Caffeine 的 30 秒窗口没有便宜的
- * 失效通道（残余已登记），但**共享层必须当场被 {@code DEL}** —— 这条只能用「预置一条真的共享条目 →
+ * 失效通道（残余已登记），但<b>共享层必须当场被 {@code DEL}</b> —— 这条只能用「预置一条真的共享条目 →
  * 调停用 → 立刻断言 {@code hasKey} 为 false」来钉，任何「等一会儿再说」的写法都会把 TTL 兜底
  * 误当成显式删除。
  *
  * <p><b>为什么 {@code @TestPropertySource} 只有一个属性</b>：本类只需要一把合规的控制台签名密钥
- * （{@code application.yml} 对 {@code aihub.console.secret} **刻意没有默认值**，见 D16）。属性集与
- * {@code ConsoleLoginIntegrationTest} **逐字相同**、且本类**不加** {@code @Import} /
- * {@code @TestConfiguration}，因此 Spring 有机会**复用**那个已经存在的上下文，而不是再 fork 一个
+ * （{@code application.yml} 对 {@code aihub.console.secret} <b>刻意没有默认值</b>，见 D16）。属性集与
+ * {@code ConsoleLoginIntegrationTest} <b>逐字相同</b>、且本类<b>不加</b> {@code @Import} /
+ * {@code @TestConfiguration}，因此 Spring 有机会<b>复用</b>那个已经存在的上下文，而不是再 fork 一个
  * （{@code docs/CONVENTIONS.md} §8 item 5/6 登记过每多一个上下文的真实代价）。
  *
  * <p><b>覆盖缺口的修复轮（Task 9 独立评审 I-1 / I-2 / I-3）</b>：本类在原有 5 条用例之外补上了三块
- * **此前零覆盖**的行为 —— ① {@code evictSharedCache} 在 Redis 抛异常时**吞掉异常、业务写仍提交**
+ * <b>此前零覆盖</b>的行为 —— ① {@code evictSharedCache} 在 Redis 抛异常时<b>吞掉异常、业务写仍提交</b>
  * （{@link #aFailingSharedCacheEvictionIsSwallowedAndTheWriteStillCommits()}）；② API Key 的写
- * **在事务提交之后才发布失效**（{@link #aRolledBackApiKeyWritePublishesNothingAndDoesNotRaiseTheWatermark()}）；
+ * <b>在事务提交之后才发布失效</b>（{@link #aRolledBackApiKeyWritePublishesNothingAndDoesNotRaiseTheWatermark()}）；
  * ③ {@code create} 的三条分支（未知租户 404 / 空白 name 400 / 不设过期 = 永不过期）。
  * <b>这三块都是"覆盖缺口"而不是"代码缺陷"：被测行为在 {@code 80fb2e9} 已正确存在，因此新用例在
- * 未变异的代码上**立即为绿**。</b>它们的可证伪性由修复轮的变异体提供（删掉 {@code try/catch}、
+ * 未变异的代码上<b>立即为绿</b>。</b>它们的可证伪性由修复轮的变异体提供（删掉 {@code try/catch}、
  * {@code publishAfterCommit} → {@code bumpAndPublish}、去掉租户检查、去掉 {@code requireText}、
  * 把 {@code expireAt} 改成永远非 null），逐条对应的红见修复轮证据目录 {@code .m4t9fix-logs/}。
  *
  * <p><b>列表的租户维度来自令牌的 {@code tenantId}</b>（计划只定死了
  * {@code ApiKeyAdminService.list(long tenantId)}，没写这个 {@code tenantId} 从哪里来）：本类选择
- * **从 claims 取**，于是控制台主体只可能看到自己租户的 key，无法用查询参数跨租户读。代价是创建请求体里
+ * <b>从 claims 取</b>，于是控制台主体只可能看到自己租户的 key，无法用查询参数跨租户读。代价是创建请求体里
  * 的 {@code tenantId} 与令牌里的 {@code tenantId} 必须一致才看得到 —— 用例因此让两者用同一个夹具租户
  * （未知租户用例是唯一例外：它故意让两者不同，好让"请求体的 {@code tenantId} 不存在"这件事落在
  * 服务层的租户查找上）。
  *
  * <p><b>夹具的纪律</b>：{@code api_key} / {@code tenant} / {@code audit_log} 与 Testcontainers 容器
  * 都是 JVM 级共享的（{@link AbstractIntegrationTest} 没有全局清理），所以夹具名每条用例唯一、前后各清
- * 一次，审计断言一律按**本次用例的数值主键**（{@code target_id}）查，绝不做全表计数。
- * 夹具前缀里**不含** LIKE 元字符（{@code _} / {@code %} / {@code \}），这条假设由
+ * 一次，审计断言一律按<b>本次用例的数值主键</b>（{@code target_id}）查，绝不做全表计数。
+ * 夹具前缀里<b>不含</b> LIKE 元字符（{@code _} / {@code %} / {@code \}），这条假设由
  * {@link #fixtureNamesContainNoLikeMetacharacters()} 钉住而不是留给读者判断。
  */
 @TestPropertySource(properties = {
@@ -115,9 +115,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
 
     /**
-     * 合成控制台签名密钥（≥32 字符），与 {@code ConsoleLoginIntegrationTest.SECRET} **逐字相同** ——
-     * 值相同才会命中同一个 Spring 上下文缓存键（本类的目的就是复用那个上下文）。刻意**不是
-     * {@code private}**：注解值里的常量表达式引用私有常量时 javac 会报访问控制错误。
+     * 合成控制台签名密钥（≥32 字符），与 {@code ConsoleLoginIntegrationTest.SECRET} <b>逐字相同</b> ——
+     * 值相同才会命中同一个 Spring 上下文缓存键（本类的目的就是复用那个上下文）。刻意<b>不是
+     * {@code private}</b>：注解值里的常量表达式引用私有常量时 javac 会报访问控制错误。
      */
     static final String SECRET = "console-it-secret-0123456789abcdefghijklmn";
 
@@ -143,16 +143,16 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
     private static final String SUBSCRIPTION_PROBE = "subscription-probe";
 
     /**
-     * 回滚用例的**观测窗口**：既用来等「没有消息」（缺席），也用来等正向对照的「有消息」（投递）。
+     * 回滚用例的<b>观测窗口</b>：既用来等「没有消息」（缺席），也用来等正向对照的「有消息」（投递）。
      * 两个方向共用同一个长度，是为了让「窗口太短」在正向对照上变红，而不是让缺席断言静默假绿
      * （照抄 {@code ChannelAdminIntegrationTest} 的 {@code ROLLBACK_WINDOW}）。
      */
     private static final Duration ROLLBACK_WINDOW = Duration.ofSeconds(2);
 
     /**
-     * 黑障 Redis 的命令超时。**与 {@code ApiKeyResolveRedisOutageTest} 不同**：那条用例测的是**时延**，
+     * 黑障 Redis 的命令超时。<b>与 {@code ApiKeyResolveRedisOutageTest} 不同</b>：那条用例测的是<b>时延</b>，
      * 必须读生产配置里的 {@code spring.data.redis.timeout}；本类只测「Redis 抛异常之后控制面写是否仍然
-     * 提交」，超时值**不影响任何断言**，因此固定一个小值让失败尽快发生，不把它变成第二个需要维护的数字。
+     * 提交」，超时值<b>不影响任何断言</b>，因此固定一个小值让失败尽快发生，不把它变成第二个需要维护的数字。
      */
     private static final Duration BLACKHOLE_COMMAND_TIMEOUT = Duration.ofMillis(200);
 
@@ -333,23 +333,23 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
 
     /**
      * 独立评审 I-1（裁定 5）：{@code evictSharedCache} 的「Redis 抛异常 ⇒ 吞掉 + WARN + 写仍提交」
-     * 分支此前**没有任何用例**（删掉 {@code try/catch} 聚焦仍 5/0 全绿）。本用例把它变成被钉住的行为：
+     * 分支此前<b>没有任何用例</b>（删掉 {@code try/catch} 聚焦仍 5/0 全绿）。本用例把它变成被钉住的行为：
      *
      * <ol>
-     *   <li>让 {@code redis.delete(...)} **真的抛**（真 Lettuce 客户端 + 黑障端口，手法照抄
-     *       {@code ApiKeyResolveRedisOutageTest}），然后断言 {@code disable} **不抛异常**；</li>
-     *   <li>断言**业务写仍然提交**（那一行的状态真的变成 {@code DISABLED}）；</li>
-     *   <li>断言**审计行仍然写了**（只按本次用例的 {@code target_id} 查）。</li>
+     *   <li>让 {@code redis.delete(...)} <b>真的抛</b>（真 Lettuce 客户端 + 黑障端口，手法照抄
+     *       {@code ApiKeyResolveRedisOutageTest}），然后断言 {@code disable} <b>不抛异常</b>；</li>
+     *   <li>断言<b>业务写仍然提交</b>（那一行的状态真的变成 {@code DISABLED}）；</li>
+     *   <li>断言<b>审计行仍然写了</b>（只按本次用例的 {@code target_id} 查）。</li>
      * </ol>
      *
      * <p>三条缺一不可：只断言「不抛异常」会被「抛了但测试没看见」的实现骗过；只断言「落库」会漏掉
      * 「异常被吞但写没提交」（那正是裁定 5 禁止的形态）。判别力由变异体 {@code F-1}（删掉
      * {@code try/catch}）提供 —— 删掉之后第一条断言精确变红。
      *
-     * <p><b>为什么手工构造服务实例</b>：共享上下文里的 {@code StringRedisTemplate} 是**活**的 Redis，
+     * <p><b>为什么手工构造服务实例</b>：共享上下文里的 {@code StringRedisTemplate} 是<b>活</b>的 Redis，
      * 没法让它抛。这里用一个指向黑障端口的真客户端喂给同一个 {@link ApiKeyAdminService} 实现，其余依赖
      * （真 Mapper / 真 {@code AuditService} / 真 {@code ApiKeyService} / 真 {@code ConfigChangePublisher}）
-     * 全部来自上下文 —— 于是「业务写提交」与「审计落库」仍然是对**真库**的断言。
+     * 全部来自上下文 —— 于是「业务写提交」与「审计落库」仍然是对<b>真库</b>的断言。
      */
     @Test
     void aFailingSharedCacheEvictionIsSwallowedAndTheWriteStillCommits() throws Exception {
@@ -374,29 +374,29 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
     // ------------------------------------------------- 6) I-2：回滚的写不发布、不抬水位
 
     /**
-     * 独立评审 I-2：{@code publishAfterCommit(reason)} 的**回滚语义**此前无用例 —— 把它换成**直接**
+     * 独立评审 I-2：{@code publishAfterCommit(reason)} 的<b>回滚语义</b>此前无用例 —— 把它换成<b>直接</b>
      * {@code bumpAndPublish(reason)} 聚焦仍 5/0 全绿（现有断言「收到某个 reason 的消息」对两种实现都成立）。
      *
      * <p>本用例照抄 {@code ChannelAdminIntegrationTest#rolledBackWritePublishesNothingAndDoesNotRaiseTheWatermark}
-     * 的形状：在**真被 Spring 代理的 bean** 上开一个事务、调**真实的** {@code ApiKeyAdminService.disable(...)}
+     * 的形状：在<b>真被 Spring 代理的 bean</b> 上开一个事务、调<b>真实的</b> {@code ApiKeyAdminService.disable(...)}
      * 之后抛异常 ⇒ 事务回滚，然后断言：
      * <ul>
      *   <li>{@code audit_log} 没有该写留下的行（按本次用例的 {@code target_id} 定向查，绝不全表计数）；</li>
-     *   <li>一条 {@code apikey.*} 消息都没收到（**有界等待**，不是固定 {@code sleep}）；</li>
+     *   <li>一条 {@code apikey.*} 消息都没收到（<b>有界等待</b>，不是固定 {@code sleep}）；</li>
      *   <li>业务写的状态仍是 {@code ACTIVE}（写真的回滚了）；水位也没被抬高；</li>
-     *   <li>**正向对照**：同一套订阅在同一窗口长度内，一次成功写的 {@code apikey.disable} **必须**被观测到
+     *   <li><b>正向对照</b>：同一套订阅在同一窗口长度内，一次成功写的 {@code apikey.disable} <b>必须</b>被观测到
      *       —— 否则「没收到」只是「窗口短到测不出任何东西」的空断言。</li>
      * </ul>
      *
      * <p><b>为什么用 {@code TransactionTemplate} 而不是新增一个探针 bean</b>：{@code ApiKeyAdminService}
-     * 已经是这个上下文里**真被代理的 bean**（它的 {@code disable} 带 {@code @Transactional}），
+     * 已经是这个上下文里<b>真被代理的 bean</b>（它的 {@code disable} 带 {@code @Transactional}），
      * {@code TransactionTemplate} 显式开一个事务、代理调用在其中加入（{@code REQUIRED}）—— 与
-     * {@code ChannelAdminIntegrationTest} 的探针 bean **语义等价**（真代理 bean + 业务写后抛异常 + 用例自身
+     * {@code ChannelAdminIntegrationTest} 的探针 bean <b>语义等价</b>（真代理 bean + 业务写后抛异常 + 用例自身
      * 非 {@code @Transactional}）。之所以不照抄「{@code @TestConfiguration} + {@code @Import}」：那会给
-     * 套件**多 fork 一个完整的 Spring 上下文**（{@code docs/CONVENTIONS.md} §8 item 5/6 的 7 上下文预算），
-     * 而本类之所以与 {@code ConsoleLoginIntegrationTest} 共用一个上下文、正是因为它**不加** {@code @Import}。
+     * 套件<b>多 fork 一个完整的 Spring 上下文</b>（{@code docs/CONVENTIONS.md} §8 item 5/6 的 7 上下文预算），
+     * 而本类之所以与 {@code ConsoleLoginIntegrationTest} 共用一个上下文、正是因为它<b>不加</b> {@code @Import}。
      * 判别力由变异体 {@code F-2}（{@code publishAfterCommit} → {@code bumpAndPublish}）提供 —— 换成直接发布后，
-     * 消息会在**事务里**就发出去，第一条「没有消息」断言精确变红。
+     * 消息会在<b>事务里</b>就发出去，第一条「没有消息」断言精确变红。
      */
     @Test
     void aRolledBackApiKeyWritePublishesNothingAndDoesNotRaiseTheWatermark() throws Exception {
@@ -439,11 +439,11 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
 
     /**
      * 独立评审 I-3①（裁定 2 明文要求）：{@code create} 按请求体里的 {@code tenantId} 查 {@code TenantMapper}，
-     * **查不到必须 404 {@code NOT_FOUND}** —— 此前零覆盖。判别力由变异体 {@code F-3a}（去掉租户存在性检查）
+     * <b>查不到必须 404 {@code NOT_FOUND}</b> —— 此前零覆盖。判别力由变异体 {@code F-3a}（去掉租户存在性检查）
      * 提供：去掉之后 {@code tenant.getId()} 会 NPE ⇒ 500 ≠ 404，本用例精确变红。
      *
-     * <p>令牌的 {@code tenantId} 故意用一个**存在**的夹具租户，而请求体里的 {@code tenantId} 指向一个
-     * **不存在**的租户 —— 这样红点落在服务层的租户查找上，而不是落在"令牌租户不存在"上。
+     * <p>令牌的 {@code tenantId} 故意用一个<b>存在</b>的夹具租户，而请求体里的 {@code tenantId} 指向一个
+     * <b>不存在</b>的租户 —— 这样红点落在服务层的租户查找上，而不是落在"令牌租户不存在"上。
      */
     @Test
     void creatingAKeyForAnUnknownTenantIs404NotFound() throws Exception {
@@ -464,7 +464,7 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
      * 此前零覆盖。判别力由变异体 {@code F-3b}（去掉 {@code requireText}）提供：去掉之后空白 name 会被
      * 原样签发 ⇒ 200 ≠ 400，本用例精确变红。
      *
-     * <p>带一个**正向对照**：同一个入口在合法 {@code name} 下必须 200 —— 否则「400」可能只是「这个租户
+     * <p>带一个<b>正向对照</b>：同一个入口在合法 {@code name} 下必须 200 —— 否则「400」可能只是「这个租户
      * 一律被拒」，而不是「name 空白被拒」。
      */
     @Test
@@ -487,19 +487,19 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
     // ------------------------------------------------- 9) I-3c：不设过期 ⇒ 永不过期（落库 NULL + 读回 null）
 
     /**
-     * 独立评审 I-3③：{@code validDays} 为 {@code null} 或 ≤ 0 ⇒ **永不过期** ——
+     * 独立评审 I-3③：{@code validDays} 为 {@code null} 或 ≤ 0 ⇒ <b>永不过期</b> ——
      * 这是 {@code ApiKeyMintRunner} 的既有语义，也是 {@code ApiKeyAdminService.expireAt(Integer)} 的契约。
      *
-     * <p>断言**同时**钉住两件事，缺一就测不出 {@code Instant} / {@code LocalDateTime} 基准退化
+     * <p>断言<b>同时</b>钉住两件事，缺一就测不出 {@code Instant} / {@code LocalDateTime} 基准退化
      * （{@code docs/CONVENTIONS.md} §7）：
      * <ol>
-     *   <li>{@code api_key.expire_at} **落库为 NULL**（列里没有凭空造出一个"默认"时间）；</li>
-     *   <li>列表读回 {@code expireAt} 为 **JSON null**（读侧折算不会把一个 NULL 变成某个瞬时）。</li>
+     *   <li>{@code api_key.expire_at} <b>落库为 NULL</b>（列里没有凭空造出一个"默认"时间）；</li>
+     *   <li>列表读回 {@code expireAt} 为 <b>JSON null</b>（读侧折算不会把一个 NULL 变成某个瞬时）。</li>
      * </ol>
      * 判别力由变异体 {@code F-3c}（把 {@code expireAt} 改成永远非 null）提供：改完之后第一条断言精确变红。
      *
      * <p>两个输入都要：省略 {@code validDays}（= {@code null}）与 {@code validDays=0}（= ≤ 0），
-     * 它们覆盖 {@code if (validDays == null || validDays <= 0)} 的**两个**短路分支。
+     * 它们覆盖 {@code if (validDays == null || validDays <= 0)} 的<b>两个</b>短路分支。
      */
     @Test
     void aKeyWithoutValidDaysNeverExpires() throws Exception {
@@ -524,8 +524,8 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 夹具自守
 
     /**
-     * 夹具名前缀里的 {@code _} 对 LIKE 是**单字符通配符**，{@code %} 与 {@code \} 同理。本类的清理与
-     * 断言都建立在「前缀只含字面量」这条**假设**上，所以这里把它变成可执行事实：谁把前缀改成
+     * 夹具名前缀里的 {@code _} 对 LIKE 是<b>单字符通配符</b>，{@code %} 与 {@code \} 同理。本类的清理与
+     * 断言都建立在「前缀只含字面量」这条<b>假设</b>上，所以这里把它变成可执行事实：谁把前缀改成
      * {@code m4_key_it_}，这里先红，而不是让 {@code likeRight} 悄悄匹配到别的行（Task 8 的 M-2 教训）。
      */
     @Test
@@ -550,7 +550,7 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 直接用 {@link ApiKeyMapper} 造一行 key（不走 HTTP）：用例 2/3/4/5/6 要观测的是**停用/启用/删除**
+     * 直接用 {@link ApiKeyMapper} 造一行 key（不走 HTTP）：用例 2/3/4/5/6 要观测的是<b>停用/启用/删除</b>
      * 这一半，而不是签发路径（那由用例 1 与 7/8/9 覆盖）。这样 RED 阶段的红点落在被测行为上，而不是落在
      * 「签发接口还没实现」上。
      */
@@ -567,7 +567,7 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
         return entity;
     }
 
-    /** I-3c 的创建请求体：只带 {@code tenantId} 与 {@code name}（**刻意不带** {@code validDays}）。 */
+    /** I-3c 的创建请求体：只带 {@code tenantId} 与 {@code name}（<b>刻意不带</b> {@code validDays}）。 */
     private static HashMap<String, Object> singletonCreateBody(long tenantId, String name) {
         HashMap<String, Object> body = new HashMap<>();
         body.put("tenantId", tenantId);
@@ -619,8 +619,8 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 审计断言（按本用例的 target_id 查）
 
     /**
-     * 按 {@code target_id}（数值主键，自增、不跨用例复用）取**本用例这条 key** 的审计行，并顺带钉住
-     * {@code tenant_id} 的语义：API Key 是租户级资源，写的是**该 key 的租户 id**（不是 SQL NULL、
+     * 按 {@code target_id}（数值主键，自增、不跨用例复用）取<b>本用例这条 key</b> 的审计行，并顺带钉住
+     * {@code tenant_id} 的语义：API Key 是租户级资源，写的是<b>该 key 的租户 id</b>（不是 SQL NULL、
      * 也不是操作者的租户）—— 裁定 4 明文要求。
      */
     private AuditLogEntity onlyApiKeyAuditRow(String action, long apiKeyId, long tenantId) {
@@ -640,7 +640,7 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
         return row;
     }
 
-    /** 回滚用例的**缺席**断言用：按 {@code target_id} 数本用例这条 key 的审计行（绝不全表计数）。 */
+    /** 回滚用例的<b>缺席</b>断言用：按 {@code target_id} 数本用例这条 key 的审计行（绝不全表计数）。 */
     private Long apiKeyAuditRowCount(String action, long apiKeyId, long tenantId) {
         return auditLogMapper.selectCount(new LambdaQueryWrapper<AuditLogEntity>()
                 .eq(AuditLogEntity::getAction, action)
@@ -695,7 +695,7 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
         return listenerContainer;
     }
 
-    /** 装一条真 Redis 订阅，并在返回之前**确认订阅已经建立**（否则第一条真消息会被静默丢掉）。 */
+    /** 装一条真 Redis 订阅，并在返回之前<b>确认订阅已经建立</b>（否则第一条真消息会被静默丢掉）。 */
     private BlockingQueue<String> subscribeAndAwait() throws InterruptedException {
         BlockingQueue<String> received = new LinkedBlockingQueue<>();
         container().addMessageListener((message, channel) -> received.add(new String(message.getBody())),
@@ -705,7 +705,7 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 反复发一条**带唯一后缀的哨兵**，直到 {@code poll} 拿到的第一条就是刚刚那条 —— 说明队列里连更早的
+     * 反复发一条<b>带唯一后缀的哨兵</b>，直到 {@code poll} 拿到的第一条就是刚刚那条 —— 说明队列里连更早的
      * 残留都没有，于是随后收到的真消息一定是紧接着投递的那条。哨兵不含分隔符，
      * {@link ConfigInvalidateCodec#decode} 对它返回 {@code null}，不会被误当成有效失效。
      */
@@ -730,8 +730,8 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * {@link #awaitMessage} 的可变窗口版本：窗口长度由调用方给。回滚用例的正向投递对照必须用**与缺席
-     * 断言相同的窗口长度**，否则「窗口太短」不会被任何断言发现（Task 8 的独立评审登记，N7）。
+     * {@link #awaitMessage} 的可变窗口版本：窗口长度由调用方给。回滚用例的正向投递对照必须用<b>与缺席
+     * 断言相同的窗口长度</b>，否则「窗口太短」不会被任何断言发现（Task 8 的独立评审登记，N7）。
      */
     private static ConfigInvalidateMessage awaitMessageWithin(BlockingQueue<String> received, String reason,
                                                               Duration timeout) throws InterruptedException {
@@ -756,7 +756,7 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
     private static final List<LettuceConnectionFactory> blackholedFactories = new ArrayList<>();
 
     /**
-     * 一个只 {@code accept()}、**永不回包**的 {@link ServerSocket}（黑障）：真 Lettuce 客户端连得上、
+     * 一个只 {@code accept()}、<b>永不回包</b>的 {@link ServerSocket}（黑障）：真 Lettuce 客户端连得上、
      * 但命令永远等不到回应，于是每个命令都耗掉命令超时后抛 {@code RuntimeException}。
      * 这比「指向没人监听的端口」更接近「Redis 挂了」的现场，也与
      * {@code ApiKeyResolveRedisOutageTest} 的手法一致。
@@ -796,7 +796,7 @@ class ApiKeyAdminIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 用**真** Lettuce 客户端（指向黑障端口）构造一个 {@link ApiKeyAdminService}，其余依赖全部来自共享
+     * 用<b>真</b> Lettuce 客户端（指向黑障端口）构造一个 {@link ApiKeyAdminService}，其余依赖全部来自共享
      * 上下文（真 Mapper / 真 {@code AuditService} / 真 {@code ApiKeyService} / 真 {@code ConfigChangePublisher}）。
      * 于是 {@code redis.delete(...)} 会真的抛，而「业务写提交」「审计落库」仍是对真库的断言。
      */

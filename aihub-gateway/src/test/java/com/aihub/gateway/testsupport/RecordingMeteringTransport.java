@@ -66,7 +66,7 @@ public final class RecordingMeteringTransport implements MeteringTransport {
 
     /**
      * 等到某个 {@code request_id} 的事件；超时返回 {@code null}（断言时给出清晰失败信息）。
-     * <p>只扫描已记录的 payload，**不消费**任何一条；超时后用 {@link #payloads()} /
+     * <p>只扫描已记录的 payload，<b>不消费</b>任何一条；超时后用 {@link #payloads()} /
      * {@link #recordedRequestIds()} 能看出实际收到了哪些事件，失败可诊断。
      */
     public MeteringEvent awaitEvent(String requestId, Duration timeout) throws InterruptedException {

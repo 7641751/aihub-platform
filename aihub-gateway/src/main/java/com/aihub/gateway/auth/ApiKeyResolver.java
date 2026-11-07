@@ -20,12 +20,12 @@ import java.time.Duration;
  * 三级解析：Caffeine（本地，最快）→ Redis（跨实例共享）→ admin（真相源）。
  * <p>任何一级不可用都必须降级到下一级：缓存是可丢的派生数据，绝不能因为缓存故障而拒绝请求。
  * <p>Redis 载荷用 {@link ApiKeyCacheCodec} 编解码，key 前缀用它的公开常量
- * {@link ApiKeyCacheCodec#CACHE_KEY_PREFIX} —— 与 admin 写入时用的是**同一个常量**，
+ * {@link ApiKeyCacheCodec#CACHE_KEY_PREFIX} —— 与 admin 写入时用的是<b>同一个常量</b>，
  * 因此不存在「两边字面量写歪了、缓存永远 miss 却无人报错」的隐患。
- * <p><b>线程模型</b>：{@code StringRedisTemplate} 是**阻塞**驱动（Lettuce 同步 API + 2s
+ * <p><b>线程模型</b>：{@code StringRedisTemplate} 是<b>阻塞</b>驱动（Lettuce 同步 API + 2s
  * {@code spring.data.redis.timeout}），而本类的调用方是 {@code WebFilter}，即 Netty event loop。
  * 直接在 event loop 上调用它，意味着 Redis 不可达时每个 event loop 线程都被按住 2 秒 ——
- * 共享同一个 loop 的所有请求（{@code /healthz} 也在内）一起卡住，而且这**不是**异常，下面的
+ * 共享同一个 loop 的所有请求（{@code /healthz} 也在内）一起卡住，而且这<b>不是</b>异常，下面的
  * {@code catch (RuntimeException)} 降级路径救不了一个正在阻塞的线程。因此两次 Redis I/O 都
  * 显式调度到 {@link Schedulers#boundedElastic()}（见 {@link #readRedis} 与 {@link #writeRedis}）：
  * 事件循环只做「拿本地缓存 / 组合 Mono」这类 CPU 工作，网络阻塞发生在弹性线程池上。
@@ -42,10 +42,10 @@ public class ApiKeyResolver {
     private static final Scheduler REDIS_SCHEDULER = Schedulers.boundedElastic();
 
     /**
-     * 本地缓存的值类型是 {@link AdminResolution}（三态）而**不是** {@code ApiKeyView}：三态不是
+     * 本地缓存的值类型是 {@link AdminResolution}（三态）而<b>不是</b> {@code ApiKeyView}：三态不是
      * 「视图」能表达的东西 —— 权威否定与「admin 给了一份已过期 / 已停用的视图」都是
      * {@code usable() == false}，从视图上不可区分。缓存三态之后，「只有 {@code FOUND} /
-     * {@code NOT_FOUND} 会进缓存、{@code UNAVAILABLE} 永不进」由**写入点**与**值类型**共同保证，
+     * {@code NOT_FOUND} 会进缓存、{@code UNAVAILABLE} 永不进」由<b>写入点</b>与<b>值类型</b>共同保证，
      * 读取侧原样返回即可（拿到什么就是什么，不再重新推断状态）。
      * <p>与过滤器在空 {@code Mono} 上的兜底共用同一个实例（{@code AdminResolution.unavailable()}），
      * 不再各自 {@code new} 一份同形哨兵。
@@ -66,16 +66,16 @@ public class ApiKeyResolver {
     }
 
     /**
-     * 解析结果保证非 null、非空 Mono：判不了（admin 故障 / 契约被打破）会得到
-     * {@link AdminResolution#unavailable()}，而不是空 Mono —— 调用方只需按三态分支一次。
+     * 按 Caffeine → Redis → admin 的顺序解析 key 的哈希，返回三态结论。
+     * <p>保证非 null、非空 Mono：判不了（admin 故障 / 契约被打破）得到
+     * {@link AdminResolution#unavailable()}，调用方按三态分支<b>一次</b>即可。
      *
-     * <p><b>写缓存的规则是 D1 的修复点</b>：只有**权威结论**才允许进本地缓存 ——
-     * 命中（{@link AdminResolution.Status#FOUND}）与 admin 明确说的「没有这把 key」
-     * （{@code NOT_FOUND}）都可以；而 {@link AdminResolution.Status#UNAVAILABLE}（超时 / 传输失败 /
-     * 5xx / 响应畸形）**一次都不写**。修前这三态被压成同一个 {@code MISS}，于是一次瞬时故障会被
-     * 负缓存放大成 {@code localCacheTtl}（默认 30 秒）的固定拒绝，连 Redis/控制面恢复了都还在拒。
-     * 对客状态码是过滤器的事（D4：{@code NOT_FOUND} → 401，{@code UNAVAILABLE} → 503），
-     * 本类只负责「这次结论值不值得记住」。
+     * <p><b>只有权威结论才进本地缓存</b>（BUG-D1 修复点）：FOUND 与 admin 明确说的
+     * NOT_FOUND 都写；UNAVAILABLE（超时 / 传输失败 / 5xx / 响应畸形）<b>一次都不写</b>——
+     * 写成负缓存会把瞬时故障放大成 {@code localCacheTtl}（默认 30 秒）的固定拒绝。
+     * 对客状态码归过滤器（BUG-D4：NOT_FOUND → 401，UNAVAILABLE → 503）。
+     *
+     * @param keyHash {@code ApiKeyHasher.hash(secret)} 的小写十六进制，<b>不是</b>明文 secret
      */
     public Mono<AdminResolution> resolve(String keyHash) {
         AdminResolution cached = local.getIfPresent(keyHash);
@@ -107,8 +107,8 @@ public class ApiKeyResolver {
                         local.put(keyHash, resolution);
                         return resolution;
                     }
-                    // UNAVAILABLE：一次都不写（D1）。写进去等于把一次瞬时故障放大成
-                    // localCacheTtl 秒的固定拒绝。对客状态码由过滤器决定（D4 起是 503）。
+                    // UNAVAILABLE：一次都不写（BUG-D1）。写进去等于把一次瞬时故障放大成
+                    // localCacheTtl 秒的固定拒绝。对客状态码由过滤器决定（BUG-D4 起是 503）。
                     log.warn("admin 回源故障：本次结果**不写入负缓存**（下一个请求会立刻重试 admin），"
                             + "对客 fail-closed 回 503 service_unavailable（结论未知，不是「key 不存在」）");
                     return resolution;
@@ -120,7 +120,7 @@ public class ApiKeyResolver {
      * {@link AdminClient#resolve} —— 后者把「权威否定」与「故障」压成同一个 {@code empty}，
      * 用它就分不出哪一次值得记住。
      * <p>真正的命中才回填 Redis（与 admin 侧只写命中载荷的约定一致）。
-     * <p>Mono.defer 同时保证 adminClient 的**同步**抛错（例如空 internal secret 时
+     * <p>Mono.defer 同时保证 adminClient 的<b>同步</b>抛错（例如空 internal secret 时
      * InternalHmac.sign 抛 IllegalStateException）也落进 onErrorResume。
      */
     private Mono<AdminResolution> resolveFromAdmin(String keyHash) {
@@ -128,7 +128,7 @@ public class ApiKeyResolver {
                 .onErrorResume(ex -> {
                     // 这一条兜的是「AdminClient 实现把异常抛出来了」（真实实现的传输/5xx/畸形已在
                     // AdminClient.Http 里分别打了 ERROR）。它同样**不是**「key 不存在」，
-                    // 所以按 ERROR 记录，同样不写负缓存，对客是 503 service_unavailable（D4）。
+                    // 所以按 ERROR 记录，同样不写负缓存，对客是 503 service_unavailable（BUG-D4）。
                     log.error("admin 回源抛出异常（非「key 不存在」），本次不写入负缓存、"
                             + "对客 fail-closed 回 503 service_unavailable: {}", ex.toString());
                     return Mono.just(AdminResolution.unavailable());
@@ -142,7 +142,7 @@ public class ApiKeyResolver {
     }
 
     /**
-     * 第二级：Redis 读取。**阻塞调用，整体切到 {@link #REDIS_SCHEDULER}**，event loop 上不留任何
+     * 第二级：Redis 读取。<b>阻塞调用，整体切到 {@link #REDIS_SCHEDULER}</b>，event loop 上不留任何
      * 网络 I/O；失败（不可达/超时/载荷畸形）一律返回空 Mono，由调用方落到 admin。
      */
     private Mono<ApiKeyView> readRedis(String keyHash) {
@@ -158,7 +158,7 @@ public class ApiKeyResolver {
     }
 
     /**
-     * 回填 Redis。**不参与响应链路**：整段（编码 + 阻塞 set）切到 {@link #REDIS_SCHEDULER} 上异步执行，
+     * 回填 Redis。<b>不参与响应链路</b>：整段（编码 + 阻塞 set）切到 {@link #REDIS_SCHEDULER} 上异步执行，
      * event loop 只做一次 {@code subscribe()} 就不再过问。写失败只记日志，绝不影响本次请求的结果。
      */
     private void writeRedis(String keyHash, ApiKeyView view) {

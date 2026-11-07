@@ -11,7 +11,7 @@ import org.springframework.stereotype.Component;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
- * 配置失效频道的**订阅方**（决策 D4 / 设计文档 §6.3）：admin 每次成功写配置后广播一条消息，
+ * 配置失效频道的<b>订阅方</b>（M4 决策 4 / 设计文档 §6.3）：admin 每次成功写配置后广播一条消息，
  * 本类把它翻译成一次 {@link ConfigClient#invalidate(long)}，于是「控制面配置 → 数据面生效」
  * 不再受本地 TTL（30 s）与共享 TTL（10 m）的约束 —— 那正是 M3 登记的 10 分钟上界的来源。
  *
@@ -23,11 +23,11 @@ import static java.nio.charset.StandardCharsets.UTF_8;
  * <p><b>坏消息一律忽略并 WARN，绝不抛异常</b>：一条畸形载荷既没有可抬水位的版本，也没有可据以
  * 行动的 reason，唯一有用的事就是让它可见（WARN）然后继续。抛出去并不会换来一次重投 ——
  * Redis Pub/Sub 没有重投与应答，{@code RedisMessageListenerContainer} 自己用
- * {@code handleListenerException} 把监听器的异常吞掉，抛出去只是**多赔上这条原因**。
+ * {@code handleListenerException} 把监听器的异常吞掉，抛出去只是<b>多赔上这条原因</b>。
  * {@link ConfigInvalidateCodec#decode(String)} 对畸形载荷返回 {@code null}（它自己不抛），
  * 这里再做一次空 body 的兜底。
  *
- * <p>装配在 {@link ConfigInvalidateSubscriptionConfig} 里（**不是** {@code ConfigConfig}）：
+ * <p>装配在 {@link ConfigInvalidateSubscriptionConfig} 里（<b>不是</b> {@code ConfigConfig}）：
  * 这个类只依赖 {@link ConfigClient}，因此可以在不起 Spring 上下文的情况下被直接驱动
  * （见 {@code ConfigSubscriberTest}）。
  */

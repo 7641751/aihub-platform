@@ -4,8 +4,8 @@ package com.aihub.common.config;
  * 限流策略的纯数据视图（对应 {@code rate_limit_policy}）。
  *
  * <p><b>两个维度 ({@code tenantId} / {@code apiKeyId}) 都参与判定</b>（决策 7，2026-09-26 依控制器
- * pre-flight 评审修订）：{@code apiKeyId == null} 是**租户级**策略（该租户所有 key 的兜底），
- * 非空是**key 级**策略（只作用于该 {@code api_key.id}）。{@link ConfigSnapshot} 上两个维度各有
+ * pre-flight 评审修订）：{@code apiKeyId == null} 是<b>租户级</b>策略（该租户所有 key 的兜底），
+ * 非空是<b>key 级</b>策略（只作用于该 {@code api_key.id}）。{@link ConfigSnapshot} 上两个维度各有
  * 一个取值入口，由 gateway 的 {@code RateLimitResolver} 按「key 级优先 → 租户级回落 → 内置默认」
  * 的顺序取（Task 4）。
  */

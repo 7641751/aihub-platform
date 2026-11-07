@@ -13,7 +13,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * 分区规划的纯函数测试（不碰数据库）。这些断言全部来自本机 MySQL 8.4 的实测：
  * V1 的分区是 p202609(&lt;10-01) / p202610(&lt;11-01) / p202611(&lt;12-01) / pmax，
- * 而「今天 + N 个月」必须每月都有**专属**分区，否则行会静默落进 pmax。
+ * 而「今天 + N 个月」必须每月都有<b>专属</b>分区，否则行会静默落进 pmax。
  */
 class RequestLogPartitionPlannerTest {
 
@@ -42,7 +42,7 @@ class RequestLogPartitionPlannerTest {
                 LocalDate.of(2027, 1, 1), LocalDate.of(2027, 2, 1), LocalDate.of(2027, 3, 1));
     }
 
-    /** 中间空洞只报告、不补（补它要 REORGANIZE 一个**有数据**的分区）—— 决策 15。 */
+    /** 中间空洞只报告、不补（补它要 REORGANIZE 一个<b>有数据</b>的分区）—— 决策 15。 */
     @Test
     void detectsAMiddleGap() {
         List<Partition> withGap = List.of(
@@ -64,7 +64,7 @@ class RequestLogPartitionPlannerTest {
         assertThat(plan.pmaxPresent()).isFalse();
     }
 
-    /** 应用停了几个月：从最后一个**有界**分区的上界开始逐月补到「今天 + N 个月」。 */
+    /** 应用停了几个月：从最后一个<b>有界</b>分区的上界开始逐月补到「今天 + N 个月」。 */
     @Test
     void coversFromAStaleMaxBoundWhenTheAppWasDownForMonths() {
         Plan plan = RequestLogPartitionPlanner.plan(V1_PARTITIONS, LocalDate.of(2027, 5, 15), 2);
@@ -86,7 +86,7 @@ class RequestLogPartitionPlannerTest {
         assertThat(second.toCreate()).isEmpty();
     }
 
-    /** RANGE COLUMNS 的边界是**带单引号**的字符串，pmax 是 MAXVALUE（实测格式）。 */
+    /** RANGE COLUMNS 的边界是<b>带单引号</b>的字符串，pmax 是 MAXVALUE（实测格式）。 */
     @Test
     void parsesQuotedRangeColumnBoundsAndMaxValue() {
         assertThat(RequestLogPartitionPlanner.parseBound("'2026-10-01'")).isEqualTo(LocalDate.of(2026, 10, 1));

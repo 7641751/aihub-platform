@@ -33,7 +33,7 @@ import java.util.Set;
 /**
  * 守卫 {@code /api/**}（D3 的令牌 + D10 的两级角色）。
  *
- * <p><b>与既有 {@code InternalAuthFilter} 同一手法</b>：自己解析、自己写响应、**不引 Spring Security**
+ * <p><b>与既有 {@code InternalAuthFilter} 同一手法</b>：自己解析、自己写响应、<b>不引 Spring Security</b>
  * （{@code spring-boot-starter-security} 会带来第二条全局过滤器链与 auto-config，且会改变
  * {@code /internal/**}、{@code /healthz} 的既有行为 —— 见 D2）。路由由 Spring MVC 决定，
  * 授权只在这里发生一次。
@@ -46,13 +46,13 @@ import java.util.Set;
  * <p><b>三条不变量</b>（各自的用例在 {@code ConsoleAuthFilterTest}）：
  * <ul>
  *   <li><b>密钥不可用 ⇒ 门关着</b>（D16）：空/短于 32 字符时 {@code /api/**} 一律 401，
- *       **绝不放行**。这里**不**回 500 —— 告诉运维"真正原因是配置"是**登录接口**的职责
+ *       <b>绝不放行</b>。这里<b>不</b>回 500 —— 告诉运维"真正原因是配置"是<b>登录接口</b>的职责
  *       （它回 {@code CONFIGURATION_ERROR}），门本身只需要保证关着。登录接口因此从本过滤器的
  *       判定范围里排除（{@link #shouldNotFilter}），否则没人能取到第一张令牌。</li>
  *   <li><b>令牌层失败 ⇒ 401</b>，且必须是 admin 信封（{@code {"code","message","data"}}），
  *       不是 Spring 的默认错误体（{@code /api/**} 的响应契约与 {@code /internal/**} 同源）。</li>
  *   <li><b>角色只认 {@code ADMIN}/{@code VIEWER}</b>（D10）：{@code ADMIN} 可读写；
- *       {@code VIEWER} 只允许 GET/HEAD/OPTIONS；**其余角色一律 403，连读也不放行**
+ *       {@code VIEWER} 只允许 GET/HEAD/OPTIONS；<b>其余角色一律 403，连读也不放行</b>
  *       （{@code ConsoleToken.verify} 不校验 role，所以 fail-closed 必须在这里落地）。</li>
  * </ul>
  *
@@ -79,7 +79,7 @@ public class ConsoleAuthFilter extends OncePerRequestFilter {
     private static final Set<String> READ_METHODS = Set.of("GET", "HEAD", "OPTIONS");
 
     /**
-     * 登录接口自己**必须**无令牌可达：它是唯一的签发入口，守起来就没人是能拿到令牌的鸡生蛋问题。
+     * 登录接口自己<b>必须</b>无令牌可达：它是唯一的签发入口，守起来就没人是能拿到令牌的鸡生蛋问题。
      * 它自己的 401（口令错）/ 500（配置故障）由控制器与服务层决定，本过滤器一个字都不插嘴。
      */
     private static final String LOGIN_PATH = "/api/auth/login";
@@ -105,7 +105,7 @@ public class ConsoleAuthFilter extends OncePerRequestFilter {
      * 与 {@code InternalAuthFilter} 同款：{@code application.yml} 的默认值就是空，
      * fail-fast 会让没配密钥的本地启动直接起不来。
      *
-     * <p>日志里**只打属性名与长度类别**，绝不打密钥本身（哪怕它看起来是空的）。
+     * <p>日志里<b>只打属性名与长度类别</b>，绝不打密钥本身（哪怕它看起来是空的）。
      */
     @PostConstruct
     void warnIfMisconfigured() {

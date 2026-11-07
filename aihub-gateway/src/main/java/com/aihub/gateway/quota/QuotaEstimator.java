@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
- * 预扣额度的估算：**估算 prompt token + max_tokens**（设计文档 §6.2 原文）。
+ * 预扣额度的估算：<b>估算 prompt token + max_tokens</b>（设计文档 §6.2 原文）。
  *
  * <p><b>复用 {@link TokenEstimator}，不新写一份（D17 明文）</b>：同一份内容在「预扣」与
  * 「拿不到 usage 时的计量」两条路径上必须算出同一个数。两份估算器会漂移，而对账会把它报成
@@ -13,14 +13,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  *
  * <p><b>{@link TokenEstimator} 的既有签名是 {@code static int estimate(String content)}</b>
  * （单参、返回 int，口径：1 个汉字 ≈ 0.6 token、其它字符 ≈ 0.3 token，向上取整）。
- * 它估算的是**内容文本**，不是「一次调用」。因此本类必须自己从请求体里取出 user 文本
+ * 它估算的是<b>内容文本</b>，不是「一次调用」。因此本类必须自己从请求体里取出 user 文本
  * （{@code messages[].content}，兼容字符串与 OpenAI 的多模态分片数组）再交给它 —— 复用它的
- * **估算法**，而不是假设它已经能估算一次调用。
+ * <b>估算法</b>，而不是假设它已经能估算一次调用。
  *
  * <p><b>估算口径故意偏保守（偏大）</b>：多压一点，收尾时退回（{@code QuotaLimiter#adjust}）。
- * 反过来（偏小）会超发，而超发是**不可逆**的（钱已经花出去了）。
+ * 反过来（偏小）会超发，而超发是<b>不可逆</b>的（钱已经花出去了）。
  *
- * <p>解析失败 / 结构不符时**回落到「整段 body 当作内容」**：那是一个确定的上界近似，绝不让
+ * <p>解析失败 / 结构不符时<b>回落到「整段 body 当作内容」</b>：那是一个确定的上界近似，绝不让
  * 估算器抛异常到请求路径上（估算发生在过滤器里，一次异常就是一次 5xx）。
  */
 public final class QuotaEstimator {
@@ -38,7 +38,7 @@ public final class QuotaEstimator {
     }
 
     /**
-     * 一次请求的预扣额度 = 估算 prompt + {@code maxTokens}。结果**永不为负**。
+     * 一次请求的预扣额度 = 估算 prompt + {@code maxTokens}。结果<b>永不为负</b>。
      *
      * @param bodyOrPrompt 请求体（JSON 文本）。拿不到 {@code messages}（解析失败 / 结构不符）时
      *                     整段文本被当作内容估算 —— 一个确定的上界近似

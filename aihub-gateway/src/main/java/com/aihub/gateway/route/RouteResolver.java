@@ -19,7 +19,7 @@ import java.util.function.Supplier;
 import java.util.random.RandomGenerator;
 
 /**
- * {@code model → 有序候选渠道}。返回**列表**而不是单个渠道：故障转移的全部能力来自「还有下一个」。
+ * {@code model → 有序候选渠道}。返回<b>列表</b>而不是单个渠道：故障转移的全部能力来自「还有下一个」。
  *
  * <p>选择规则（评审按此判断，实施者不要「优化」）：
  * <ol>
@@ -28,29 +28,29 @@ import java.util.random.RandomGenerator;
  *       不需要额外的「主/备」字段；</li>
  *   <li>组内<b>按权重随机</b>排序（{@code model_route.weight}）。权重非正数按 1 处理 ——
  *       零权重不该变成「永不选中」的隐形禁用，那会让一条配错的渠道静默失联；</li>
- *   <li>组内被熔断的渠道**排到该组末尾**而不是被删除：删掉会让「唯一候选恰好被熔断」退化成
+ *   <li>组内被熔断的渠道<b>排到该组末尾</b>而不是被删除：删掉会让「唯一候选恰好被熔断」退化成
  *       无候选（404），而全熔断时「试一次」比「直接告诉客户端没这个模型」更诚实（决策 10）；</li>
  *   <li><b>整组熔断就换下一组</b>：所有组的「未熔断」渠道先按 priority 升序排完（整组熔断的组
- *       在这一层不贡献任何渠道，于是下一组自然顶上来），<b>已熔断</b>的渠道作为**最后手段**
- *       接在整张列表的末尾 —— 低优先级组**不被丢弃**，否则「换下一组」无从谈起；</li>
- *   <li><b>两层都按权重随机</b>：健康层与熔断层**各自**在组内做权重随机排序，所以最后手段层
+ *       在这一层不贡献任何渠道，于是下一组自然顶上来），<b>已熔断</b>的渠道作为<b>最后手段</b>
+ *       接在整张列表的末尾 —— 低优先级组<b>不被丢弃</b>，否则「换下一组」无从谈起；</li>
+ *   <li><b>两层都按权重随机</b>：健康层与熔断层<b>各自</b>在组内做权重随机排序，所以最后手段层
  *       的首位也是按权重抽出来的，而不是「配置里第一行的渠道永远打头」（否则 weight=0 的渠道
  *       会永久压过 weight=1000 的渠道，决策 10 的「照常选」就只剩一半）；</li>
  *   <li>所有组都熔断 → 列表以最高优先级的那一组开头（放行 + WARN + 计数器，决策 10）。</li>
  * </ol>
  *
- * <p><b>为什么列表包含全部优先级组</b>：调用方（relay）是**顺序尝试**这张列表的，
+ * <p><b>为什么列表包含全部优先级组</b>：调用方（relay）是<b>顺序尝试</b>这张列表的，
  * 「当前渠道失败就试下一个候选」就是故障转移本身；只返回「候选组」会让主渠道一旦整组熔断
  * 就再也回不去。健康层内组间严格按 priority 升序，组内才是权重随机，因此「priority 压过
  * weight」始终成立；熔断层只影响「所有健康候选都失败之后」的行为。
  *
- * <p><b>随机源的线程安全要求（接线必读）</b>：本类是请求路径上的**单例**，<b>不是</b>线程安全的
- * —— {@link RandomGenerator} 的接口明确写着实现**不必**线程安全，而
+ * <p><b>随机源的线程安全要求（接线必读）</b>：本类是请求路径上的<b>单例</b>，<b>不是</b>线程安全的
+ * —— {@link RandomGenerator} 的接口明确写着实现<b>不必</b>线程安全，而
  * {@code RandomGenerator.getDefault()} 在当前 JDK 上返回的正是这类实现。并发抽取会让「按权重分流」
- * 出现重复或偏斜，而那恰恰是本类存在的理由。因此接线时**必须**注入一个线程安全的发生器：
+ * 出现重复或偏斜，而那恰恰是本类存在的理由。因此接线时<b>必须</b>注入一个线程安全的发生器：
  * {@link java.util.concurrent.ThreadLocalRandom#current()}（推荐，无锁）、
  * {@code SplittableRandom} 的每线程实例，或对单实例做同步包装。
- * 测试用固定种子做确定性断言；生产**不要**把种子写死。
+ * 测试用固定种子做确定性断言；生产<b>不要</b>把种子写死。
  */
 public class RouteResolver {
 
@@ -58,7 +58,7 @@ public class RouteResolver {
 
     /**
      * 全候选熔断分支的计数器（决策 10 的「WARN + 计数器」）。API 只返回
-     * {@code List<ChannelDescriptor>}，里面**没有任何熔断标记**，调用方无法自己认出这种情况，
+     * {@code List<ChannelDescriptor>}，里面<b>没有任何熔断标记</b>，调用方无法自己认出这种情况，
      * 因此计数必须在这里做。命名沿用项目前缀 {@code aihub.}（见 {@code aihub.metering.*}）。
      */
     public static final String ALL_BROKEN_METRIC = "aihub.route.all-broken";
@@ -69,7 +69,7 @@ public class RouteResolver {
     private final Counter allBrokenCounter;
 
     /**
-     * 不装配注册表的重载：计数进 Micrometer 的**全局复合注册表**
+     * 不装配注册表的重载：计数进 Micrometer 的<b>全局复合注册表</b>
      * （Spring Boot 默认把各注册表挂在它上面，没有注册表时是安全空操作）。
      */
     public RouteResolver(Supplier<ConfigSnapshot> snapshots, ChannelCircuitBreaker breaker, RandomGenerator random) {
@@ -163,7 +163,7 @@ public class RouteResolver {
     }
 
     /**
-     * 权重随机的**可复现**实现：按 {@code max(weight,1)} 做累加游走抽取，选中的与末位交换后重复。
+     * 权重随机的<b>可复现</b>实现：按 {@code max(weight,1)} 做累加游走抽取，选中的与末位交换后重复。
      * 复杂度 O(n²)，候选数是个位数，不需要更聪明。
      */
     private List<ChannelDescriptor> weightedOrder(List<Entry> entries) {

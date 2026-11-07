@@ -9,28 +9,28 @@ import org.springframework.amqp.rabbit.retry.MessageRecoverer;
 import java.nio.charset.StandardCharsets;
 
 /**
- * kb 流水线的**失败终态恢复器**（M5 Task 6，决策 D7）。
+ * kb 流水线的<b>失败终态恢复器</b>（M5 Task 6，决策 D7）。
  *
- * <p><b>它在流水线里的位置</b>：{@code @RabbitListener} 的重试策略是**3 次指数退避**
- * （值取自 {@code spring.rabbitmq.listener.simple.retry.*}）；重试**全部耗尽**之后才轮到
+ * <p><b>它在流水线里的位置</b>：{@code @RabbitListener} 的重试策略是<b>3 次指数退避</b>
+ * （值取自 {@code spring.rabbitmq.listener.simple.retry.*}）；重试<b>全部耗尽</b>之后才轮到
  * {@link MessageRecoverer#recover(Message, Throwable)}。因此"进 DLQ"（容器把消息
  * requeue=false 拒绝 ⇒ 经业务队列的 {@code x-dead-letter-exchange} 进 {@code aihub.kb.dlq}）
- * 与"置 {@code FAILED} + 清理 + 审计"**必然同时发生** —— 这正是 D7 要求的"必须同一处"。
+ * 与"置 {@code FAILED} + 清理 + 审计"<b>必然同时发生</b> —— 这正是 D7 要求的"必须同一处"。
  *
  * <p><b>⚠️ 恢复器必须"抛出"才进得了 DLQ</b>（本任务最关键的一条，被 javap 实测钉死）：
- * Spring AMQP 的语义是 —— {@code recover(...)} **正常返回 ⇒ 容器 ack 这条消息**（消息就此消失）；
- * **只有抛** {@link AmqpRejectAndDontRequeueException} 才会以 requeue=false 拒绝 ⇒ 进 DLQ。
- * ⇒ DB 部分（置 FAILED / 清理 / 审计）可以 try/catch（记日志），但**最后必须抛**。
- * {@code catch → return} 会让"置 FAILED"与"进 DLQ"**只剩一半**，而 {@code dlqDepth() > 0} 那条断言
+ * Spring AMQP 的语义是 —— {@code recover(...)} <b>正常返回 ⇒ 容器 ack 这条消息</b>（消息就此消失）；
+ * <b>只有抛</b> {@link AmqpRejectAndDontRequeueException} 才会以 requeue=false 拒绝 ⇒ 进 DLQ。
+ * ⇒ DB 部分（置 FAILED / 清理 / 审计）可以 try/catch（记日志），但<b>最后必须抛</b>。
+ * {@code catch → return} 会让"置 FAILED"与"进 DLQ"<b>只剩一半</b>，而 {@code dlqDepth() > 0} 那条断言
  * 会红 —— 那正是它该红的样子。
  *
  * <p><b>为什么是"专用恢复器 + 专用容器工厂"而不是改默认工厂</b>：本仓的
- * {@code retry.*} / {@code default-requeue-rejected} 是**全局**的，把它们（以及一个自定义 recoverer）
- * 挂到默认工厂上会**一起改掉 {@code MeteringConsumer} 的死信行为**（它有自己的 DLQ 用例）。
+ * {@code retry.*} / {@code default-requeue-rejected} 是<b>全局</b>的，把它们（以及一个自定义 recoverer）
+ * 挂到默认工厂上会<b>一起改掉 {@code MeteringConsumer} 的死信行为</b>（它有自己的 DLQ 用例）。
  * ⇒ 见 {@link KbTopologyConfig#kbListenerContainerFactory}：只有 kb 的两个消费者走这个专用工厂。
  *
  * <p><b>本类刻意在 {@code aihub-mq} 里</b>（依赖方向 {@code web → service → mq}，mq 看不到 service）：
- * 真正的处置（cleanup + 置 FAILED + 审计）通过 {@link TerminalFailureHandler} 这个**接缝**回调到
+ * 真正的处置（cleanup + 置 FAILED + 审计）通过 {@link TerminalFailureHandler} 这个<b>接缝</b>回调到
  * service 侧的实现（{@code KbDocumentService}）。形状照 {@link KbParseSink}/{@link KbEmbedSink}
  * 的既有先例（"消费侧定义接口、service 侧实现"）。
  */
@@ -45,7 +45,7 @@ public class KbMessageRecoverer implements MessageRecoverer {
      * @param docId {@code kb_document.id}（从消息载荷解出）
      * @param stage 失败发生在哪个阶段（{@code "parse"} / {@code "embed"}），用于让 {@code error_msg}
      *              能看出是哪一段失败的
-     * @param cause 重试耗尽时的**最后一个**异常（恢复器按它派生失败原因）
+     * @param cause 重试耗尽时的<b>最后一个</b>异常（恢复器按它派生失败原因）
      */
     public interface TerminalFailureHandler {
 

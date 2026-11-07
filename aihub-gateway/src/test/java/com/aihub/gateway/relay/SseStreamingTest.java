@@ -44,7 +44,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       攒批实现的实测失败点是 {@code secondFrameWritten()} 断言：它连响应头都提交不出来，
  *       客户端 {@code send()} 一直阻塞，没人放行上游 → 上游等待预算到期、补写第二帧并收尾，
  *       网关这才把整段一次性回吐 → 读到第一帧时断言已经为 true。客户端的读取预算是另一条
- *       **兜底**路径（先提交响应头、却扣住第一帧的实现才会走到它），见 {@link FakeUpstream} 的注释。</li>
+ *       <b>兜底</b>路径（先提交响应头、却扣住第一帧的实现才会走到它），见 {@link FakeUpstream} 的注释。</li>
  *   <li><b>客户端断连的计量</b>：设计文档 §8.1 ⑤ 要求 cancel 上游 + 按已收内容估算 token。</li>
  * </ol>
  */
@@ -57,7 +57,7 @@ class SseStreamingTest {
     private static final String SECOND_FRAME = "data: [DONE]\n\n";
 
     /**
-     * 客户端读第一帧的预算；**必须严格小于** {@link FakeUpstream#SECOND_FRAME_HOLD_BUDGET_SECONDS}
+     * 客户端读第一帧的预算；<b>必须严格小于</b> {@link FakeUpstream#SECOND_FRAME_HOLD_BUDGET_SECONDS}
      * （该不变式由 {@link #upstreamHoldBudgetMustExceedClientReadBudget()} 守卫）。
      */
     private static final long CLIENT_READ_TIMEOUT_SECONDS = 5;
@@ -188,10 +188,10 @@ class SseStreamingTest {
     }
 
     /**
-     * 握手用例之所以成立的前提不变式：上游扣留第二帧的预算**严格大于**客户端读取第一帧的预算。
-     * <p>反过来（上游预算 ≤ 客户端预算）会重新引入一条**假红**：正确的中继还没读到第一帧，上游就已经
+     * 握手用例之所以成立的前提不变式：上游扣留第二帧的预算<b>严格大于</b>客户端读取第一帧的预算。
+     * <p>反过来（上游预算 ≤ 客户端预算）会重新引入一条<b>假红</b>：正确的中继还没读到第一帧，上游就已经
      * 等不下去、补写第二帧并收尾，于是「上游已写出第二帧」先于「客户端读到第一帧」成为事实，
-     * 一个**正确**的实现会在 {@code secondFrameWritten()} 断言上被判红。
+     * 一个<b>正确</b>的实现会在 {@code secondFrameWritten()} 断言上被判红。
      * <p>这条守卫没有运行时行为，只把该不变式从注释变成可执行断言：将来任何「顺手」调小上游预算
      * 或调大客户端预算的改动都会在这里立刻变红，而不是留到某次 CI 上偶发。
      */

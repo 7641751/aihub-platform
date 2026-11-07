@@ -1,12 +1,12 @@
 package com.aihub.common.ratelimit;
 
 /**
- * Redis + Lua 令牌桶的**脚本与键布局**，放在共享模块里，理由有两条：
+ * Redis + Lua 令牌桶的<b>脚本与键布局</b>，放在共享模块里，理由有两条：
  * <ol>
- *   <li>它是**跨模块契约**：gateway 要跑这段脚本，而 admin 侧的集成测试（需要 Docker，
+ *   <li>它是<b>跨模块契约</b>：gateway 要跑这段脚本，而 admin 侧的集成测试（需要 Docker，
  *       因此不能放在 gateway 模块）要验它；两侧必须逐字节同一份，否则「测试验过的脚本」
  *       与「线上跑的脚本」会漂移。与 {@code MeteringTopology} 放在共享模块的理由相同。</li>
- *   <li>它只由 JDK 的字符串常量组成，**不破坏 main 作用域零依赖**。</li>
+ *   <li>它只由 JDK 的字符串常量组成，<b>不破坏 main 作用域零依赖</b>。</li>
  * </ol>
  *
  * <p>字段名 {@code t}（令牌毫数）与 {@code k}（上次补充的毫秒时间戳）也是契约的一部分：
@@ -14,7 +14,7 @@ package com.aihub.common.ratelimit;
  *
  * <p><b>为什么必须是 Lua</b>（设计文档 §11 深挖清单第 2 题）：令牌桶的「补充 → 判定 → 扣减」是
  * 三步读改写。若由客户端分三次调用 Redis，并发下两个请求会读到同一个令牌数、各自判定成功，
- * 于是 burst 被击穿（经典的超发）。Lua 脚本在 Redis 里**单线程原子执行**，三步之间不可能插入
+ * 于是 burst 被击穿（经典的超发）。Lua 脚本在 Redis 里<b>单线程原子执行</b>，三步之间不可能插入
  * 别的请求，因此判定与扣减是同一个原子操作。Task 14 用「20 线程 × 20 次并发、恰好放行 burst 次」
  * 在真 Redis 上证明这一点。
  *
@@ -37,7 +37,7 @@ public final class RateLimitScript {
     private static final long MIN_IDLE_TTL_MILLIS = 60_000L;
 
     /**
-     * 一次往返、服务器端原子的令牌桶。**这段字符串是唯一真相**：gateway 的 {@code LuaTokenBucket}
+     * 一次往返、服务器端原子的令牌桶。<b>这段字符串是唯一真相</b>：gateway 的 {@code LuaTokenBucket}
      * 直接委托它，admin 侧的集成测试也读它。任何改动都必须先过 {@code RateLimitScriptTest}。
      *
      * <p>ARGV = {nowMillis, qps, burst, ttlMillis}；返回值 = {allowed, remaining, retryAfterMillis}。
@@ -45,14 +45,14 @@ public final class RateLimitScript {
      * 整数才能保证「降级前后行为完全相同」。
      *
      * <p><b>新桶直接满桶</b>：当 {@code HGET} 取不到字段（新 key，返回 {@code false}）时把
-     * {@code tokens} 置为 {@code capacity}、{@code lastRefill} 置为 {@code now}，**不是**用
+     * {@code tokens} 置为 {@code capacity}、{@code lastRefill} 置为 {@code now}，<b>不是</b>用
      * {@code or '0'} 当作 0 再靠 {@code elapsed * qps} 补。理由与 {@code TokenBucket} 的类注释
      * 完全一样：{@code qps = 0} 时「从 0 补」永远补不出令牌，会把「允许 burst 次突发」退化成
      * 「一次都不放行」；而且「补得满补不满」会取决于时钟的绝对值。两侧必须是同一条规则。
      *
-     * <p><b>时钟回拨没有单独的分支</b>：脚本**曾经**写过 {@code if elapsed < 0 then lastRefill = now end}，
+     * <p><b>时钟回拨没有单独的分支</b>：脚本<b>曾经</b>写过 {@code if elapsed < 0 then lastRefill = now end}，
      * 但那是死代码 —— 该变量在计算 {@code elapsed} 之后再没被读过，而基准时刻是最后那次
-     * {@code HSET … 'k', now} **无条件**写进去的。于是「回拨时不补充、基准前移到 now」这条规则
+     * {@code HSET … 'k', now} <b>无条件</b>写进去的。于是「回拨时不补充、基准前移到 now」这条规则
      * 由两个真实生效的地方共同承载：判定处的守卫 {@code if elapsed > 0 and qps > 0 then}（负的
      * {@code elapsed} 因此不补充、令牌原样保留），加上那次无条件的 {@code HSET}。这与
      * {@code TokenBucket} 的纯算术（{@code nextState} 恒定写回 {@code now}）逐字一致。

@@ -36,12 +36,12 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * 限流**端到端**用例的公共装配：真实 HTTP + 真实过滤器链 + {@code @Primary} 假 admin +
+ * 限流<b>端到端</b>用例的公共装配：真实 HTTP + 真实过滤器链 + {@code @Primary} 假 admin +
  * 真 Lettuce 指向死端口（Redis 不可用 = 降级路径）。
  *
- * <p>抽出来只为一件事：限流的端到端用例各自需要**不同的上下文级配置**，而 Spring 的测试上下文
+ * <p>抽出来只为一件事：限流的端到端用例各自需要<b>不同的上下文级配置</b>，而 Spring 的测试上下文
  * 是按类缓存的 —— 把不同配置的用例塞进同一个类只能靠方法顺序去赌，那是一条将来会随机红的假断言。
- * 当前三个子类（差别只落在**上下文级配置 + 要不要预热缓存**上，装配部分共用这里）：
+ * 当前三个子类（差别只落在<b>上下文级配置 + 要不要预热缓存</b>上，装配部分共用这里）：
  *
  * <ul>
  *   <li>{@link RateLimitWiringTest} —— 预热配置缓存，证「缓存有货时限流链正确」，并覆盖
@@ -49,7 +49,7 @@ import java.util.Optional;
  *   <li>{@link RateLimitColdStartTest} —— 不预热 + {@code @DirtiesContext}(BEFORE_CLASS)，
  *       证「请求路径上从来没人预热过」时也用上快照策略；</li>
  *   <li>{@link RateLimitColdCacheAuthDisabledTest} —— 冷配置缓存 + {@code aihub.auth.enabled=false}
- *       + 异步控制面（{@link #FAKE_ADMIN_LATENCY_PROPERTY}），让判定**必然留在 event loop 上**；
+ *       + 异步控制面（{@link #FAKE_ADMIN_LATENCY_PROPERTY}），让判定<b>必然留在 event loop 上</b>；
  *       这是「冷缓存 + event loop 阻塞导致策略被静默忽略」那个症状唯一的判别性 RED
  *       （见任务报告；同步假 admin 会把那个症状掩盖掉）。</li>
  * </ul>
@@ -67,18 +67,18 @@ abstract class RateLimitWiringSupport {
     static final long TENANT_ID = 7L;
 
     /**
-     * 匿名桶（鉴权关闭 / 没有 {@code ApiKeyView}）用的租户维度。快照里给它一条**独立的**策略行
+     * 匿名桶（鉴权关闭 / 没有 {@code ApiKeyView}）用的租户维度。快照里给它一条<b>独立的</b>策略行
      * （同样是 {@code QPS/BURST}），这样「鉴权关闭时配置的策略也必须生效」可以被断言成
      * {@code 1, 30} 而不是内置默认 {@code 10, 20} —— 没有这一行，那条用例即使实现正确也只能看到
      * 内置默认，判别力为零。
      */
     static final long ANONYMOUS_TENANT_ID = 0L;
 
-    /** 两个**不同**的密钥（因此是两个不同的桶）—— 「桶的第二维是 sha256 而不是 api_key_id」靠它证明。 */
+    /** 两个<b>不同</b>的密钥（因此是两个不同的桶）—— 「桶的第二维是 sha256 而不是 api_key_id」靠它证明。 */
     static final String OVER_LIMIT_SECRET = "wiring-over-limit-secret";
     static final String IN_LIMIT_SECRET = "wiring-in-limit-secret";
 
-    /** 由**配置快照**下发的租户级策略（{@code qps=1 / burst=30}），刻意不同于内置默认 {@code 10/20}。 */
+    /** 由<b>配置快照</b>下发的租户级策略（{@code qps=1 / burst=30}），刻意不同于内置默认 {@code 10/20}。 */
     static final int QPS = 1;
     static final int BURST = 30;
 
@@ -129,7 +129,7 @@ abstract class RateLimitWiringSupport {
     }
 
     /**
-     * 一份**合法**的快照：租户级策略 {@code QPS/BURST}（租户 {@link #TENANT_ID} 与匿名租户
+     * 一份<b>合法</b>的快照：租户级策略 {@code QPS/BURST}（租户 {@link #TENANT_ID} 与匿名租户
      * {@link #ANONYMOUS_TENANT_ID} 各一条）+ 一条渠道 + 一条路由。
      *
      * <p>两条策略行不是冗余：鉴权打开时租户是 {@code 7}、鉴权关闭时是 {@code 0}，两个子类要证的是
@@ -137,9 +137,9 @@ abstract class RateLimitWiringSupport {
      * {@code 10/20} 不同，判别力才存在）。
      *
      * <p>渠道与路由不是点缀：{@code ConfigClient.usable()} 把「既没有渠道也没有路由」的快照当成
-     * **空快照**（那是 admin 冷启动的中间状态），于是「只有策略行」的快照会被整体丢弃、策略悄悄
+     * <b>空快照</b>（那是 admin 冷启动的中间状态），于是「只有策略行」的快照会被整体丢弃、策略悄悄
      * 变回内置默认 —— 实测就是这么红的。真实的控制面不会下发这种快照，测试也不该伪造。
-     * <p>渠道的 {@code apiKeyCipher} 也**必须**是真的密文（Task 10 起中继会把解不开密钥的候选当
+     * <p>渠道的 {@code apiKeyCipher} 也<b>必须</b>是真的密文（Task 10 起中继会把解不开密钥的候选当
      * 「不可用」跳过）：这里的密文用下面 {@link #masterKey()} 加密一个合成明文，密钥来源与生产
      * 完全同一条路径（网关本地主密钥 → 渠道密文）。
      */
@@ -154,7 +154,7 @@ abstract class RateLimitWiringSupport {
                 "wiring-model");
     }
 
-    /** 合成主密钥（**绝不是真实密钥**）：只用于让夹具渠道的密文可解。 */
+    /** 合成主密钥（<b>绝不是真实密钥</b>）：只用于让夹具渠道的密文可解。 */
     static String masterKey() {
         byte[] key = new byte[32];
         for (int i = 0; i < key.length; i++) {
@@ -170,11 +170,11 @@ abstract class RateLimitWiringSupport {
     }
 
     /**
-     * **假 admin 控制面往返的模拟时延（毫秒）**，{@code 0} = 同步、立即返回。
+     * <b>假 admin 控制面往返的模拟时延（毫秒）</b>，{@code 0} = 同步、立即返回。
      *
      * <p>为什么夹具需要这个开关：真实的 {@code AdminClient.Http.configSnapshot()} 是 WebClient，
-     * **异步**（结果不可能在订阅的同一拍到达）；而同步的 {@code Mono.just} 会在
-     * {@code ConfigClient.refreshBlocking()} 的 {@code block()} 抛出「非阻塞线程不能 block」**之前**
+     * <b>异步</b>（结果不可能在订阅的同一拍到达）；而同步的 {@code Mono.just} 会在
+     * {@code ConfigClient.refreshBlocking()} 的 {@code block()} 抛出「非阻塞线程不能 block」<b>之前</b>
      * 就把回源跑完并写进本地缓存，于是「冷缓存 + event loop 上同步判定」那个症状被夹具本身掩盖
      * （实测：诊断这类问题的用例在修复前也是绿的）。需要那个真实形状的子类把这个值调大
      * （见 {@code RateLimitColdCacheAuthDisabledTest}）；其余子类保持 {@code 0}，
@@ -183,8 +183,8 @@ abstract class RateLimitWiringSupport {
     static final String FAKE_ADMIN_LATENCY_PROPERTY = "aihub.test.fake-admin-latency";
 
     /**
-     * **同步**的假 admin：任何哈希都回同一个 {@code apiKeyId=42}（所以「两个密钥各有独立的桶」同时
-     * 证明了桶的第二维是 {@code sha256(secret)} 而**不是** {@code api_key_id}）。
+     * <b>同步</b>的假 admin：任何哈希都回同一个 {@code apiKeyId=42}（所以「两个密钥各有独立的桶」同时
+     * 证明了桶的第二维是 {@code sha256(secret)} 而<b>不是</b> {@code api_key_id}）。
      * {@link #FAKE_ADMIN_LATENCY_PROPERTY} 大于 0 时改为异步返回（模拟真实 WebClient 控制面）。
      */
     @TestConfiguration
@@ -223,7 +223,7 @@ abstract class RateLimitWiringSupport {
     }
 
     /**
-     * **不带任何凭据**的请求。只有 {@code aihub.auth.enabled=false} 的子类用它：没有
+     * <b>不带任何凭据</b>的请求。只有 {@code aihub.auth.enabled=false} 的子类用它：没有
      * {@code ApiKeyView} ⇒ 租户 {@link #ANONYMOUS_TENANT_ID} + 匿名桶（那正是那条用例要的维度）。
      */
     final HttpResponse<String> postAnonymous(String path) throws Exception {
@@ -236,8 +236,8 @@ abstract class RateLimitWiringSupport {
     }
 
     /**
-     * **流式**（{@code stream:true} + {@code Accept: text/event-stream}）请求，与 {@link #post}
-     * 同一套装配与鉴权。返回**原始字节流**（不是字符串）：调用方必须能逐帧读，才能断言
+     * <b>流式</b>（{@code stream:true} + {@code Accept: text/event-stream}）请求，与 {@link #post}
+     * 同一套装配与鉴权。返回<b>原始字节流</b>（不是字符串）：调用方必须能逐帧读，才能断言
      * 「限流开启时中继仍然逐帧 flush」，而不是只看到「最后字节都对」。
      */
     final HttpResponse<InputStream> postSse(String path, String secret) throws Exception {

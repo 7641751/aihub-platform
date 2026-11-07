@@ -17,7 +17,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * 渠道级客户端工厂：每个渠道有自己的 base-url 与超时。
  *
- * <p>最关键的一条是**流式客户端不设 {@code responseTimeout}**：SSE 可以合法地跑很久
+ * <p>最关键的一条是<b>流式客户端不设 {@code responseTimeout}</b>：SSE 可以合法地跑很久
  * （M1/M2 的全局客户端设了 120 秒响应超时，长回答会在中途被掐断 —— M3 顺手把这个隐患修掉）。
  */
 class UpstreamClientFactoryTest {
@@ -53,7 +53,7 @@ class UpstreamClientFactoryTest {
         assertThat(upstream.lastRequest().headers()).containsEntry("authorization", "Bearer legacy-bearer");
     }
 
-    /** 渠道密钥由控制器**逐请求**注入（不同渠道不同密钥，不能挂在客户端上）。 */
+    /** 渠道密钥由控制器<b>逐请求</b>注入（不同渠道不同密钥，不能挂在客户端上）。 */
     @Test
     void channelClientCarriesNoDefaultBearerToken() {
         WebClient client = new UpstreamClientFactory(legacy("legacy-bearer"))
@@ -105,7 +105,7 @@ class UpstreamClientFactoryTest {
     }
 
     /**
-     * 遗留客户端的缓存键**不得**把明文密钥带进内存：那张 map 的生存期与进程同长，
+     * 遗留客户端的缓存键<b>不得</b>把明文密钥带进内存：那张 map 的生存期与进程同长，
      * 一次 heap dump 就能把上游密钥整串捞出来。键改成 {@code (baseUrl, 密钥摘要)}，
      * 而发给上游的 {@code Authorization} 头仍然是原文 —— 两者不能混为一谈。
      */

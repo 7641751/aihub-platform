@@ -19,16 +19,16 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 按渠道构造 {@link WebClient}。渠道之间只有两件事不同：base-url 与超时 —— 密钥由控制器
- * **逐请求**注入（一个客户端实例可能被多个渠道复用，把密钥挂在客户端上必然串号）。
+ * <b>逐请求</b>注入（一个客户端实例可能被多个渠道复用，把密钥挂在客户端上必然串号）。
  *
  * <p><b>流式与非流式是两个客户端</b>：
  * <ul>
  *   <li>非流式：{@code responseTimeout = channel.timeout_ms}（这是 {@code timeout_ms} 列第一次真正生效）；</li>
- *   <li>流式：**不设响应超时**。SSE 可以合法地跑几十分钟，响应级超时会在长回答中途把流掐断 ——
+ *   <li>流式：<b>不设响应超时</b>。SSE 可以合法地跑几十分钟，响应级超时会在长回答中途把流掐断 ——
  *       M1/M2 的全局客户端设了 120 秒，M3 顺手把这个隐患修掉（连接超时仍然保留 5 秒）。</li>
  * </ul>
  *
- * <p>缓存键是 {@code (baseUrl, timeoutMs, streaming)}：**不是 channelId**。渠道改了 base-url 或超时后
+ * <p>缓存键是 {@code (baseUrl, timeoutMs, streaming)}：<b>不是 channelId</b>。渠道改了 base-url 或超时后
  * 应当立刻用新参数（否则一次配置变更要等重启才生效，与「配置热生效」的目标相反）。
  */
 public class UpstreamClientFactory {
@@ -42,7 +42,7 @@ public class UpstreamClientFactory {
         this.legacyProperties = legacyProperties;
     }
 
-    /** 渠道专用客户端。**不设默认 Authorization**（由控制器按本次渠道注入）。 */
+    /** 渠道专用客户端。<b>不设默认 Authorization</b>（由控制器按本次渠道注入）。 */
     public WebClient forChannel(ChannelDescriptor channel, boolean streaming) {
         String key = "channel|" + channel.baseUrl() + "|" + channel.timeoutMs() + "|" + streaming;
         return clients.computeIfAbsent(key, ignored -> build(channel.baseUrl(),
@@ -53,9 +53,9 @@ public class UpstreamClientFactory {
      * M1 形状的遗留客户端：带 {@code aihub.upstream.api-key} 的默认 Authorization。
      *
      * <p><b>它没有生产调用方，只为测试而留</b>（本轮评审修正了这里一条过时的理由）：M3 起控制器一律走
-     * {@link #forChannel(ChannelDescriptor, boolean)} 并**逐请求**注入密钥，遗留兜底路径也一样 ——
+     * {@link #forChannel(ChannelDescriptor, boolean)} 并<b>逐请求</b>注入密钥，遗留兜底路径也一样 ——
      * 它把哨兵渠道 `LegacyChannel` 交给 {@code forChannel}，密钥同样来自
-     * {@code aihub.upstream.api-key}。因此「删掉本方法会让冷启动兜底丢掉上游密钥」是**错的**；
+     * {@code aihub.upstream.api-key}。因此「删掉本方法会让冷启动兜底丢掉上游密钥」是<b>错的</b>；
      * 真正还需要它的是那些按 M1 形状断言默认 Authorization 头的既有测试
      * （{@code UpstreamClientFactoryTest} / {@code BlankMasterKeyStartupTest} 等）。同理，
      * {@code UpstreamClientConfig} 在 M3 已不再把它的产物注册成 {@code WebClient} bean。
@@ -97,7 +97,7 @@ public class UpstreamClientFactory {
         }
     }
 
-    /** 已缓存客户端的键（测试与巡检用）。**不含任何明文密钥** —— 这正是本类要守的性质。 */
+    /** 已缓存客户端的键（测试与巡检用）。<b>不含任何明文密钥</b> —— 这正是本类要守的性质。 */
     public Set<String> cachedClientKeys() {
         return Set.copyOf(clients.keySet());
     }

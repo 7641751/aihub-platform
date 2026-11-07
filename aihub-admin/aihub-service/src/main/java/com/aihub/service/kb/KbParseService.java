@@ -24,7 +24,7 @@ import java.util.List;
 /**
  * 解析阶段的实现（M5 Task 4）：实现 {@link KbParseSink}，被 {@code KbParseConsumer} 调用。
  *
- * <p>流水线（**一个事务**）：条件迁移 {@code PENDING|PARSING → PARSING} → 读 {@code kb_document} →
+ * <p>流水线（<b>一个事务</b>）：条件迁移 {@code PENDING|PARSING → PARSING} → 读 {@code kb_document} →
  * 定位原件 → 抽取文本 → 切分 → 逐段 upsert {@code kb_chunk}（{@code vector_id = "{docId}:{seq}"}，D15）
  * → {@code chunk_count=N} + {@code EMBEDDING} → 注册 after-commit 钩子发 N 条 {@code kb.embed}
  * （{@code ceil(N/batchSize)} 条）。
@@ -34,13 +34,13 @@ import java.util.List;
  * 于是要么空跑要么死信。after-commit 钩子保证"段已落库"先于"消息可见"。
  *
  * <p><b>条件迁移（裁定 #4）</b>：受影响行数为 0 ⇒ 别人已推进 / 它已是 {@code READY|FAILED} ⇒
- * ack 后直接返回，**不写 chunk、不发消息**（因此重放一条已完成的 parse 不会把行打回 {@code PARSING}）。
+ * ack 后直接返回，<b>不写 chunk、不发消息</b>（因此重放一条已完成的 parse 不会把行打回 {@code PARSING}）。
  *
  * <p><b>D14</b>：切出来 0 段（空 / 全空白文档、未来的无文本层 PDF）⇒ 置 {@code FAILED("无可提取文本")}，
- * 不发 embed。**绝不静默 {@code READY}** —— 那会让检索侧永远查不到却显示成功。
+ * 不发 embed。<b>绝不静默 {@code READY}</b> —— 那会让检索侧永远查不到却显示成功。
  *
  * <p><b>异常一律往外抛</b>（原件缺失、抽取失败、落库失败）：静默 ACK 等于永久丢数据，必须走
- * "重试 3 次 → DLQ"。原件不存在**先按"抛"处理**（Task 6 再决定要不要转成 {@code FAILED}）。
+ * "重试 3 次 → DLQ"。原件不存在<b>先按"抛"处理</b>（Task 6 再决定要不要转成 {@code FAILED}）。
  */
 @Service
 public class KbParseService implements KbParseSink {
@@ -147,7 +147,7 @@ public class KbParseService implements KbParseSink {
      * D14：0 段 ⇒ 终态失败（{@link #NO_TEXT_REASON}）。
      *
      * <p><b>这条路不是异常</b>（它只是"切出来 0 段"），所以它不会经过 {@code MessageRecoverer} ⇒
-     * 它必须**自己**把 {@code KB_DOCUMENT_FAILED} 审计写出来（裁定 #6②）。为避免两处各写一份审计逻辑，
+     * 它必须<b>自己</b>把 {@code KB_DOCUMENT_FAILED} 审计写出来（裁定 #6②）。为避免两处各写一份审计逻辑，
      * 委托到 {@link KbDocumentService#markFailed}（同一路径也保证"只在条件更新命中了行时写"、
      * 且 {@code error_msg} 的写法与失败终态一致）。本方法在 {@link #parse} 的事务里被调用 ⇒ 更新与审计同事务。
      */

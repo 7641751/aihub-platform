@@ -18,22 +18,22 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 
 /**
- * 原件的落盘门面（M5 决策 D1）：**原件是唯一真相源**，向量库是可重建的派生数据
+ * 原件的落盘门面（M5 决策 1）：<b>原件是唯一真相源</b>，向量库是可重建的派生数据
  * （见 `docs/superpowers/specs/2026-09-23-aihub-platform-design.md` §6.4）。
  *
  * <p><b>路径协议</b>：{@code {root}/{tenantId}/{sha256}} —— 用内容摘要当文件名有两个好处：
  * ① 同内容天然幂等（同一个文件，不需要第二份）；② 与 {@code kb_document} 的
  * {@code uk_kb_document_tenant_sha} 用的是同一个键，排查时两边能直接对上。
  *
- * <p><b>两段式写入（{@link #stage} + {@link #promote}）而不是一步到位</b>：摘要必须**边读边算**
+ * <p><b>两段式写入（{@link #stage} + {@link #promote}）而不是一步到位</b>：摘要必须<b>边读边算</b>
  * （只读一遍流，不把整份文件读进内存），而目标文件名又依赖摘要 —— 所以先落到同目录的临时文件，
- * 算完摘要再**原子改名**。这样任何时刻都不会有「半截文件顶着原件的名字」被别的东西看见，
+ * 算完摘要再<b>原子改名</b>。这样任何时刻都不会有「半截文件顶着原件的名字」被别的东西看见，
  * 这也正是 M5 官方验收「中断上传不留脏数据」的一半（另一半是不落 `kb_document` 行）。
  *
  * <p><b>临时文件必须与目标同目录</b>：只有同一文件系统上 {@code ATOMIC_MOVE} 才成立；
  * 跨设备会退化成「复制 + 删除」，那就又没有原子性了。
  *
- * <p>失败路径一律 {@link #discard}：中途抛异常时把临时文件删掉，**不留残渣**
+ * <p>失败路径一律 {@link #discard}：中途抛异常时把临时文件删掉，<b>不留残渣</b>
  * （{@code KbUploadIntegrationTest} 的 {@code filesUnder(...)} 断言就是在钉这条）。
  */
 @Component
@@ -79,7 +79,7 @@ public class KbFileStore {
      * 边读边算 sha256 + 字节数，落成同目录的临时文件。
      *
      * <p><b>只读一遍流</b>：{@link DigestInputStream} 包住输入流，摘要与落盘共用同一次 IO。
-     * 调用方**必须**在之后调用 {@link #promote}（成功）或 {@link #discard}（失败/重复），
+     * 调用方<b>必须</b>在之后调用 {@link #promote}（成功）或 {@link #discard}（失败/重复），
      * 否则临时文件会留在目录里。
      */
     public StagedFile stage(long tenantId, InputStream in) {
@@ -110,7 +110,7 @@ public class KbFileStore {
         }
     }
 
-    /** 把临时文件**原子改名**成 {@code {root}/{tenantId}/{sha256}}；已存在则覆盖（内容必然相同）。 */
+    /** 把临时文件<b>原子改名</b>成 {@code {root}/{tenantId}/{sha256}}；已存在则覆盖（内容必然相同）。 */
     public Path promote(StagedFile staged) {
         Path target = staged.tenantDir().resolve(staged.sha256()).normalize();
         if (!target.startsWith(staged.tenantDir())) {
@@ -143,7 +143,7 @@ public class KbFileStore {
     }
 
     /**
-     * 已落盘但**尚未命名**的原件：临时文件 + 目录 + 内容摘要 + 字节数。
+     * 已落盘但<b>尚未命名</b>的原件：临时文件 + 目录 + 内容摘要 + 字节数。
      *
      * @param temp      同目录的临时文件
      * @param tenantDir 该租户的目录（改名在同一目录内进行 ⇒ 同一文件系统）

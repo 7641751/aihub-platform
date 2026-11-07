@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 把一份文本切成**定长、带重叠、无缝隙**的分段（M5 Task 4，纯函数）。
+ * 把一份文本切成<b>定长、带重叠、无缝隙</b>的分段（M5 Task 4，纯函数）。
  *
  * <p><b>几何</b>：窗口 {@code sizeChars}、相邻重叠 {@code overlapChars} ⇒ 步长
  * {@code step = sizeChars - overlapChars}。第 i 段是闭开区间 {@code [i*step, min(i*step + sizeChars, len))}。
@@ -21,7 +21,7 @@ import java.util.List;
  * 但那在算术上不可能 —— 3 段 × ≤800、相邻重叠 100 最多覆盖 {@code 2200 < 2500}，会静默丢 300 字符。
  * 正确下界是 {@code ceil((2500-100)/(800-100)) = 4}。实现按"无缝隙"做，用例断言 4（并断言可逐字还原）。
  *
- * <p><b>重叠必须小于窗口</b>：{@code overlapChars >= sizeChars} 会让步长 ≤ 0 ⇒ 死循环，因此**快速失败**
+ * <p><b>重叠必须小于窗口</b>：{@code overlapChars >= sizeChars} 会让步长 ≤ 0 ⇒ 死循环，因此<b>快速失败</b>
  * （{@link IllegalArgumentException}）而不是悄悄挂住消费线程。
  */
 public final class KbChunker {

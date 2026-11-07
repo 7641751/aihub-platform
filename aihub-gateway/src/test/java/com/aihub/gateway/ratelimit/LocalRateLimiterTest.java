@@ -12,8 +12,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 本机令牌桶是 **Redis 不可用时的降级路径**（设计文档 §9：绝不因为控制面故障而阻断数据面）。
- * 它的语义必须与 Redis 侧一致（共用 {@link TokenBucket}），并且**有界**（Caffeine 上限），
+ * 本机令牌桶是 <b>Redis 不可用时的降级路径</b>（设计文档 §9：绝不因为控制面故障而阻断数据面）。
+ * 它的语义必须与 Redis 侧一致（共用 {@link TokenBucket}），并且<b>有界</b>（Caffeine 上限），
  * 否则一个恶意客户端可以用无数个 key 把网关内存撑爆 —— 降级反而变成攻击面。
  *
  * <p>时钟由构造器注入：所有判定都不依赖真实时间，因此没有 sleep、没有抖动。
@@ -67,7 +67,7 @@ class LocalRateLimiterTest {
     }
 
     /**
-     * **降级路径也绝不能超发**。Caffeine 的 {@code asMap().compute} 是「单键原子」的，
+     * <b>降级路径也绝不能超发</b>。Caffeine 的 {@code asMap().compute} 是「单键原子」的，
      * 因此同一 key 的并发请求在桶层面是串行的；把它换成「get → 判定 → put」会让这条变红。
      */
     @Test

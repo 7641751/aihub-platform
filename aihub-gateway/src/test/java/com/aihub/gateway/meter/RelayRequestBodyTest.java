@@ -5,7 +5,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 请求体的**唯一**允许改写点（计划「决策登记」第 10 条）：只有 {@code stream:true} 且还没要求
+ * 请求体的<b>唯一</b>允许改写点（计划「决策登记」第 10 条）：只有 {@code stream:true} 且还没要求
  * {@code include_usage} 时才注入该字段。其余情况必须逐字节转发 —— M1 的
  * {@code forwardsRequestBodyVerbatim} 正是靠这条不变式活着。
  */
@@ -53,9 +53,9 @@ class RelayRequestBodyTest {
     }
 
     /**
-     * 决策 10 的 fail-open 边界：JSON **后面还跟着别的字节**时必须按「解析失败」处理，原样转发。
+     * 决策 10 的 fail-open 边界：JSON <b>后面还跟着别的字节</b>时必须按「解析失败」处理，原样转发。
      * <p>默认的宽松 Jackson 会把 {@code {"stream":true,...} garbage} 解析成对象，于是走「流式注入」分支
-     * 重新序列化 —— 尾部那些字节被**静默丢掉**，请求体被改写了，而计划里说过只有
+     * 重新序列化 —— 尾部那些字节被<b>静默丢掉</b>，请求体被改写了，而计划里说过只有
      * {@code stream_options.include_usage} 这一种改写、且解析不了就必须逐字节转发。
      */
     @Test

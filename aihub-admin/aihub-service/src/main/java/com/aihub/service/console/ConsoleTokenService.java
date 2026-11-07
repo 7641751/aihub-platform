@@ -15,17 +15,17 @@ import java.time.Duration;
  * <ol>
  *   <li><b>密钥是否可用</b>：{@link ConsoleToken#verify} 对 {@code null}/空密钥抛的是
  *       {@link IllegalStateException}（配置故障），而 {@code /api/**} 的契约是 401、登录接口的契约是
- *       500 + {@code CONFIGURATION_ERROR}。因此"密钥为空**或短于 32 字符**"必须在这里判
- *       （{@link #isSecretUsable(String)} 是两处共用的**唯一**判据）。</li>
+ *       500 + {@code CONFIGURATION_ERROR}。因此"密钥为空<b>或短于 32 字符</b>"必须在这里判
+ *       （{@link #isSecretUsable(String)} 是两处共用的<b>唯一</b>判据）。</li>
  *   <li><b>TTL 封顶</b>：{@link ConsoleToken#verify} 不看 {@code iat} 与 {@code exp} 的关系，
- *       所以"exp − iat ≤ 2h"只能在**签发端**保证 —— {@link #tokenTtl()} 返回的就是已按
+ *       所以"exp − iat ≤ 2h"只能在<b>签发端</b>保证 —— {@link #tokenTtl()} 返回的就是已按
  *       {@link #MAX_TOKEN_TTL} 夹过的值。</li>
  *   <li><b>密钥字节</b>：签发与校验共用 {@link #secretBytes()}（UTF-8），两边一致这件事不靠约定，
- *       靠只有一个出口。而那个出口读的是**构造期规范化过一次**的字段（{@link #normalizeSecret(String)}），
+ *       靠只有一个出口。而那个出口读的是<b>构造期规范化过一次</b>的字段（{@link #normalizeSecret(String)}），
  *       所以 {@link #isSecretUsable(String)} 判过的那串字符与 HMAC 真正用的字节必然同一。</li>
  * </ol>
  *
- * <p><b>密钥为空的语义是"门关着"，不是"用默认值"</b>（D16）：本类**没有**默认密钥，也不会生成一把
+ * <p><b>密钥为空的语义是"门关着"，不是"用默认值"</b>（D16）：本类<b>没有</b>默认密钥，也不会生成一把
  * （默认密钥 = 所有人都能签令牌 = 管理台等于没有鉴权）。{@code application.yml} 里
  * {@code aihub.console.secret} 的默认值就是空串，且只来自环境变量。
  *
@@ -37,7 +37,7 @@ import java.time.Duration;
 public class ConsoleTokenService {
 
     /**
-     * HMAC 密钥的**长度下限**（字符数）：短于此值的密钥可被离线爆破，等于管理台没有鉴权
+     * HMAC 密钥的<b>长度下限</b>（字符数）：短于此值的密钥可被离线爆破，等于管理台没有鉴权
      * （与 {@code AesGcmChannelCipher} 在构造期拒绝 16 字节主密钥同一纪律）。
      *
      * <p>判据是"含 32"：32 字符可用，31 字符不可用。用字符数而不是字节数，是因为运维在
@@ -58,14 +58,14 @@ public class ConsoleTokenService {
     }
 
     /**
-     * 密钥的**唯一**规范化入口：{@code null} → {@code ""}，其余一律 {@code strip()}。
+     * 密钥的<b>唯一</b>规范化入口：{@code null} → {@code ""}，其余一律 {@code strip()}。
      *
      * <p><b>为什么必须有且只有这一处</b>：判"密钥是否够长"用的是 {@code strip()} 之后的值，而 HMAC 用的是
      * 实际存下来的字节 —— 只要这两者来自不同的表达式，"被验证的密钥"与"被使用的密钥"就会在大意时分开。
      * {@code AIHUB_CONSOLE_SECRET} 末尾多一个换行是经典事故（{@code echo}、{@code docker --env-file}、
      * K8s Secret 都会带），那会让"校验通过"的密钥与"签名用"的密钥不是同一串字节：同一进程内签发/校验
      * 恰好都用同一个错误值所以看不出问题，一旦签发与校验两端的环境变量写法不同（滚动发布、多副本），
-     * 全部令牌立刻 401。规范化一次、存下来，判据与密钥字节就是**同一个值**，这件事不靠约定。
+     * 全部令牌立刻 401。规范化一次、存下来，判据与密钥字节就是<b>同一个值</b>，这件事不靠约定。
      *
      * <p>选择"规范化"而不是"拒绝首尾空白"：运维眼里的密钥长度就是 strip 后的长度，
      * 拒绝会让一个末尾换行的密钥在启动时静默变成"门关着"（现象是 401/500），比规范化更难排查。
@@ -75,10 +75,10 @@ public class ConsoleTokenService {
     }
 
     /**
-     * 密钥是否**可用**：非空白且不短于 {@link #MIN_SECRET_LENGTH} 字符。
+     * 密钥是否<b>可用</b>：非空白且不短于 {@link #MIN_SECRET_LENGTH} 字符。
      *
      * <p>唯一的判据：登录接口（回 {@code CONFIGURATION_ERROR}）与过滤器（一律 401）都调它，
-     * 任何一处自己写"是不是空"都迟早与另一处漂移。这里也**必须**自己规范化：
+     * 任何一处自己写"是不是空"都迟早与另一处漂移。这里也<b>必须</b>自己规范化：
      * 调用方传进来的可能是未规范化的原值，而判据不许依赖调用方是否记得先 strip。
      */
     public static boolean isSecretUsable(String secret) {
@@ -98,7 +98,7 @@ public class ConsoleTokenService {
     /**
      * 签发令牌。
      *
-     * @throws IllegalStateException 密钥不可用（平台配置故障）。**不是** {@code IllegalArgumentException}：
+     * @throws IllegalStateException 密钥不可用（平台配置故障）。<b>不是</b> {@code IllegalArgumentException}：
      *                               调用方必须能把"平台坏了"与"你的令牌不行"分开（D16）。
      */
     public String issue(ConsoleClaims claims) {
@@ -129,7 +129,7 @@ public class ConsoleTokenService {
     }
 
     /**
-     * 零/负值按"未配置"处理并回落到 {@link #MAX_TOKEN_TTL}，而不是签出一张**立刻过期**的令牌：
+     * 零/负值按"未配置"处理并回落到 {@link #MAX_TOKEN_TTL}，而不是签出一张<b>立刻过期</b>的令牌：
      * D3 的语义是"最多 2 小时"，一个 {@code 0s} 只会让登录接口 200、下一个请求 401 —— 那是把配置事故
      * 伪装成"令牌坏了"。超出封顶的值夹到 2 小时（并在启动时由 {@code ConsoleAuthFilter} 打 WARN）。
      */

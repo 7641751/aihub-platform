@@ -18,27 +18,27 @@ import java.util.Locale;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Task 16 的**线上契约**：零构建管理台静态页（{@code /console/{index.html,console.js,console.css}}）
+ * Task 16 的<b>线上契约</b>：零构建管理台静态页（{@code /console/{index.html,console.js,console.css}}）
  * 的可访问性、以及页面自身的 hygiene。
  *
- * <p><b>上下文预算（裁定 7）</b>：本类**只**继承 {@link AbstractIntegrationTest}
- * （{@code @SpringBootTest(RANDOM_PORT)}），**不**声明 {@code @TestPropertySource}/{@code @Import}，
- * **不**用 {@code @WebMvcTest} —— 于是它与既有集成测试**共用默认 Spring 上下文**，套件里的
- * {@code Tomcat started on port} 次数**仍是 7**（实测见报告）。
+ * <p><b>上下文预算（裁定 7）</b>：本类<b>只</b>继承 {@link AbstractIntegrationTest}
+ * （{@code @SpringBootTest(RANDOM_PORT)}），<b>不</b>声明 {@code @TestPropertySource}/{@code @Import}，
+ * <b>不</b>用 {@code @WebMvcTest} —— 于是它与既有集成测试<b>共用默认 Spring 上下文</b>，套件里的
+ * {@code Tomcat started on port} 次数<b>仍是 7</b>（实测见报告）。
  *
  * <p><b>助手形状（裁定 1）</b>：计划原稿给的 {@code get(String)} / {@code read(String)} 在本项目里
- * **编译不过**：{@code get(String)} 不是基类提供的，而是**每个测试类各自私有定义**的
+ * <b>编译不过</b>：{@code get(String)} 不是基类提供的，而是<b>每个测试类各自私有定义</b>的
  * （照 {@code ChannelAdminIntegrationTest:854} 与 {@code ProbeAndQueryIntegrationTest:602} 的形状），
- * 返回 {@link ResponseEntity} ⇒ 用 {@code getStatusCode()}/{@code getBody()}，**没有**
- * {@code .statusCode()}/{@code .body()}；{@code read(String)} **全仓不存在**，本类自己定义：
- * 读 **classpath 上的真实产物**（{@code static/console/<name>}），而不是去读源码目录。
+ * 返回 {@link ResponseEntity} ⇒ 用 {@code getStatusCode()}/{@code getBody()}，<b>没有</b>
+ * {@code .statusCode()}/{@code .body()}；{@code read(String)} <b>全仓不存在</b>，本类自己定义：
+ * 读 <b>classpath 上的真实产物</b>（{@code static/console/<name>}），而不是去读源码目录。
  *
- * <p><b>RED 的自然形态（裁定 2）</b>：这三个文件在实现之前不存在 ⇒ 三条用例都红在**资源不存在 / 404**，
- * **没有判别力**。判别力**由变异体提供**（报告中的 4 条变异），**不**把 404 式的红当成"断言有效"。
+ * <p><b>RED 的自然形态（裁定 2）</b>：这三个文件在实现之前不存在 ⇒ 三条用例都红在<b>资源不存在 / 404</b>，
+ * <b>没有判别力</b>。判别力<b>由变异体提供</b>（报告中的 4 条变异），<b>不</b>把 404 式的红当成"断言有效"。
  *
  * <p><b>本任务唯一无法由 JUnit 覆盖的验收（裁定 3）</b>：「登录后能完成『建渠道 / 建 Key / 查日志 / 看用量』」
- * —— 页面逻辑是**客户端 JS**，本套件**没有 JS 引擎** ⇒ 报告里明写"未由测试覆盖、只能人工核对"，
- * **不**写成"已验证"。可覆盖的部分已折成**可证伪的结构断言**：{@code console.js} 必须含**六个**端点
+ * —— 页面逻辑是<b>客户端 JS</b>，本套件<b>没有 JS 引擎</b> ⇒ 报告里明写"未由测试覆盖、只能人工核对"，
+ * <b>不</b>写成"已验证"。可覆盖的部分已折成<b>可证伪的结构断言</b>：{@code console.js} 必须含<b>六个</b>端点
  * （{@code /api/auth/login}、{@code /api/channels}、{@code /api/api-keys}、{@code /api/logs}、
  * {@code /api/ping}、{@code /api/quotas/usage}）＋ {@code sessionStorage} ＋ {@code textContent} ＋
  * {@code plaintextKey}；第 4 个 Tab（用量）的结构与两个"非正常态"标记（{@code unlimited} /
@@ -109,18 +109,18 @@ class ConsoleStaticResourceTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 第 4 个 Tab（**用量**，只读）的结构守卫：新视图必须存在，且后端写进响应的两个"非正常态"标记
-     * 必须**真的被页面处理**，而不是把数字直接打印给运维。
+     * 第 4 个 Tab（<b>用量</b>，只读）的结构守卫：新视图必须存在，且后端写进响应的两个"非正常态"标记
+     * 必须<b>真的被页面处理</b>，而不是把数字直接打印给运维。
      *
      * <p><b>为什么这两条标记值得单独立断言</b>：
      * <ul>
-     *   <li>{@code remaining = -1} 是 {@code QuotaScript} / {@code QuotaUsageService} 的**协议值**
+     *   <li>{@code remaining = -1} 是 {@code QuotaScript} / {@code QuotaUsageService} 的<b>协议值</b>
      *       （该维度不限，D15）—— 页面上出现"-1"就是把协议泄给用户；</li>
-     *   <li>{@code bucketMissing = true} 表示"这个周期还没有任何预扣记录"，那两个 0 **不代表**用了 0 ——
+     *   <li>{@code bucketMissing = true} 表示"这个周期还没有任何预扣记录"，那两个 0 <b>不代表</b>用了 0 ——
      *       UI 若不提示，运维会把"没有记录"读成"没花钱"（这正是后端把它做成显式标记的原因）。</li>
      * </ul>
      * <b>判别力</b>：删掉 Tab 按钮或面板 ⇒ 前两条红；把 {@code unlimited}/{@code bucketMissing} 的处理拿掉
-     * （改成直接渲染数字）⇒ 后两条红。**不**覆盖的：JS 的交互行为（本套件没有 JS 引擎，只能人工核对）。
+     * （改成直接渲染数字）⇒ 后两条红。<b>不</b>覆盖的：JS 的交互行为（本套件没有 JS 引擎，只能人工核对）。
      */
     @Test
     void theUsageTabIsWiredAndHandlesTheNonNormalStates() {
@@ -143,7 +143,7 @@ class ConsoleStaticResourceTest extends AbstractIntegrationTest {
         return restTemplate.exchange(path, HttpMethod.GET, null, String.class);
     }
 
-    /** 读 **classpath 上的真实产物**（{@code static/console/<name>}），不是源码目录。 */
+    /** 读 <b>classpath 上的真实产物</b>（{@code static/console/<name>}），不是源码目录。 */
     private static String read(String name) {
         ClassPathResource resource = new ClassPathResource("static/console/" + name);
         try (InputStream in = resource.getInputStream()) {

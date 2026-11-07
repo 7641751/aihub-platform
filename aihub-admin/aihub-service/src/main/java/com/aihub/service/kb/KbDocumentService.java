@@ -24,22 +24,22 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 文档入库的**同步半段**（M5 Task 2）：校验 → 边读边算 sha256 + 原子落盘 → 建 {@code kb_document(PENDING)} 行 → 审计。
+ * 文档入库的<b>同步半段</b>（M5 Task 2）：校验 → 边读边算 sha256 + 原子落盘 → 建 {@code kb_document(PENDING)} 行 → 审计。
  *
- * <p><b>异步半段不在本类</b>：本类只在**建行之后**注册一个 after-commit 钩子，由
- * {@link KbDocumentPublisher} 在**事务提交之后**把 {@code parse:{docId}} 投到 {@code kb.parse}
+ * <p><b>异步半段不在本类</b>：本类只在<b>建行之后</b>注册一个 after-commit 钩子，由
+ * {@link KbDocumentPublisher} 在<b>事务提交之后</b>把 {@code parse:{docId}} 投到 {@code kb.parse}
  * （Task 3）。发布失败不升级成业务失败（见 {@code KbDocumentPublisher} 的登记）。
  *
  * <p><b>幂等是唯一键给的</b>：{@code uk_kb_document_tenant_sha(tenant_id, sha256)} ⇒ 同租户同内容永远只有一行。
- * 重复上传是**用户的正常动作**（点了两次、换个文件名再传一次），所以按 M4 Task 12 的定稿处理：
- * {@code INSERT ... ON DUPLICATE KEY UPDATE id = id} + 读回，**不抛异常、不 catch {@code DuplicateKeyException}}**。
+ * 重复上传是<b>用户的正常动作</b>（点了两次、换个文件名再传一次），所以按 M4 Task 12 的定稿处理：
+ * {@code INSERT ... ON DUPLICATE KEY UPDATE id = id} + 读回，<b>不抛异常、不 catch {@code DuplicateKeyException}}</b>。
  *
- * <p><b>「中断上传不留脏数据」在这里的实现</b>：先落**临时**文件、建行、再原子改名。任何一步抛异常 ⇒
+ * <p><b>「中断上传不留脏数据」在这里的实现</b>：先落<b>临时</b>文件、建行、再原子改名。任何一步抛异常 ⇒
  * 事务回滚（行没了）+ 临时文件被丢掉（文件没了）。⇒ 绝不出现"有行没文件"或"有文件没行"的中间态。
  *
  * <p><b>审计</b>：成功路径写一条 {@code KB_DOCUMENT_UPLOAD}（{@code actor_type=USER}），
- * detail 只放**非敏感**字段（文件名、字节数、摘要、是否重复）—— 绝不记原件内容（D13）。
- * 重复上传**也写审计**（"有人又传了一次同一个文件"是有运维价值的事实）。
+ * detail 只放<b>非敏感</b>字段（文件名、字节数、摘要、是否重复）—— 绝不记原件内容（D13）。
+ * 重复上传<b>也写审计</b>（"有人又传了一次同一个文件"是有运维价值的事实）。
  */
 @Service
 public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHandler {
@@ -49,11 +49,11 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
     /** 审计的 {@code target_type}；测试按它 + {@code target_id} 定向查（{@code audit_log} 是共享表）。 */
     public static final String AUDIT_TARGET_TYPE = "KB_DOCUMENT";
 
-    /** 终态失败是**系统**产生的（D13）：{@code actor_type=SYSTEM}，actor id 标明是 kb 流水线。 */
+    /** 终态失败是<b>系统</b>产生的（D13）：{@code actor_type=SYSTEM}，actor id 标明是 kb 流水线。 */
     private static final AuditService.Actor SYSTEM_ACTOR = new AuditService.Actor("SYSTEM", "kb-pipeline");
 
     /**
-     * {@code error_msg} 列是 {@code VARCHAR(1024)}；本类派生的原因**有界**（远小于列宽，
+     * {@code error_msg} 列是 {@code VARCHAR(1024)}；本类派生的原因<b>有界</b>（远小于列宽，
      * 留足余量给"清理未完成"等后缀），免得一条超长异常把列写爆（严格模式下是硬失败）。
      */
     private static final int MAX_ERROR_MSG_CHARS = 512;
@@ -84,7 +84,7 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
     /**
      * 上传结果。
      *
-     * @param row       {@code kb_document} 那一行（**新建或已存在**，两种情况都非 null）
+     * @param row       {@code kb_document} 那一行（<b>新建或已存在</b>，两种情况都非 null）
      * @param duplicate 本次是否命中了已有的同内容文档
      */
     public record UploadResult(KbDocumentEntity row, boolean duplicate) {
@@ -94,7 +94,7 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
      * 列表页。
      *
      * @param rows  当前页
-     * @param total 满足条件的**总行数**（不是本页行数）
+     * @param total 满足条件的<b>总行数</b>（不是本页行数）
      */
     public record Page(List<KbDocumentEntity> rows, long total, int page, int size) {
     }
@@ -102,9 +102,9 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
     /**
      * 上传一份原件。
      *
-     * @param tenantId **目标资源的租户**（来自请求体，不是操作者的租户 —— CONVENTIONS §10 R2）
-     * @param filename 原始文件名（白名单校验 + 落进 {@code kb_document.filename}，**不进路径**）
-     * @param in       原件字节流（**只读一遍**：摘要与落盘共用同一次 IO）
+     * @param tenantId <b>目标资源的租户</b>（来自请求体，不是操作者的租户 —— CONVENTIONS §10 R2）
+     * @param filename 原始文件名（白名单校验 + 落进 {@code kb_document.filename}，<b>不进路径</b>）
+     * @param in       原件字节流（<b>只读一遍</b>：摘要与落盘共用同一次 IO）
      */
     @Transactional
     public UploadResult upload(long tenantId, String filename, InputStream in, AuditService.Actor actor) {
@@ -154,11 +154,11 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
     }
 
     /**
-     * 资源列表（CONVENTIONS §10 R3.2：缺省租户由**调用方**决定 —— 控制器用令牌里的租户填进来）。
+     * 资源列表（CONVENTIONS §10 R3.2：缺省租户由<b>调用方</b>决定 —— 控制器用令牌里的租户填进来）。
      *
      * <p><b>不用 {@code PaginationInnerInterceptor}</b>：本项目的类路径上没有
      * {@code mybatis-plus-jsqlparser}，所以在 SQL 末尾拼 {@code LIMIT/OFFSET}（{@code page}/{@code size}
-     * 已在控制器里校验过是**有界整数**，不存在注入面）。
+     * 已在控制器里校验过是<b>有界整数</b>，不存在注入面）。
      */
     public Page list(long tenantId, String status, int page, int size) {
         long total = kbDocumentMapper.selectCount(baseQuery(tenantId, status));
@@ -169,7 +169,7 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
         return new Page(rows, total, page, size);
     }
 
-    /** 构造一个**全新的**查询条件（{@code selectCount} 与 {@code selectList} 各用一份，避免复用同一个 wrapper）。 */
+    /** 构造一个<b>全新的</b>查询条件（{@code selectCount} 与 {@code selectList} 各用一份，避免复用同一个 wrapper）。 */
     private static LambdaQueryWrapper<KbDocumentEntity> baseQuery(long tenantId, String status) {
         LambdaQueryWrapper<KbDocumentEntity> query = new LambdaQueryWrapper<KbDocumentEntity>()
                 .eq(KbDocumentEntity::getTenantId, tenantId);
@@ -198,14 +198,14 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
     // ---------------------------------------------------------------- 失败终态（M5 Task 6，D7/D8/D13）
 
     /**
-     * 消息重试耗尽时的终态处置（D7）：**清理 → 置 FAILED → 审计**，且这一切发生在
-     * {@code KbMessageRecoverer} 把消息拒绝进 DLQ **之前**（恢复器调完本方法才抛
+     * 消息重试耗尽时的终态处置（D7）：<b>清理 → 置 FAILED → 审计</b>，且这一切发生在
+     * {@code KbMessageRecoverer} 把消息拒绝进 DLQ <b>之前</b>（恢复器调完本方法才抛
      * {@code AmqpRejectAndDontRequeueException}）⇒ "死信"与"失败终态"永远同时发生。
      *
-     * <p>{@code @Transactional}：让"删 {@code kb_chunk}（清理的第二步）+ 置 FAILED + 审计"落在**一个**事务里。
-     * 清理的第一、二步之间隔一次 Chroma 网络调用，把整个清理都放进事务会占住连接 —— 但**失败路径**不以
+     * <p>{@code @Transactional}：让"删 {@code kb_chunk}（清理的第二步）+ 置 FAILED + 审计"落在<b>一个</b>事务里。
+     * 清理的第一、二步之间隔一次 Chroma 网络调用，把整个清理都放进事务会占住连接 —— 但<b>失败路径</b>不以
      * 吞吐为目标，这里选"原子"而不是"连接占用"（与 {@code KbEmbedService} 的取舍相反，理由不同：
-     * 那边是**热路径**、每条消息都会走）。
+     * 那边是<b>热路径</b>、每条消息都会走）。
      *
      * @param docId {@code kb_document.id}
      * @param stage 失败阶段（{@code "parse"} / {@code "embed"}），进 {@code error_msg} 便于定位是哪一段
@@ -226,13 +226,13 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
     }
 
     /**
-     * 把文档条件迁移到 {@code FAILED} 并写 {@code error_msg}；**命中一行才写** {@code KB_DOCUMENT_FAILED} 审计。
+     * 把文档条件迁移到 {@code FAILED} 并写 {@code error_msg}；<b>命中一行才写</b> {@code KB_DOCUMENT_FAILED} 审计。
      *
-     * <p>条件 {@code status IN (PENDING, PARSING, EMBEDDING)}：只有**非终态**才能转 FAILED ——
+     * <p>条件 {@code status IN (PENDING, PARSING, EMBEDDING)}：只有<b>非终态</b>才能转 FAILED ——
      * 已经是 {@code READY}/{@code FAILED} 的行既不改也不重复记账（幂等、可重入；也避免一条迟到的
      * 死信消息把 {@code READY} 的文档"救死"）。与 D14 的 0 段出口共用本方法（裁定 #6②）。
      *
-     * @return 是否**真的**迁移了（{@code true} = 命中一行并写了审计）
+     * @return 是否<b>真的</b>迁移了（{@code true} = 命中一行并写了审计）
      */
     @Transactional
     public boolean markFailed(long docId, String reason) {
@@ -257,7 +257,7 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
         return true;
     }
 
-    /** 有界地派生失败原因：能看出**哪一段**失败（stage）+ 异常类名 + 摘要；清理未完成时如实追加。 */
+    /** 有界地派生失败原因：能看出<b>哪一段</b>失败（stage）+ 异常类名 + 摘要；清理未完成时如实追加。 */
     private static String buildFailureReason(String stage, Throwable cause, KbDocumentCleanup.Result cleanup) {
         StringBuilder reason = new StringBuilder();
         reason.append(stage).append(" 阶段失败：").append(summarize(cause));
@@ -304,7 +304,7 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
     /**
      * 文件名白名单 + 取"基底名"。
      *
-     * <p>文件名**不进路径**（路径用内容摘要），但审计与展示要靠它，所以顺手把路径成分剥掉：
+     * <p>文件名<b>不进路径</b>（路径用内容摘要），但审计与展示要靠它，所以顺手把路径成分剥掉：
      * 任何 {@code ../} 或目录分隔符都只保留最后一段，避免"文件名"里带着别处的路径。
      */
     private static String requireAllowedFilename(String filename) {

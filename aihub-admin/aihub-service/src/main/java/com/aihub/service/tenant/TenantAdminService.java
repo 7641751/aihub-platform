@@ -19,7 +19,7 @@ import java.util.Map;
  * 租户的控制面写路径（Task 8）。
  *
  * <p>与 {@code ChannelAdminService} 同一套纪律：业务写 + 审计（同一事务）+ 提交后广播失效
- * （{@link ConfigChangePublisher#publishAfterCommit(String)}，而**不是**直接调
+ * （{@link ConfigChangePublisher#publishAfterCommit(String)}，而<b>不是</b>直接调
  * {@code bumpAndPublish}）。租户行本身不含任何密钥材料，因此审计 detail 里可以放心记名字与状态。
  *
  * <p><b>审计的 {@code tenant_id} 就是被操作的租户 id</b>：{@code tenant} 表是租户的载体本身，
@@ -27,7 +27,7 @@ import java.util.Map;
  *
  * <p><b>{@code status} 的「空白不对称」与 {@code ChannelAdminService} 完全一致，且是有意保留的
  * （Task 8 的独立评审登记，N3）</b>：创建时 {@code null} 与空白都落到默认值 {@code ACTIVE}，
- * 而更新时空白是**非法值** —— 走 {@link #requireText} 抛 400 {@code INVALID_PARAM}。语义是
+ * 而更新时空白是<b>非法值</b> —— 走 {@link #requireText} 抛 400 {@code INVALID_PARAM}。语义是
  * 「更新时 {@code null} = 不改动；给了空白 = 给了一个非法值」。合法取值集合今天没有任何地方规定，
  * 因此这里不臆造取值校验（登记为残余）。
  */

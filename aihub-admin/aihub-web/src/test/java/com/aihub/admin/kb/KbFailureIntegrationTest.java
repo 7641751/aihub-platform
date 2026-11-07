@@ -28,25 +28,25 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * M5 Task 6 的**线上契约**：失败路径与死信 —— M5 的官方验收（**全成或全清 / 中断上传不留脏数据**）。
+ * M5 Task 6 的<b>线上契约</b>：失败路径与死信 —— M5 的官方验收（<b>全成或全清 / 中断上传不留脏数据</b>）。
  *
  * <p><b>真容器（MySQL/Redis/RabbitMQ/Chroma）+ 真 HTTP + 真令牌 + 真 broker + 真消费者 + 真向量库</b>，
  * 唯一的假东西是 embeddings 上游（宿主进程内的 {@link FakeEmbeddingUpstream}，D6）。
- * 复用**已有**的 Spring 上下文（{@code @TestPropertySource} 那把字面量与其它 kb 用例**逐字相同**、
- * 且**不加** {@code @Import}）⇒ 判据是全量套件 {@code Tomcat started on port} 仍是 **7**。
+ * 复用<b>已有</b>的 Spring 上下文（{@code @TestPropertySource} 那把字面量与其它 kb 用例<b>逐字相同</b>、
+ * 且<b>不加</b> {@code @Import}）⇒ 判据是全量套件 {@code Tomcat started on port} 仍是 <b>7</b>。
  *
  * <p><b>三条核心判据</b>（计划 Task 6 Step 1）：
  * <ol>
- *   <li>{@link #aBatchThatKeepsFailingLeavesTheVectorStoreCleanAndTheMessageInTheDlq()} —— 四处**同时**断言：
+ *   <li>{@link #aBatchThatKeepsFailingLeavesTheVectorStoreCleanAndTheMessageInTheDlq()} —— 四处<b>同时</b>断言：
  *       {@code FAILED} + Chroma 干净 + {@code kb_chunk} 干净 + 消息在 DLQ + 一条 {@code KB_DOCUMENT_FAILED} 审计；</li>
  *   <li>{@link #aDocumentWithNoExtractableTextFailsWithAnExplicitReason()} —— D14：0 段 ⇒
- *       {@code FAILED("无可提取文本")}（**绝不静默 READY**）+ 审计；</li>
+ *       {@code FAILED("无可提取文本")}（<b>绝不静默 READY</b>）+ 审计；</li>
  *   <li>{@link #cleanupIsIdempotentAndReportsIncompleteCleanupHonestly()} —— 清理幂等可重入；
- *       清理失败**如实**登记（{@code error_msg} 含"清理未完成"且**保留坐标**）。</li>
+ *       清理失败<b>如实</b>登记（{@code error_msg} 含"清理未完成"且<b>保留坐标</b>）。</li>
  * </ol>
  *
  * <p><b>DLQ 是共享的</b>（单例 broker 上所有上下文共用一条 {@code aihub.kb.dlq}）：因此
- * {@code @BeforeEach} **先排空**，并用**非破坏性**读数 {@code AmqpAdmin.getQueueInfo(...).getMessageCount()}
+ * {@code @BeforeEach} <b>先排空</b>，并用<b>非破坏性</b>读数 {@code AmqpAdmin.getQueueInfo(...).getMessageCount()}
  * 判深度（既有先例 {@code MeteringConsumerIntegrationTest} 用的是 {@code receive} 的排空式读法，
  * 那会与"断言消息还在里面"冲突 —— 这里改用只读的深度）。
  */
@@ -82,7 +82,7 @@ class KbFailureIntegrationTest extends KbIntegrationTestBase {
     @Autowired
     private KbDocumentPublisher publisher;
 
-    /** 与生产同一个键；测试**只读**它（用来手工构造一个"会失败"的向量库客户端）。 */
+    /** 与生产同一个键；测试<b>只读</b>它（用来手工构造一个"会失败"的向量库客户端）。 */
     @Value("${aihub.kb.chroma.base-url:}")
     private String chromaBaseUrl;
 

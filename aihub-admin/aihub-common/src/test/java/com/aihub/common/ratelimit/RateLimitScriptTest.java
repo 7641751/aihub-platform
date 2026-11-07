@@ -7,7 +7,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 脚本与键布局是**跨模块契约**（gateway 跑它、admin 的集成测试验它），因此把字面量与
+ * 脚本与键布局是<b>跨模块契约</b>（gateway 跑它、admin 的集成测试验它），因此把字面量与
  * 必须存在的调用点钉在这里。任何一侧「顺手改一下脚本」都会先在这里变红。
  */
 class RateLimitScriptTest {

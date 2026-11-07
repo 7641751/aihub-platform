@@ -226,13 +226,13 @@ class ApiKeyToolingTest {
 
     /**
      * {@code usable()} 的判据只有两维：{@code status} 必须是 {@code ACTIVE}，且 {@code expireAt}
-     * 为 {@code null}（永不过期）或尚未过期。上面那条用例覆盖了四象限；这里补的是**「不可用」不需要
-     * 一个专门的哨兵实例**：任何非 {@code ACTIVE} 或已过期的视图都会让 {@code usable()} 为 false，
+     * 为 {@code null}（永不过期）或尚未过期。上面那条用例覆盖了四象限；这里补的是<b>「不可用」不需要
+     * 一个专门的哨兵实例</b>：任何非 {@code ACTIVE} 或已过期的视图都会让 {@code usable()} 为 false，
      * 调用方判一次即可。
      *
-     * <p><b>（Task 9）</b>此前这里钉的是共享类型上的 {@code ApiKeyView.UNUSABLE} 哨兵；它在 D4 之后
+     * <p><b>（Task 9）</b>此前这里钉的是共享类型上的 {@code ApiKeyView.UNUSABLE} 哨兵；它在 BUG-D4 之后
      * 已无生产调用方（gateway 侧改用 {@code AdminResolution.unavailable()}），因此被删除
-     * （附录 A8 要求的结论）。这条用例保留了那个哨兵**唯一**还成立的语义 —— 「不可用」是
+     * （附录 A8 要求的结论）。这条用例保留了那个哨兵<b>唯一</b>还成立的语义 —— 「不可用」是
      * {@code usable()} 的返回值，不是一个需要共享的常量。
      */
     @Test

@@ -52,18 +52,18 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Task 10 的**线上契约**：模型路由 + 限流策略 CRUD。真容器（MySQL + Redis）、真 HTTP、真控制台令牌、
+ * Task 10 的<b>线上契约</b>：模型路由 + 限流策略 CRUD。真容器（MySQL + Redis）、真 HTTP、真控制台令牌、
  * 真 Redis Pub/Sub。
  *
  * <p><b>本类只依赖 HTTP + 既有 mapper/entity</b>（不引用 {@code ModelRouteAdminService} /
  * {@code RateLimitPolicyAdminService} 这两个本任务才落地的类型）：因此它在服务层/控制器存在之前就能
- * **编译并跑红**。
+ * <b>编译并跑红</b>。
  *
- * <p><b>RED 的实测形态（诚实登记，2026-09-30，不修饰）</b>：本类的**自然** RED 是
- * {@code Tests run: 13, Failures: 11, Errors: 0, Skipped: 0}，而那 **11 条红全部**落在
+ * <p><b>RED 的实测形态（诚实登记，2026-09-30，不修饰）</b>：本类的<b>自然</b> RED 是
+ * {@code Tests run: 13, Failures: 11, Errors: 0, Skipped: 0}，而那 <b>11 条红全部</b>落在
  * {@code 404 NOT_FOUND / No static resource api/routes | api/rate-limits}（端点尚未映射）——
- * **没有一条**落在被测断言上（与 Task 9 同源）。因此四条判据的**判别力完全由变异体提供**（每条行为各配
- * 一条变异体），**不是**由这套 RED 提供。产物：{@code .m4t10-logs/R01-red.log}（RED 原始日志）、
+ * <b>没有一条</b>落在被测断言上（与 Task 9 同源）。因此四条判据的<b>判别力完全由变异体提供</b>（每条行为各配
+ * 一条变异体），<b>不是</b>由这套 RED 提供。产物：{@code .m4t10-logs/R01-red.log}（RED 原始日志）、
  * {@code .m4t10-logs/MUTATIONS.txt} 与 {@code .m4t10-logs/M*-red.log}（初版 11 条变异）；
  * 覆盖缺口修复轮的补充变异见 {@code .m4t10fix-logs/}。
  *
@@ -72,8 +72,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li><b>R1</b>：{@code model_route} 是全局资源（表里没有 {@code tenant_id}）——写读都是平台级，
  *       任何 {@code ADMIN} 看全部行；审计的 {@code tenant_id} 记 SQL NULL。</li>
  *   <li><b>R2</b>：{@code rate_limit_policy} 是租户维度资源——写是平台级（请求体带 {@code tenantId}），
- *       但审计的 {@code tenant_id} 必须记**该策略的**租户 id（不是操作者的租户、不是 NULL）。</li>
- *   <li><b>R3.2</b>：{@code GET /api/rate-limits} 缺省只回**令牌租户**的行（least privilege）。</li>
+ *       但审计的 {@code tenant_id} 必须记<b>该策略的</b>租户 id（不是操作者的租户、不是 NULL）。</li>
+ *   <li><b>R3.2</b>：{@code GET /api/rate-limits} 缺省只回<b>令牌租户</b>的行（least privilege）。</li>
  * </ul>
  *
  * <p><b>{@code api_key_id IS NULL} = 租户级维度</b>：查它必须 {@code isNull()} ——
@@ -83,13 +83,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p><b>夹具纪律</b>：{@code tenant} / {@code channel} / {@code model_route} / {@code rate_limit_policy}
  * / {@code audit_log} 与 Testcontainers 容器都是 JVM 级共享的（{@link AbstractIntegrationTest}
- * 没有全局清理），所以夹具名每条用例唯一、前后各清一次；审计断言一律按**本次用例的数值主键**
- * （{@code target_id}）查，绝不做全表计数。夹具前缀里**不含** LIKE 元字符（{@code _} / {@code %} /
+ * 没有全局清理），所以夹具名每条用例唯一、前后各清一次；审计断言一律按<b>本次用例的数值主键</b>
+ * （{@code target_id}）查，绝不做全表计数。夹具前缀里<b>不含</b> LIKE 元字符（{@code _} / {@code %} /
  * {@code \}），这条假设由 {@link #fixtureNamesContainNoLikeMetacharacters()} 钉住。
  *
  * <p><b>为什么 {@code @TestPropertySource} 只有一个属性</b>：本类只需要一把合规的控制台签名密钥
- * （{@code application.yml} 对 {@code aihub.console.secret} **刻意没有默认值**，见 D16）。属性集与
- * {@code ConsoleLoginIntegrationTest} **逐字相同**、且本类**不加** {@code @Import} /
+ * （{@code application.yml} 对 {@code aihub.console.secret} <b>刻意没有默认值</b>，见 D16）。属性集与
+ * {@code ConsoleLoginIntegrationTest} <b>逐字相同</b>、且本类<b>不加</b> {@code @Import} /
  * {@code @TestConfiguration}，因此 Spring 复用那个已经存在的上下文，而不是再 fork 一个
  * （{@code docs/CONVENTIONS.md} §8 item 5/6 的 7 上下文预算）。
  */
@@ -100,8 +100,8 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
 
     /**
      * 合成控制台签名密钥（≥32 字符），与 {@code ConsoleLoginIntegrationTest.SECRET} / {@code
-     * ApiKeyAdminIntegrationTest.SECRET} **逐字相同** —— 值相同才会命中同一个 Spring 上下文缓存键
-     * （本类的目的就是复用那个上下文）。刻意**不是 {@code private}**：注解值里的常量表达式引用私有
+     * ApiKeyAdminIntegrationTest.SECRET} <b>逐字相同</b> —— 值相同才会命中同一个 Spring 上下文缓存键
+     * （本类的目的就是复用那个上下文）。刻意<b>不是 {@code private}</b>：注解值里的常量表达式引用私有
      * 常量时 javac 会报访问控制错误。
      */
     static final String SECRET = "console-it-secret-0123456789abcdefghijklmn";
@@ -130,8 +130,8 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
     private static final Duration MESSAGE_TIMEOUT = Duration.ofSeconds(5);
 
     /**
-     * 收齐「有界窗口」用的**静默窗口**：拿到第一条真消息后，继续 poll 直到连续这么多时间没有新消息，
-     * 就把窗口判定为「已经没有更多消息了」。它只用于把窗口**收完整**，不用于「等它发生」——
+     * 收齐「有界窗口」用的<b>静默窗口</b>：拿到第一条真消息后，继续 poll 直到连续这么多时间没有新消息，
+     * 就把窗口判定为「已经没有更多消息了」。它只用于把窗口<b>收完整</b>，不用于「等它发生」——
      * 「等它发生」由 {@link #MESSAGE_TIMEOUT} 负责。
      */
     private static final Duration QUIET_WINDOW = Duration.ofSeconds(2);
@@ -198,9 +198,9 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 1) 重复路由 ⇒ 400 INVALID_PARAM
 
     /**
-     * 唯一键 {@code uk_model_route(model_name, channel_id)} 被违反 ⇒ **400 {@code INVALID_PARAM}**
-     * （{@code ErrorCode} 里**没有** 409）。核心判据是「必须把底层唯一键冲突翻译成 BizException」，
-     * 否则会落到 {@code GlobalExceptionHandler} 的兜底分支变成 **500**。判别力由变异体
+     * 唯一键 {@code uk_model_route(model_name, channel_id)} 被违反 ⇒ <b>400 {@code INVALID_PARAM}</b>
+     * （{@code ErrorCode} 里<b>没有</b> 409）。核心判据是「必须把底层唯一键冲突翻译成 BizException」，
+     * 否则会落到 {@code GlobalExceptionHandler} 的兜底分支变成 <b>500</b>。判别力由变异体
      * {@code M4}（去掉翻译、直接 insert）提供：去掉之后第二条的 status 是 500 ≠ 400，本用例精确变红。
      */
     @Test
@@ -237,7 +237,7 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 2) 同维度只留一条 ACTIVE
 
     /**
-     * {@code upsert} 写入新策略前必须把**同一维度**的旧 ACTIVE 行置 {@code INACTIVE}（M3 决策 17：
+     * {@code upsert} 写入新策略前必须把<b>同一维度</b>的旧 ACTIVE 行置 {@code INACTIVE}（M3 决策 17：
      * 「同维度取最后一条 = 取 id 最大那条」需要历史行仍在，但只允许一条候选）。判别力由变异体
      * {@code M1}（只插新行、不停用旧行）提供：变异后第一条仍是 ACTIVE，{@code :164} 精确变红。
      */
@@ -260,14 +260,14 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 2b) 跨租户隔离：A 的 upsert 绝不停用 B 的
 
     /**
-     * {@code docs/CONVENTIONS.md} §10 的 **R2 租户隔离**：{@code deactivateActiveRows} 必须**只**停用
-     * **同一租户、同一维度**的旧 ACTIVE 行 —— 租户维度对 {@code rate_limit_policy} 是**硬隔离**。
-     * 租户 A 与 B **各**有一条**租户级** ACTIVE 策略；对 **A** 做一次 upsert ⇒ **B 的那条必须仍是
-     * ACTIVE**（且 B 的租户级维度仍恰好一条 ACTIVE）。
+     * {@code docs/CONVENTIONS.md} §10 的 <b>R2 租户隔离</b>：{@code deactivateActiveRows} 必须<b>只</b>停用
+     * <b>同一租户、同一维度</b>的旧 ACTIVE 行 —— 租户维度对 {@code rate_limit_policy} 是<b>硬隔离</b>。
+     * 租户 A 与 B <b>各</b>有一条<b>租户级</b> ACTIVE 策略；对 <b>A</b> 做一次 upsert ⇒ <b>B 的那条必须仍是
+     * ACTIVE</b>（且 B 的租户级维度仍恰好一条 ACTIVE）。
      *
      * <p>判别力由变异体 {@code F3}（从 {@code deactivateActiveRows} 删掉
      * {@code .eq(RateLimitPolicyEntity::getTenantId, tenantId)}）提供：变异后 A 的 upsert 会停用
-     * **所有租户**的租户级 ACTIVE 行，B 的那条被误停 ⇒ 本用例的「B 仍是 ACTIVE」精确变红。
+     * <b>所有租户</b>的租户级 ACTIVE 行，B 的那条被误停 ⇒ 本用例的「B 仍是 ACTIVE」精确变红。
      */
     @Test
     void upsertingOneTenantsPolicyDoesNotDeactivateAnotherTenantsActiveRow() throws Exception {
@@ -294,7 +294,7 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
 
     /**
      * 维度 = {@code (tenant_id, api_key_id)}，其中 {@code api_key_id IS NULL} 是租户级、非空是 key 级：
-     * ①两条维度可以**同时 ACTIVE**；②再 upsert 租户级只会停用**租户级**那条，key 级不受影响。
+     * ①两条维度可以<b>同时 ACTIVE</b>；②再 upsert 租户级只会停用<b>租户级</b>那条，key 级不受影响。
      * 判别力由变异体 {@code M2}（停用时不区分维度）提供：变异后 key 级那条也被置 INACTIVE，
      * 「key 级仍是 ACTIVE」精确变红。
      */
@@ -328,18 +328,18 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 4) 写操作都广播失效（窗口内集合恰好一条）
 
     /**
-     * 一次写 = **恰好**一次广播，且 reason 与 version 必须正确。断言不是「收到一条匹配的就过」，而是
-     * 「把**整个有界窗口**的消息**收齐**，其 reason **集合恰好等于** {@code {期望 reason}}」——
-     * 这样才满足计划 {@code :1611} 的「断言不出现**别的** reason」（只断言「恰好一条」是 reason 受限的，
+     * 一次写 = <b>恰好</b>一次广播，且 reason 与 version 必须正确。断言不是「收到一条匹配的就过」，而是
+     * 「把<b>整个有界窗口</b>的消息<b>收齐</b>，其 reason <b>集合恰好等于</b> {@code {期望 reason}}」——
+     * 这样才满足计划 {@code :1611} 的「断言不出现<b>别的</b> reason」（只断言「恰好一条」是 reason 受限的，
      * 多发一条别的 reason 不会被发现）。
      * <ul>
      *   <li>建一条路由 → 窗口内集合恰好 {@code {route.create}}，且 {@code version > 0}；</li>
      *   <li>upsert#1（无旧行可停用）→ 窗口内集合恰好 {@code {rate_limit.create}}；</li>
-     *   <li>upsert#2（**先停用旧行、再插新行**，两行两次落库）→ 仍恰好 {@code {rate_limit.create}}
+     *   <li>upsert#2（<b>先停用旧行、再插新行</b>，两行两次落库）→ 仍恰好 {@code {rate_limit.create}}
      *       （一次写 = 一次广播）；</li>
      *   <li>订阅后先用哨兵 {@code awaitSubscription(...)} 确认订阅建立，否则第一条真消息会被静默丢掉。</li>
      * </ul>
-     * 判别力由变异体 {@code F4}（在 {@code upsert} 的 insert 前多发一条**不同 reason**
+     * 判别力由变异体 {@code F4}（在 {@code upsert} 的 insert 前多发一条<b>不同 reason</b>
      * {@code rate_limit.deactivate}）提供：窗口内集合变成两条 ⇒ {@code :352} 一类的「集合恰好等于」断言
      * 精确变红。（初版这里只做 reason 受限的「恰好一条」，见 {@code .m4t10review-logs} 的存活变异 {@code N3b}。）
      */
@@ -380,7 +380,7 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 4b) route.update / route.delete 也各广播一条
 
     /**
-     * 判据④「写操作都广播」对 {@code route.update} 与 {@code route.delete} 同样成立：各**恰好一条**、
+     * 判据④「写操作都广播」对 {@code route.update} 与 {@code route.delete} 同样成立：各<b>恰好一条</b>、
      * reason 正确、{@code version > 0}。
      *
      * <p>判别力由变异体 {@code F2a}（删 {@code update} 里 {@code publishAfterCommit("route.update")}）
@@ -427,7 +427,7 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
      *
      * <p>判别力由变异体 {@code F2c}（删 {@code update} 里 {@code publishAfterCommit("rate_limit.update")}）
      * 与 {@code F2d}（删 {@code deactivate} 里 {@code publishAfterCommit("rate_limit.deactivate")}）提供。
-     * 两条策略刻意**不同维度**（租户级 + key 级），以便两条在订阅后都仍是 ACTIVE（PUT 要求目标仍 ACTIVE）。
+     * 两条策略刻意<b>不同维度</b>（租户级 + key 级），以便两条在订阅后都仍是 ACTIVE（PUT 要求目标仍 ACTIVE）。
      */
     @Test
     void rateLimitUpdateAndDeactivateEachPublishExactlyOneInvalidationMessage() throws Exception {
@@ -464,8 +464,8 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 5) R1 全局 / R3.2 令牌租户
 
     /**
-     * R1：{@code GET /api/routes} 是**全局**列表（任何 {@code ADMIN} 看全部）。
-     * R3.2：{@code GET /api/rate-limits} 缺省只回**令牌租户**的行（least privilege）。
+     * R1：{@code GET /api/routes} 是<b>全局</b>列表（任何 {@code ADMIN} 看全部）。
+     * R3.2：{@code GET /api/rate-limits} 缺省只回<b>令牌租户</b>的行（least privilege）。
      * 判别力由变异体 {@code M11}（列表忽略令牌租户、回全部行）提供：变异后另一个租户的策略也会出现，
      * {@code :340} 精确变红。
      */
@@ -559,7 +559,7 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
 
     // ---------------------------------------------------------------- 7) DELETE 的两种语义
 
-    /** {@code DELETE /api/routes/{id}} = **真删行**（与 Task 9 的 api-keys 一致）。 */
+    /** {@code DELETE /api/routes/{id}} = <b>真删行</b>（与 Task 9 的 api-keys 一致）。 */
     @Test
     void deletingARouteReallyDeletesTheRow() throws Exception {
         long channelId = createChannel();
@@ -573,7 +573,7 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * {@code DELETE /api/rate-limits/{id}} = **置 {@code INACTIVE}（软停用、不删行）**
+     * {@code DELETE /api/rate-limits/{id}} = <b>置 {@code INACTIVE}（软停用、不删行）</b>
      * ——依据是 {@code AuditAction} 里只有 {@code RATE_LIMIT_DEACTIVATE}，且「同维度取最后一条」
      * 需要历史行仍在。判别力由变异体 {@code M9}（改成真删行）提供：变异后 {@code selectById} 为 null，
      * 「行仍在」断言精确变红。
@@ -627,7 +627,7 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
 
     /**
      * 审计 {@code tenant_id} 的语义（{@code CONVENTIONS} §10）：
-     * 路由写记 SQL {@code NULL}（R1，全局资源）；策略写记**该策略的** {@code tenant_id}（R2）。
+     * 路由写记 SQL {@code NULL}（R1，全局资源）；策略写记<b>该策略的</b> {@code tenant_id}（R2）。
      * 路由审计查询必须用 {@code isNull()}（{@code eq(tenantId,null)} 恒不成立、会静默 0 行）。
      */
     @Test
@@ -658,7 +658,7 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
      * 变异后 {@code weight} 仍是 100，`isEqualTo(7)` 精确变红。
      *
      * <p><b>登记（覆盖缺口用例）</b>：本条在实现落地之后才补上（Task 9 修复轮同款先例）—— 计划 Step 1
-     * 只草拟了 4 条用例，路由 PUT 不在其中；因此它**没有经历自己的 RED**，可证伪性由变异体 {@code M12}
+     * 只草拟了 4 条用例，路由 PUT 不在其中；因此它<b>没有经历自己的 RED</b>，可证伪性由变异体 {@code M12}
      * 提供，而不是由「先写会红的测试」提供。
      */
     @Test
@@ -685,9 +685,9 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
 
     /**
      * {@code PUT /api/routes/{id}} 也可能撞 {@code uk_model_route(model_name, channel_id)}（因为 PUT 允许
-     * 改 {@code modelName}/{@code channelId}，是已接受的偏差）⇒ **必须**把 {@link DuplicateKeyException}
-     * 翻译成 **400 {@code INVALID_PARAM}**（未翻译会落到兜底分支变 **500**）；message 可读且**不含
-     * SQL / 约束名**；事务回滚，那条路由**没被半改**、A 也不受影响。
+     * 改 {@code modelName}/{@code channelId}，是已接受的偏差）⇒ <b>必须</b>把 {@link DuplicateKeyException}
+     * 翻译成 <b>400 {@code INVALID_PARAM}</b>（未翻译会落到兜底分支变 <b>500</b>）；message 可读且<b>不含
+     * SQL / 约束名</b>；事务回滚，那条路由<b>没被半改</b>、A 也不受影响。
      *
      * <p>判别力由变异体 {@code F1}（把 {@code updateRoute(entity)} 换成直接 {@code updateById}，去掉翻译）
      * 提供：去掉之后 PUT 返回 500 ≠ 400，本用例精确变红（{@code .m4t10review-logs} 的存活变异 {@code N5}
@@ -732,8 +732,8 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 10) 夹具自守
 
     /**
-     * 夹具名前缀里的 {@code _} 对 LIKE 是**单字符通配符**，{@code %} 与 {@code \} 同理。本类的清理与
-     * 审计查询都建立在「前缀只含字面量」这条**假设**上，所以这里把它变成可执行事实。
+     * 夹具名前缀里的 {@code _} 对 LIKE 是<b>单字符通配符</b>，{@code %} 与 {@code \} 同理。本类的清理与
+     * 审计查询都建立在「前缀只含字面量」这条<b>假设</b>上，所以这里把它变成可执行事实。
      */
     @Test
     void fixtureNamesContainNoLikeMetacharacters() {
@@ -835,7 +835,7 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 「某维度内的 ACTIVE 行」：{@code apiKeyId == null} 表示**租户级**维度 —— 查它必须用
+     * 「某维度内的 ACTIVE 行」：{@code apiKeyId == null} 表示<b>租户级</b>维度 —— 查它必须用
      * {@code isNull()}（{@code eq(column, null)} 恒不成立、会静默返回 0 行，CONVENTIONS §7）。
      */
     private List<RateLimitPolicyEntity> activeRowsFor(long tenantId, Long apiKeyId) {
@@ -963,7 +963,7 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
         return listenerContainer;
     }
 
-    /** 装一条真 Redis 订阅，并在返回之前**确认订阅已经建立**（否则第一条真消息会被静默丢掉）。 */
+    /** 装一条真 Redis 订阅，并在返回之前<b>确认订阅已经建立</b>（否则第一条真消息会被静默丢掉）。 */
     private BlockingQueue<String> subscribeAndAwait() throws InterruptedException {
         BlockingQueue<String> received = new LinkedBlockingQueue<>();
         container().addMessageListener((message, channel) -> received.add(new String(message.getBody())),
@@ -987,12 +987,12 @@ class RouteAndRateLimitAdminIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 在一个**有界窗口**内收齐频道上的**全部**失效消息（不是「等到一条匹配的就返回」）。
+     * 在一个<b>有界窗口</b>内收齐频道上的<b>全部</b>失效消息（不是「等到一条匹配的就返回」）。
      *
-     * <p>语义：先至多等 {@link #MESSAGE_TIMEOUT} 拿到**第一条**（拿不到**直接变红** —— 空集会让
+     * <p>语义：先至多等 {@link #MESSAGE_TIMEOUT} 拿到<b>第一条</b>（拿不到<b>直接变红</b> —— 空集会让
      * 「集合恰好等于 {X}」在所有实现下都假绿）；拿到第一条之后继续 poll，直到出现 {@link #QUIET_WINDOW}
-     * 长度的静默为止。返回的是「这一小段窗口里的消息**集合**」，断言可以要求它**恰好等于**期望的 reason
-     * 集合 —— 从而抓到「多发了一条**别的** reason」这类漏洞（计划 {@code :1611} 明文要求，
+     * 长度的静默为止。返回的是「这一小段窗口里的消息<b>集合</b>」，断言可以要求它<b>恰好等于</b>期望的 reason
+     * 集合 —— 从而抓到「多发了一条<b>别的</b> reason」这类漏洞（计划 {@code :1611} 明文要求，
      * 评审的存活变异 {@code N3b} 即此）。
      */
     private static List<ConfigInvalidateMessage> drainBoundedWindow(BlockingQueue<String> received)

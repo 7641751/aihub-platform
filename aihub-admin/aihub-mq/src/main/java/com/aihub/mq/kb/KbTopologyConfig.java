@@ -13,10 +13,10 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * kb 流水线拓扑的**唯一声明方**（M5 Task 3）：业务 exchange + **两条**业务队列（parse/embed）
+ * kb 流水线拓扑的<b>唯一声明方</b>（M5 Task 3）：业务 exchange + <b>两条</b>业务队列（parse/embed）
  * + 一个 DLX + 一个 DLQ。
  *
- * <p><b>死信六件套</b>照既有 {@code MeteringTopologyConfig}，只是这里要**两套**业务队列/绑定：
+ * <p><b>死信六件套</b>照既有 {@code MeteringTopologyConfig}，只是这里要<b>两套</b>业务队列/绑定：
  * 两个业务队列都声明 {@code x-dead-letter-exchange/routing-key}，DLX 绑一个 DLQ。
  * 载荷解不开或落库反复失败的消息会被 reject 并进 DLQ，而不是无限 requeue 把 broker 打爆，
  * 也不是静默丢弃。
@@ -77,7 +77,7 @@ public class KbTopologyConfig {
     /**
      * 失败终态恢复器（M5 Task 6，D7）。它的处置动作（cleanup + 置 FAILED + 审计）由 service 侧的
      * {@link com.aihub.mq.kb.KbMessageRecoverer.TerminalFailureHandler} 实现（{@code KbDocumentService}）
-     * 提供 —— 本类只按**接口**注入，因此 {@code aihub-mq} 不必（也不能）看到 {@code aihub-service}。
+     * 提供 —— 本类只按<b>接口</b>注入，因此 {@code aihub-mq} 不必（也不能）看到 {@code aihub-service}。
      */
     @Bean
     public KbMessageRecoverer kbMessageRecoverer(KbMessageRecoverer.TerminalFailureHandler handler) {
@@ -85,17 +85,17 @@ public class KbTopologyConfig {
     }
 
     /**
-     * kb 流水线**专用**的监听容器工厂（M5 Task 6）—— 只有 {@code KbParseConsumer} / {@code KbEmbedConsumer}
-     * 走它，计量链路（{@code MeteringConsumer}）仍用框架默认工厂、行为**一点不改**。
+     * kb 流水线<b>专用</b>的监听容器工厂（M5 Task 6）—— 只有 {@code KbParseConsumer} / {@code KbEmbedConsumer}
+     * 走它，计量链路（{@code MeteringConsumer}）仍用框架默认工厂、行为<b>一点不改</b>。
      *
      * <p><b>为什么必须"专用"而不是改默认工厂</b>（裁定 #2）：本仓的
-     * {@code spring.rabbitmq.listener.simple.retry.*} 与 {@code default-requeue-rejected} 是**全局**的；
-     * 把自定义 {@link KbMessageRecoverer} 设到默认工厂上，会**一起改掉计量链路的死信行为**
+     * {@code spring.rabbitmq.listener.simple.retry.*} 与 {@code default-requeue-rejected} 是<b>全局</b>的；
+     * 把自定义 {@link KbMessageRecoverer} 设到默认工厂上，会<b>一起改掉计量链路的死信行为</b>
      * （它有自己的 DLQ 用例）。
      *
      * <p><b>四个重试数从注入的 {@link RabbitProperties} 派生</b>（max-attempts / initial-interval /
-     * multiplier / max-interval）—— **不把 yml 里的数抄成字面量**：抄死之后 yml 改了这里不会跟着改，
-     * "重试策略只有一份真相源"就没了。恢复器只在重试**耗尽后**被调用（见 {@link KbMessageRecoverer}）。
+     * multiplier / max-interval）—— <b>不把 yml 里的数抄成字面量</b>：抄死之后 yml 改了这里不会跟着改，
+     * "重试策略只有一份真相源"就没了。恢复器只在重试<b>耗尽后</b>被调用（见 {@link KbMessageRecoverer}）。
      */
     @Bean
     public SimpleRabbitListenerContainerFactory kbListenerContainerFactory(

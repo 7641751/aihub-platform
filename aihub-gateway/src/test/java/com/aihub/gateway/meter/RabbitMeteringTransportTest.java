@@ -19,8 +19,8 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * confirm / mandatory / 持久化这三件事只能在**发布端**保证，而网关测试不允许起 broker。
- * 因此这里用 {@link RabbitTemplate} 的子类顶替真实 broker：手工完成或**故意不完成**
+ * confirm / mandatory / 持久化这三件事只能在<b>发布端</b>保证，而网关测试不允许起 broker。
+ * 因此这里用 {@link RabbitTemplate} 的子类顶替真实 broker：手工完成或<b>故意不完成</b>
  * {@code CorrelationData} 的 future，就能覆盖「nack」「无确认（超时）」「连接异常」三种失败；
  * 再手工 {@code setReturned(...)}，就能覆盖第四种 —— ack 但不可路由（被 basic.return 退回）。
  */
@@ -70,7 +70,7 @@ class RabbitMeteringTransportTest {
     }
 
     /**
-     * 不可路由（交换器在、没人绑队列）时 broker **照样 ack**，只是另外发一条 basic.return。
+     * 不可路由（交换器在、没人绑队列）时 broker <b>照样 ack</b>，只是另外发一条 basic.return。
      * 只看 confirm 会把这种情况报成投递成功 → 事件永远不会落 spool，而这正是 mandatory
      * 想暴露的那个失败模式（类注释承诺「投递失败 → 落 spool」）。
      */

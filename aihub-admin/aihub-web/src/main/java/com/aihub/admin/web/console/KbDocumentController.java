@@ -25,21 +25,21 @@ import java.time.format.DateTimeFormatter;
 import java.util.List;
 
 /**
- * 文档入库的**写入侧**接口（M5 Task 2，{@code /api/kb/documents}）：上传（同步半段）+ 列表/状态轮询。
+ * 文档入库的<b>写入侧</b>接口（M5 Task 2，{@code /api/kb/documents}）：上传（同步半段）+ 列表/状态轮询。
  *
  * <p>由 {@link ConsoleAuthFilter} 守门（ADMIN 可读写、VIEWER 只读），本类只做「HTTP DTO ↔ 服务层入参」
  * 的转换与 {@link ApiResponse} 包装；错误一律走 {@link BizException} → {@code GlobalExceptionHandler}
- * （{@code INVALID_PARAM} 400 / {@code UNAUTHORIZED} 401），**不写自定义错误体**。
+ * （{@code INVALID_PARAM} 400 / {@code UNAUTHORIZED} 401），<b>不写自定义错误体</b>。
  *
- * <p><b>响应契约是 admin 信封</b>（{@code {"code","message","data"}}），**不是**数据面的 OpenAI 兼容体。
+ * <p><b>响应契约是 admin 信封</b>（{@code {"code","message","data"}}），<b>不是</b>数据面的 OpenAI 兼容体。
  *
- * <p><b>租户语义（CONVENTIONS §10）</b>：{@code POST} 的租户取**请求体**（R2，写操作是平台级，
- * 运营必须能给任一租户入库）；{@code GET} 是**资源列表** ⇒ 缺省租户取**令牌里的租户**（R3.2）。
- * 两者都**不**用操作者的租户去覆盖目标资源的租户。
+ * <p><b>租户语义（CONVENTIONS §10）</b>：{@code POST} 的租户取<b>请求体</b>（R2，写操作是平台级，
+ * 运营必须能给任一租户入库）；{@code GET} 是<b>资源列表</b> ⇒ 缺省租户取<b>令牌里的租户</b>（R3.2）。
+ * 两者都<b>不</b>用操作者的租户去覆盖目标资源的租户。
  *
  * <p><b>multipart 而不是 JSON</b>：原件是二进制（Task 7 起包括 PDF），JSON 装不下。
  * 上传上限由 {@code spring.servlet.multipart.max-file-size}（20MB）钉在 {@code application.yml} ——
- * 默认的 1MB 会**静默拒绝**稍大的文件，那是本项目最容易"看起来能跑、其实全挂"的地方。
+ * 默认的 1MB 会<b>静默拒绝</b>稍大的文件，那是本项目最容易"看起来能跑、其实全挂"的地方。
  */
 @RestController
 @RequestMapping("/api/kb/documents")
@@ -54,7 +54,7 @@ public class KbDocumentController {
         this.kbDocumentService = kbDocumentService;
     }
 
-    /** 上传响应：只暴露状态与进度，**绝不**回显原件内容。 */
+    /** 上传响应：只暴露状态与进度，<b>绝不</b>回显原件内容。 */
     public record UploadView(long id, String status, int chunkCount, boolean duplicate) {
     }
 
@@ -63,14 +63,14 @@ public class KbDocumentController {
                            String errorMsg, String createdAt) {
     }
 
-    /** 列表页：{@code total} 是**满足条件的总行数**（不是本页行数）。 */
+    /** 列表页：{@code total} 是<b>满足条件的总行数</b>（不是本页行数）。 */
     public record PageView(List<ItemView> items, long total, int page, int size) {
     }
 
     /**
      * 上传一份原件并触发（本任务只建行的）入库流程。
      *
-     * @param tenantId **目标资源的租户**，来自 multipart 文本字段；缺省 ⇒ 400（R2：写操作必须显式指定目标租户）
+     * @param tenantId <b>目标资源的租户</b>，来自 multipart 文本字段；缺省 ⇒ 400（R2：写操作必须显式指定目标租户）
      */
     @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<ApiResponse<UploadView>> upload(
@@ -99,8 +99,8 @@ public class KbDocumentController {
     /**
      * 列表 + 状态轮询（页面靠它拿 {@code status}/{@code chunkCount}）。
      *
-     * <p>边界（Task 2 的接口契约）：{@code page} 缺省 0、负数 400；{@code size} 缺省 20、{@code >200} **钳到 200**、
-     * {@code <1} 400。校验顺序有意写在钳位之前：{@code size=0} 是**入参错误**（400），不是"被钳成 1"。
+     * <p>边界（Task 2 的接口契约）：{@code page} 缺省 0、负数 400；{@code size} 缺省 20、{@code >200} <b>钳到 200</b>、
+     * {@code <1} 400。校验顺序有意写在钳位之前：{@code size=0} 是<b>入参错误</b>（400），不是"被钳成 1"。
      */
     @GetMapping
     public ResponseEntity<ApiResponse<PageView>> list(
@@ -142,7 +142,7 @@ public class KbDocumentController {
         return claims;
     }
 
-    /** 审计主体：上传是**用户**发起的动作（{@code actor_type=USER}）。 */
+    /** 审计主体：上传是<b>用户</b>发起的动作（{@code actor_type=USER}）。 */
     private static AuditService.Actor actor(HttpServletRequest request) {
         return new AuditService.Actor("USER", String.valueOf(claims(request).userId()));
     }

@@ -42,28 +42,28 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 /**
- * Task 14 的**端到端**证据：{@link QuotaFilter} 在「Redis 不可用」时回源 admin 预扣（{@code QUOTA-FALLBACK}）。
+ * Task 14 的<b>端到端</b>证据：{@link QuotaFilter} 在「Redis 不可用」时回源 admin 预扣（{@code QUOTA-FALLBACK}）。
  *
  * <p><b>网关测试永远不允许依赖 Docker / 真 Redis</b>（CONVENTIONS §8 item 3）：Redis 因此指向死端口
- * （{@code spring.data.redis.port=1}，本仓库既有的「Redis 不可用」构造法），而**真实 HTTP + 真 HMAC 签名**
- * 由 {@link FakeAdminServer} 承担 —— 本类**不**提供 {@code @Primary AdminClient}，跑的就是
+ * （{@code spring.data.redis.port=1}，本仓库既有的「Redis 不可用」构造法），而<b>真实 HTTP + 真 HMAC 签名</b>
+ * 由 {@link FakeAdminServer} 承担 —— 本类<b>不</b>提供 {@code @Primary AdminClient}，跑的就是
  * {@code AdminClientConfig} 造出来的 {@code AdminClient.Http}（3 秒内部跳预算）。
  *
  * <p>要钉的五件事：
  * <ol>
  *   <li><b>正常路径永不回源</b>：Redis 可用（判定非空）时兜底一次都不该打；</li>
  *   <li><b>兜底失败/拿不到判定仍然放行</b>（裁定 6，D7 延伸）：500、畸形体、超时三种都必须是 200 + 一次
- *       {@code aihub.quota.degraded}，**绝不升级成业务故障**，也**不重复计数**；</li>
+ *       {@code aihub.quota.degraded}，<b>绝不升级成业务故障</b>，也<b>不重复计数</b>；</li>
  *   <li><b>兜底的「拒绝」仍然是拒绝</b>：admin 说余额不足 ⇒ 429 {@code insufficient_quota}
  *       （降级不得变成绕过配额的手段）；</li>
  *   <li><b>只在「Redis 不可用」这一条分支上试兜底</b>（裁定 2）：本周期不限（D15）与脚本形状异常
- *       （缺陷，不是降级）都**不试**；</li>
+ *       （缺陷，不是降级）都<b>不试</b>；</li>
  *   <li><b>开关的默认值是「开」</b>（裁定 5）：生产默认由出厂 {@code application.yml} 的
  *       {@code ${AIHUB_QUOTA_FALLBACK_ENABLED:true}} 提供，关掉时一次都不回源。</li>
  * </ol>
  *
  * <p><b>夹具</b>：{@code @Primary} 的 {@link StubResolver}/{@link StubLimiter} 只覆盖「额度来源」与
- * 「Redis 判定结果」两处，兜底链路（过滤器 → 窄接口 → AdminClient.Http → 假 admin）**全是真的**。
+ * 「Redis 判定结果」两处，兜底链路（过滤器 → 窄接口 → AdminClient.Http → 假 admin）<b>全是真的</b>。
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         // 刻意**不设** aihub.quota.fallback-enabled：本类要跑的就是「出厂默认 = 开」。
@@ -83,13 +83,13 @@ class QuotaReserveFallbackTest {
      * 「有界」的观测上界：假 admin 迟到 3.5 秒，整个客户端请求仍必须在这个预算内返回。
      *
      * <p><b>⚠️ 已知覆盖缺口（2026-10-02 独立评审 I-1 + 控制器的根因分析）</b>：本断言只能排除
-     * "&gt;7s 的挂死"，**钉不住真实的 3 秒界限** —— 把 {@code AdminClientConfig} 的
-     * {@code responseTimeout} 与窄接口预算都放宽到 60s 后本用例**仍然 GREEN**（评审实测 M8）。
-     * **为什么不能简单地"把迟到时长加长"**：{@code FakeAdminServer} 的处理线程是**同步
-     * `Thread.sleep(delay)`** ⇒ 迟到时长一旦超过**下一个用例**的内部跳预算（3s），下一个用例的回源请求
+     * "&gt;7s 的挂死"，<b>钉不住真实的 3 秒界限</b> —— 把 {@code AdminClientConfig} 的
+     * {@code responseTimeout} 与窄接口预算都放宽到 60s 后本用例<b>仍然 GREEN</b>（评审实测 M8）。
+     * <b>为什么不能简单地"把迟到时长加长"</b>：{@code FakeAdminServer} 的处理线程是<b>同步
+     * `Thread.sleep(delay)`</b> ⇒ 迟到时长一旦超过<b>下一个用例</b>的内部跳预算（3s），下一个用例的回源请求
      * 会被堵住而超时（控制器实测：迟到 9s ⇒ 紧随其后的 `aFallbackDenialIsHonouredAsInsufficientQuota`
-     * 变成 `expected: 429 but was: 200`，耗时 5.587s）。⇒ 修法必须**先**让假 admin 的处理**异步**
-     * （或把该用例隔离到自己的端口/路径），**再**把迟到抬到上界之上。已登记为 M4 收口残余。
+     * 变成 `expected: 429 but was: 200`，耗时 5.587s）。⇒ 修法必须<b>先</b>让假 admin 的处理<b>异步</b>
+     * （或把该用例隔离到自己的端口/路径），<b>再</b>把迟到抬到上界之上。已登记为 M4 收口残余。
      */
     private static final long BOUNDED_RESPONSE_MILLIS = 7_000L;
 
@@ -117,7 +117,7 @@ class QuotaReserveFallbackTest {
     }
 
     /**
-     * 用例之间共享同一个假 admin（Spring 上下文按类缓存）：排一个诱饵响应来证明某条路径**没有**回源，
+     * 用例之间共享同一个假 admin（Spring 上下文按类缓存）：排一个诱饵响应来证明某条路径<b>没有</b>回源，
      * 会把诱饵留在队列里污染下一个用例，因此每个用例都必须从干净的队列与计数器开始。
      */
     @BeforeEach
@@ -164,7 +164,7 @@ class QuotaReserveFallbackTest {
     // ------------------------------------------------------------------ ② 兜底失败仍放行（裁定 6）
 
     /**
-     * **本任务的验收判据**：兜底**自己**失败（admin 回 500）时仍然放行 + 计数 degraded。
+     * <b>本任务的验收判据</b>：兜底<b>自己</b>失败（admin 回 500）时仍然放行 + 计数 degraded。
      * 判别力：把「兜底失败」写成「拒绝请求」⇒ 本用例立刻红（那等于把一次记账组件的抖动变成对客户端的 429）。
      */
     @Test
@@ -197,7 +197,7 @@ class QuotaReserveFallbackTest {
         assertThat(degraded() - degradedBefore).isEqualTo(1.0);
     }
 
-    /** 兜底调用**有界**：假 admin 迟到 3.5 秒（跨过内部跳的 3 秒预算）⇒ 请求仍必须在预算内返回。 */
+    /** 兜底调用<b>有界</b>：假 admin 迟到 3.5 秒（跨过内部跳的 3 秒预算）⇒ 请求仍必须在预算内返回。 */
     @Test
     void aStalledReserveCallIsBoundedAndStillAllowsTheRequest() throws Exception {
         ADMIN.enqueueStalledJsonForPath(RESERVE_PATH, 200, allowEnvelope(700L),
@@ -220,7 +220,7 @@ class QuotaReserveFallbackTest {
 
     // ------------------------------------------------------------------ ③ 兜底的拒绝仍然是拒绝
 
-    /** 降级是为了「不因为组件坏了而拒绝」，**不是**为了「绕过配额」：兜底说余额不足 ⇒ 429。 */
+    /** 降级是为了「不因为组件坏了而拒绝」，<b>不是</b>为了「绕过配额」：兜底说余额不足 ⇒ 429。 */
     @Test
     void aFallbackDenialIsHonouredAsInsufficientQuota() throws Exception {
         ADMIN.enqueueJsonForPath(RESERVE_PATH, 200, denyEnvelope());
@@ -257,7 +257,7 @@ class QuotaReserveFallbackTest {
 
     // ------------------------------------------------------------------ ④ 只在降级分支试兜底（裁定 2）
 
-    /** 本周期**不限**（D15）没有预扣可言 ⇒ 不试兜底（`limits.isEmpty()` 处已提前返回）。 */
+    /** 本周期<b>不限</b>（D15）没有预扣可言 ⇒ 不试兜底（`limits.isEmpty()` 处已提前返回）。 */
     @Test
     void anUnlimitedTenantNeverConsultsTheFallback() throws Exception {
         resolver.limited = false;
@@ -273,7 +273,7 @@ class QuotaReserveFallbackTest {
     }
 
     /**
-     * 脚本**形状异常**是缺陷（{@code aihub.quota.script_error}），**不是**降级 ⇒ 不试兜底。
+     * 脚本<b>形状异常</b>是缺陷（{@code aihub.quota.script_error}），<b>不是</b>降级 ⇒ 不试兜底。
      * 判别力：让 script_error 路径也去试兜底 ⇒ 本用例红（否则「Lua 写错了」会被藏进「Redis 挂了」里，
      * 而 admin 跑的是同一份 Lua，必然也失败）。
      */
@@ -300,8 +300,8 @@ class QuotaReserveFallbackTest {
      * {@code aihub.quota.fallback-enabled} 的默认值必须真的是「开」。
      *
      * <p>这里照抄 {@code ConfigSubscriberTest.theProductionDefaultOfTheInvalidateSubscriptionIsOn} 的口径：
-     * ① 读**出厂** {@code src/main/resources/application.yml} 的那一行原文（环境变量名 + 默认值两者都要对）；
-     * ② 再把出厂 yml 喂进 {@link ApplicationContextRunner}，断言**解析后的行为** —— 不给环境变量时兜底会回源
+     * ① 读<b>出厂</b> {@code src/main/resources/application.yml} 的那一行原文（环境变量名 + 默认值两者都要对）；
+     * ② 再把出厂 yml 喂进 {@link ApplicationContextRunner}，断言<b>解析后的行为</b> —— 不给环境变量时兜底会回源
      * admin，{@code AIHUB_QUOTA_FALLBACK_ENABLED=false} 时一次都不回源。
      *
      * <p>另加一条「连 yml 也没有」的最小上下文：它单独钉住 {@code QuotaConfig} 里

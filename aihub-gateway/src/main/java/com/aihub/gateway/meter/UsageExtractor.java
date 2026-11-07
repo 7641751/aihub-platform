@@ -8,7 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 
 /**
- * 从**已经捕获到的响应副本**里读 {@code usage} 与增量内容。只在网关侧使用（Jackson 是网关自带依赖，
+ * 从<b>已经捕获到的响应副本</b>里读 {@code usage} 与增量内容。只在网关侧使用（Jackson 是网关自带依赖，
  * {@code aihub-common} 不能依赖它）。
  *
  * <p>三条硬约束：
@@ -44,7 +44,7 @@ public final class UsageExtractor {
     }
 
     /**
-     * 流式：逐行扫 {@code data:} 帧，取**最后一个**带 usage 的帧（OpenAI 兼容上游把它放在
+     * 流式：逐行扫 {@code data:} 帧，取<b>最后一个</b>带 usage 的帧（OpenAI 兼容上游把它放在
      * {@code [DONE]} 之前的那一帧）。逐行解析，单行坏掉不影响其它行。
      */
     public static Optional<Usage> fromSse(byte[] body) {

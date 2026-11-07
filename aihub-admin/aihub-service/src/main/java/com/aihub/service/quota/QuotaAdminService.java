@@ -21,13 +21,13 @@ import java.util.Map;
 
 /**
  * 配额的控制面（{@code quota} 表）：读取/惰性建行 + 更新周期额度。周期折算见
- * {@link QuotaPeriod}（UTC 的 {@code YYYYMM}，决策 D13）；{@code 0} 的限额表示**不限**（决策 D15）。
+ * {@link QuotaPeriod}（UTC 的 {@code YYYYMM}，决策 D13）；{@code 0} 的限额表示<b>不限</b>（决策 D15）。
  *
- * <p>{@code quota} 是**租户维度资源**（按 {@code docs/CONVENTIONS.md} §10）：
+ * <p>{@code quota} 是<b>租户维度资源</b>（按 {@code docs/CONVENTIONS.md} §10）：
  * <ul>
  *   <li><b>R2（写）</b>：写是平台级（{@code tenantId} 由请求体/调用方给出），任何 {@code ADMIN} 都有权；
- *       但审计的 {@code tenant_id} **必须**记**该配额行的**租户 id —— 不是操作者的租户、不是 NULL；</li>
- *   <li><b>R3.2（查）</b>：{@link #getOrCreate} 缺省只服务**令牌租户**的行（由控制器负责取令牌租户）。</li>
+ *       但审计的 {@code tenant_id} <b>必须</b>记<b>该配额行的</b>租户 id —— 不是操作者的租户、不是 NULL；</li>
+ *   <li><b>R3.2（查）</b>：{@link #getOrCreate} 缺省只服务<b>令牌租户</b>的行（由控制器负责取令牌租户）。</li>
  * </ul>
  *
  * <p><b>维度是「租户 + 周期」，不是「租户 + key」</b>：{@code quota} 表只有
@@ -35,20 +35,20 @@ import java.util.Map;
  * 不要照抄限流的「两维」结构。
  *
  * <p><b>{@code getOrCreate} 是「惰性物化」</b>：表里没有该 {@code (tenant, period)} 的行时，插一行
- * **两个额度都是 0**（= 不限）的行。这与「没有行」在行为上**完全等价**（D15：没配额度 = 与 M3 一致），
+ * <b>两个额度都是 0</b>（= 不限）的行。这与「没有行」在行为上<b>完全等价</b>（D15：没配额度 = 与 M3 一致），
  * 差别只是控制台从此有一个稳定行 id 可以编辑。因此这个读路径上的写是幂等的、无语义影响的。
  *
  * <p><b>更新用手写乐观锁，不用 {@code @Version}</b>（本仓库不注册 {@code MybatisPlusInterceptor}，
  * 见 {@code QuotaMapper.compareAndSwapLimits}）：拿到当前 {@code version} 后走 CAS，
- * **受影响行数为 0 ⇒ 并发冲突 ⇒ 抛 {@link BizException}（绝不静默覆盖）**。
+ * <b>受影响行数为 0 ⇒ 并发冲突 ⇒ 抛 {@link BizException}（绝不静默覆盖）</b>。
  *
- * <p><b>数据面生效（Task 13 接通）</b>：{@code quota} 的额度行现在**会被组装进配置快照**
+ * <p><b>数据面生效（Task 13 接通）</b>：{@code quota} 的额度行现在<b>会被组装进配置快照</b>
  * （{@code ConfigSnapshotService#quotas()}），网关（数据面）从快照里读它。因此一次成功的 {@code update}
  * 必须在事务提交后发布 {@code quota.update} 失效消息，让网关立刻丢掉手上的旧快照 —— 否则「控制台改了
  * 额度、数据面最长一个 TTL 之后才生效」与渠道/路由/限流的写路径不一致。
  *
  * <p>发布走 {@link ConfigChangePublisher#publishAfterCommit(String)}（不是 {@code bumpAndPublish}）：
- * 本类的 {@link #update} 是 {@code @Transactional}，发布必须在**提交之后**（回滚的写不许广播，
+ * 本类的 {@link #update} 是 {@code @Transactional}，发布必须在<b>提交之后</b>（回滚的写不许广播，
  * 也不许抬水位）。发布失败只计数 + WARN，绝不把「广播失败」升级成「业务失败」（控制台的写已经提交了）。
  */
 @Service
@@ -87,17 +87,17 @@ public class QuotaAdminService {
     }
 
     /**
-     * 取该 {@code (tenantId, period)} 的配额行；**不存在则惰性物化一行零额度行**（见类注释）。
+     * 取该 {@code (tenantId, period)} 的配额行；<b>不存在则惰性物化一行零额度行</b>（见类注释）。
      *
-     * <p><b>并发首建是幂等的（2026-10-01 定稿的做法）</b>：本方法**刻意不带 {@code @Transactional}** ——
+     * <p><b>并发首建是幂等的（2026-10-01 定稿的做法）</b>：本方法<b>刻意不带 {@code @Transactional}</b> ——
      * 它没有跨语句不变量，而「读 → 原子插或忽略 → 再读」三步各自成事务，才能同时满足两件事：
-     * ① 并发首建**不经过异常路径**（{@code uk_quota_tenant_period} 由
+     * ① 并发首建<b>不经过异常路径</b>（{@code uk_quota_tenant_period} 由
      * {@link com.aihub.dao.mapper.QuotaMapper#insertZeroRowIfAbsent} 的
      * {@code ON DUPLICATE KEY UPDATE id = id} 吸收，不再有 {@code DuplicateKeyException} ⇒ 不再 500）；
-     * ② 第二次读是**新事务的新一致性读视图**，因此能看见并发对手已提交的那一行
+     * ② 第二次读是<b>新事务的新一致性读视图</b>，因此能看见并发对手已提交的那一行
      * （若把三步塞进同一个 REPEATABLE READ 事务里，视图在第一次 {@code SELECT} 返回 null 时就固定了，
      * 重读仍是 null）。
-     * 早先「catch {@code DuplicateKeyException} + {@code SELECT … FOR UPDATE}「重读」的写法**在并发下死锁**
+     * 早先「catch {@code DuplicateKeyException} + {@code SELECT … FOR UPDATE}「重读」的写法<b>在并发下死锁</b>
      * （8 线程实测 {@code Deadlock found when trying to get lock}），已弃用；见
      * {@code QuotaMapper#insertZeroRowIfAbsent} 的注释。
      *
@@ -127,7 +127,7 @@ public class QuotaAdminService {
      * 更新周期额度（{@code token_limit} / {@code request_limit}），用手写乐观锁；不写已用量。
      *
      * @param actor 操作者（审计用）；R2：审计的 {@code tenant_id} = 该配额行的租户
-     * @throws BizException {@code INVALID_PARAM}（周期非法 / 额度为负 / 超过 2^53 / **version 冲突**）
+     * @throws BizException {@code INVALID_PARAM}（周期非法 / 额度为负 / 超过 2^53 / <b>version 冲突</b>）
      */
     @Transactional
     public QuotaSummary update(long tenantId, String period, long tokenLimit, long requestLimit,

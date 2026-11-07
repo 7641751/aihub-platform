@@ -14,11 +14,11 @@ import java.time.Instant;
 import java.util.Base64;
 
 /**
- * 控制台令牌：**JWT 形状**的自研 HS256 实现（D3），不是 JWT 标准实现。
+ * 控制台令牌：<b>JWT 形状</b>的自研 HS256 实现（D3），不是 JWT 标准实现。
  *
  * <p>线格式 {@code base64url(header).base64url(payload).base64url(HMAC-SHA256(前两段))}，
- * header 恒为 {@code {"alg":"HS256","typ":"JWT"}}。**算法与 header 都是服务端写死的：
- * {@link #verify} 根本不读请求里的 header**，因此不存在 {@code alg} 混淆面
+ * header 恒为 {@code {"alg":"HS256","typ":"JWT"}}。<b>算法与 header 都是服务端写死的：
+ * {@link #verify} 根本不读请求里的 header</b>，因此不存在 {@code alg} 混淆面
  * （{@code alg:none}、{@code alg:HS256} 与任何其它 header 字节都会被同样处理：
  * 要么三段形状不对被拒，要么按 HS256 重算签名后被拒）。
  *
@@ -29,15 +29,15 @@ import java.util.Base64;
  * <p><b>故障面（契约）：两种失败、两种异常，刻意不合并</b>：
  * <ul>
  *   <li><b>令牌层失败 → {@link IllegalArgumentException}</b>：格式不对、base64 不合法、签名不匹配、
- *       已过期、claims 缺失或类型不对，全都归这一种。这是**凭证问题**（"你的令牌不行"），调用方
- *       （{@code ConsoleAuthFilter}）接住它回 401；**受检的 {@link JsonProcessingException} 必须在这里
- *       被包住**，否则它会穿透过滤器变成 500。</li>
+ *       已过期、claims 缺失或类型不对，全都归这一种。这是<b>凭证问题</b>（"你的令牌不行"），调用方
+ *       （{@code ConsoleAuthFilter}）接住它回 401；<b>受检的 {@link JsonProcessingException} 必须在这里
+ *       被包住</b>，否则它会穿透过滤器变成 500。</li>
  *   <li><b>密钥为 null/空 → {@link IllegalStateException}</b>：{@link #hmac} 把 JDK
  *       {@link SecretKeySpec} 抛出的 {@code IllegalArgumentException} 包成 ISE。签名密钥没配是
- *       **平台配置故障**（"平台坏了"），**刻意不并进 IAE** —— 把平台故障伪装成凭证错误正是本仓库在
+ *       <b>平台配置故障</b>（"平台坏了"），<b>刻意不并进 IAE</b> —— 把平台故障伪装成凭证错误正是本仓库在
  *       503-vs-401 上已经否决过的做法。调用方必须分别接这两种异常，不能只 catch IAE。</li>
  * </ul>
- * 空白/过短的密钥属于第三种情形（D16），本类**不做判定**：由 {@code ConsoleAuthFilter}（Task 6）
+ * 空白/过短的密钥属于第三种情形（D16），本类<b>不做判定</b>：由 {@code ConsoleAuthFilter}（Task 6）
  * 自己判（空白或 &lt;32 字符 ⇒ {@code /api/**} 恒 401、登录回 {@code CONFIGURATION_ERROR}）。
  *
  * <p><b>D3 登记的边界（必须随代码一起被读到）</b>：
@@ -50,7 +50,7 @@ import java.util.Base64;
  *   <li><b>没有 refresh、也没有吊销黑名单</b>：令牌一旦签发，在 {@code exp} 之前一直有效；
  *       要提前失效只能换密钥（等于把所有人踢下线）。</li>
  * </ul>
- * 这些边界是刻意的取舍（本控制台是**单签发方、单算法、短生命周期**的场景，引 JWT 库要付三个依赖
+ * 这些边界是刻意的取舍（本控制台是<b>单签发方、单算法、短生命周期</b>的场景，引 JWT 库要付三个依赖
  * 而为不存在的需求买单）。<b>一旦出现第二签发方、需要吊销、或需要非对称密钥，本类必须被替换成库
  * （jjwt / java-jwt / nimbus），不要在它上面加补丁</b> —— 手写密码学代码的正确性无法靠测试穷尽。
  *
@@ -72,7 +72,7 @@ public final class ConsoleToken {
     private static final String EXPIRES_AT_CLAIM = "exp";
 
     /**
-     * 写死的 header 的 base64url 形式。校验方只把它当作签名输入的一部分（**不解析它**），
+     * 写死的 header 的 base64url 形式。校验方只把它当作签名输入的一部分（<b>不解析它</b>），
      * 所以请求里换一个 header 只会让签名对不上，而不会改变校验行为。
      */
     private static final String HEADER = ENCODER.encodeToString("{\"alg\":\"HS256\",\"typ\":\"JWT\"}".getBytes(StandardCharsets.UTF_8));
@@ -83,7 +83,7 @@ public final class ConsoleToken {
     /**
      * 签发：把 claims 写成固定五个字段，再对 {@code header.payload} 做 HMAC-SHA256。
      *
-     * <p>这里**不校验** {@code claims} 的内容（例如 {@code exp} 是否已经过去）：签发过期令牌是调用方
+     * <p>这里<b>不校验</b> {@code claims} 的内容（例如 {@code exp} 是否已经过去）：签发过期令牌是调用方
      * 的编程错误，而 {@link #verify} 会拒绝它 —— 在签发处再判一次只会多一条今天不可达的分支。
      */
     public static String issue(byte[] secret, ConsoleClaims claims) {
@@ -93,12 +93,12 @@ public final class ConsoleToken {
     }
 
     /**
-     * 校验并取回 claims。**令牌层失败一律 {@link IllegalArgumentException}**（见类注释的故障面），
+     * 校验并取回 claims。<b>令牌层失败一律 {@link IllegalArgumentException}</b>（见类注释的故障面），
      * 因此调用方不需要 {@code Optional} 的三态：要么拿到可信的 claims，要么 401。
      *
      * <p><b>唯一的例外是密钥本身</b>：{@code secret} 为 {@code null} 或空时抛
-     * {@link IllegalStateException}（平台配置故障），**不是** IAE —— 调用方必须分别接这两种异常。
-     * 空白/过短的密钥（D16）**不在本方法的判定范围内**：本方法只区分"能不能算签名"、不做长度策略，
+     * {@link IllegalStateException}（平台配置故障），<b>不是</b> IAE —— 调用方必须分别接这两种异常。
+     * 空白/过短的密钥（D16）<b>不在本方法的判定范围内</b>：本方法只区分"能不能算签名"、不做长度策略，
      * {@code ConsoleAuthFilter}（Task 6）必须自己判。
      *
      * @throws IllegalArgumentException 令牌为 null、不是三段、签名不匹配、载荷不是合法 base64/JSON、
@@ -144,7 +144,7 @@ public final class ConsoleToken {
     }
 
     /**
-     * 把 claims 序列化成**固定五个**字段。{@code userId} 在线上写作标准的 {@code sub} 声明
+     * 把 claims 序列化成<b>固定五个</b>字段。{@code userId} 在线上写作标准的 {@code sub} 声明
      * （其余四个字段名与 record 组件同名）。
      */
     private static byte[] write(ConsoleClaims claims) {
@@ -163,12 +163,12 @@ public final class ConsoleToken {
     }
 
     /**
-     * 反序列化**固定五个**字段：{@code sub} → {@code userId}，其余四个显式按名字取。
+     * 反序列化<b>固定五个</b>字段：{@code sub} → {@code userId}，其余四个显式按名字取。
      *
      * <p><b>为什么不直接 {@code readValue(bytes, ConsoleClaims.class)}</b>：那需要
      * {@code -parameters}（本仓库的编译器配置里没有）或给 record 加 {@code @JsonProperty}，
      * 而且 {@code sub} 与 {@code userId} 的名字差异还需要一个注解去桥接。手写映射把"线上声明名"
-     * 这件事收在 {@link ConsoleToken} 内部，并且让"缺失/类型不对"变成一个**显式**的 IAE，
+     * 这件事收在 {@link ConsoleToken} 内部，并且让"缺失/类型不对"变成一个<b>显式</b>的 IAE，
      * 而不是 Jackson 那串又长又依赖版本的消息。
      *
      * <p><b>刻意不做字符串/数字互转</b>：载荷是照着本类写出来的（{@link #write} 只写数字），
@@ -225,7 +225,7 @@ public final class ConsoleToken {
      *
      * <p><b>{@code secret} 为 {@code null} 或空时抛 {@link IllegalStateException}（不是 IAE）</b>：
      * {@link SecretKeySpec} 对 null/空密钥抛 {@code IllegalArgumentException}，被下面的
-     * {@code catch (Exception)} 包成 ISE —— 这是**刻意的**：密钥没配是平台配置故障，不是凭证故障，
+     * {@code catch (Exception)} 包成 ISE —— 这是<b>刻意的</b>：密钥没配是平台配置故障，不是凭证故障，
      * 两者共用一个异常类型就会把平台故障伪装成 401。因此防"空白/过短密钥"（D16：空白或 &lt;32 字符
      * ⇒ {@code /api/**} 恒 401、登录回 {@code CONFIGURATION_ERROR}）必须由
      * {@code ConsoleAuthFilter}（Task 6）自己判，不能依赖本方法。

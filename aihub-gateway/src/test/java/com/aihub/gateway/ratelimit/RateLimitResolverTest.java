@@ -10,9 +10,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 策略解析是「限流到底按什么数字执行」的唯一来源。**两个维度都生效**（决策 7，2026-09-26 依控制器
+ * 策略解析是「限流到底按什么数字执行」的唯一来源。<b>两个维度都生效</b>（决策 7，2026-09-26 依控制器
  * pre-flight 评审修订）：先按 {@code (tenantId, apiKeyId)} 找 key 级策略，没有有效的才回落到该租户的
- * 租户级策略，最后才是内置默认。原文那条「key 级被忽略」的用例是**错的**（数值主键由决策 14 随
+ * 租户级策略，最后才是内置默认。原文那条「key 级被忽略」的用例是<b>错的</b>（数值主键由决策 14 随
  * {@code ApiKeyView} 下发、限流过滤器排在鉴权之后即可拿到），已被下面两条替换。
  */
 class RateLimitResolverTest {
@@ -37,7 +37,7 @@ class RateLimitResolverTest {
         assertThat(policy.tenantLevel()).isTrue();
     }
 
-    /** 决策 7 的第一级：`apiKeyId` 命中时，key 级策略**赢过**同一租户的租户级策略。 */
+    /** 决策 7 的第一级：`apiKeyId` 命中时，key 级策略<b>赢过</b>同一租户的租户级策略。 */
     @Test
     void prefersTheKeyLevelPolicyWhenTheApiKeyIdsMatch() {
         RatePolicy policy = resolverOf(SNAPSHOT).resolve(7L, 42L);
@@ -49,7 +49,7 @@ class RateLimitResolverTest {
     }
 
     /**
-     * 决策 7 的第二级（**回落**）：这个 (租户, key) 没有 key 级行时用该租户的租户级行。
+     * 决策 7 的第二级（<b>回落</b>）：这个 (租户, key) 没有 key 级行时用该租户的租户级行。
      * 两种形态都要覆盖：① 该 key 根本没有策略（99L）；② 鉴权关闭、请求上下文里没有数值主键
      * （{@code null}）—— 后者是匿名桶的正常路径，绝不能因为 `apiKeyId` 为空就丢掉租户级策略。
      */
@@ -74,7 +74,7 @@ class RateLimitResolverTest {
     }
 
     /**
-     * 同维度出现多行时（V1 没有唯一约束，决策 17）：**在各自的维度内取最后一条**。
+     * 同维度出现多行时（V1 没有唯一约束，决策 17）：<b>在各自的维度内取最后一条</b>。
      * admin 侧组装快照时已经按 {@code id} 升序排好，因此「最后一条」就是「最后插入的那条」。
      */
     @Test

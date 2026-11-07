@@ -13,22 +13,22 @@ import org.testcontainers.utility.DockerImageName;
  * 由 Testcontainers 的 Ryuk 负责回收）。
  *
  * <p><b>为什么单独抽出来</b>：连接时区方言（{@code connectionTimeZone} / {@code serverTimezone}）
- * 是**显式的测试设计选择**，而同一个数据库需要被**三种方言**访问：
+ * 是<b>显式的测试设计选择</b>，而同一个数据库需要被<b>三种方言</b>访问：
  * <ul>
  *   <li>{@link #utcFlavouredJdbcUrl()} —— 与生产 URL 同方言（{@code serverTimezone=UTC}），
- *       由 {@link AbstractIntegrationTest} 使用：套件的主体断言的是**生产方言**下的行为；</li>
- *   <li>{@link #nonUtcFlavouredJdbcUrl()} —— 连接时区**钉成一个固定的非 UTC 区**（{@code Asia/Shanghai}），
+ *       由 {@link AbstractIntegrationTest} 使用：套件的主体断言的是<b>生产方言</b>下的行为；</li>
+ *   <li>{@link #nonUtcFlavouredJdbcUrl()} —— 连接时区<b>钉成一个固定的非 UTC 区</b>（{@code Asia/Shanghai}），
  *       由 {@code com.aihub.admin.time.TimeBasisIsConnectionFlavourIndependentTest} 使用：
- *       这是能**在任何 JVM 时区下**判别「代码依赖不依赖连接时区」的方言
+ *       这是能<b>在任何 JVM 时区下</b>判别「代码依赖不依赖连接时区」的方言
  *       （固定区不随跑测试的机器变化）；</li>
- *   <li>{@link #localFlavouredJdbcUrl()} —— **不带**任何连接时区参数，驱动因此按 **JVM 默认时区**
- *       解释 {@code datetime}（LOCAL 方言）。这就是 2026-09-29 独立评审之前**测试套件实际在跑**的方言，
- *       它没有被任何地方写下来过；现在只被方言用例用来**记录**这个历史事实
+ *   <li>{@link #localFlavouredJdbcUrl()} —— <b>不带</b>任何连接时区参数，驱动因此按 <b>JVM 默认时区</b>
+ *       解释 {@code datetime}（LOCAL 方言）。这就是 2026-09-29 独立评审之前<b>测试套件实际在跑</b>的方言，
+ *       它没有被任何地方写下来过；现在只被方言用例用来<b>记录</b>这个历史事实
  *       （LOCAL 的行为随 JVM 默认时区变化，所以它不能当判别器）。</li>
  * </ul>
  *
  * <p>取舍与守卫写在 {@code docs/CONVENTIONS.md} §8「测试纪律」；不要在没有改那一段的情况下
- * 改动这里的方言定义 —— 在评审之前测试 URL 的方言是**意外**形成的，谁都没有看出来，
+ * 改动这里的方言定义 —— 在评审之前测试 URL 的方言是<b>意外</b>形成的，谁都没有看出来，
  * 于是「RED 证据」看起来像一个生产缺陷。
  */
 public final class TestContainers {
@@ -51,9 +51,9 @@ public final class TestContainers {
     public static final int CHROMA_PORT = 8000;
 
     /**
-     * 向量库（M5 Task 5，决策 D3：**真 Chroma**，不许用假 HTTP 上游替代）。
+     * 向量库（M5 Task 5，决策 D3：<b>真 Chroma</b>，不许用假 HTTP 上游替代）。
      *
-     * <p>镜像 tag 与 compose 的 {@code chroma} 服务**必须是同一个**（D3），且必须走 daocloud 代理仓库
+     * <p>镜像 tag 与 compose 的 {@code chroma} 服务<b>必须是同一个</b>（D3），且必须走 daocloud 代理仓库
      * —— Docker Hub 直连在本机不可达。等待策略用 {@code /api/v1/heartbeat}：只等"端口在听"
      * 会在 API 还没就绪时就放行，那是 flaky 的经典来源。
      */
@@ -91,20 +91,20 @@ public final class TestContainers {
     }
 
     /**
-     * 生产方言：连接时区**显式钉死为 UTC**，与
+     * 生产方言：连接时区<b>显式钉死为 UTC</b>，与
      * {@code aihub-admin/aihub-web/src/main/resources/application.yml:8} 和
      * {@code docker-compose.yml:65} 的发布 URL 逐字同类。
-     * 这个钉法是**故意的**：驱动只有在这个参数存在时才不把 {@code datetime} 的时区交给 JVM。
+     * 这个钉法是<b>故意的</b>：驱动只有在这个参数存在时才不把 {@code datetime} 的时区交给 JVM。
      */
     public static String utcFlavouredJdbcUrl() {
         return withConnectionTimezoneParameter("serverTimezone=UTC");
     }
 
     /**
-     * 判别用方言：连接时区**钉成一个固定的非 UTC 区**（`Asia/Shanghai`）。
+     * 判别用方言：连接时区<b>钉成一个固定的非 UTC 区</b>（`Asia/Shanghai`）。
      *
-     * <p>为什么不用裸 URL（LOCAL）：LOCAL 的行为取决于**跑测试的 JVM 默认时区** ——
-     * 在一台 UTC 的机器/CI 镜像上，LOCAL 与 UTC 的行为**完全一致**，判别力归零
+     * <p>为什么不用裸 URL（LOCAL）：LOCAL 的行为取决于<b>跑测试的 JVM 默认时区</b> ——
+     * 在一台 UTC 的机器/CI 镜像上，LOCAL 与 UTC 的行为<b>完全一致</b>，判别力归零
      * （这正是独立评审 I-1(b) 指出的盲区：常见的 UTC CI 上这条路无人保护）。
      * 把连接时区钉成固定区之后，判别在任何 JVM 时区下都成立。
      * 会话时区不受影响（没有开 {@code forceConnectionTimeZoneToSession}），
@@ -115,12 +115,12 @@ public final class TestContainers {
     }
 
     /**
-     * **历史方言**：不带 {@code serverTimezone} / {@code connectionTimeZone}，
-     * 驱动把 {@code datetime} 与 {@code Timestamp}/{@code Instant} 之间的换算交给 **JVM 默认时区**（LOCAL）。
+     * <b>历史方言</b>：不带 {@code serverTimezone} / {@code connectionTimeZone}，
+     * 驱动把 {@code datetime} 与 {@code Timestamp}/{@code Instant} 之间的换算交给 <b>JVM 默认时区</b>（LOCAL）。
      *
-     * <p>这就是 2026-09-29 独立评审之前**测试套件实际在跑的方言**（Testcontainers 返回裸 URL），
-     * 它与生产（`serverTimezone=UTC`）**相反**而没有任何地方写下来。现在它只被方言用例用来
-     * **记录**这个历史事实：它的行为随 JVM 默认时区变化，因此不适合当判别器。
+     * <p>这就是 2026-09-29 独立评审之前<b>测试套件实际在跑的方言</b>（Testcontainers 返回裸 URL），
+     * 它与生产（`serverTimezone=UTC`）<b>相反</b>而没有任何地方写下来。现在它只被方言用例用来
+     * <b>记录</b>这个历史事实：它的行为随 JVM 默认时区变化，因此不适合当判别器。
      */
     public static String localFlavouredJdbcUrl() {
         return MYSQL.getJdbcUrl();
@@ -133,7 +133,7 @@ public final class TestContainers {
 
     /**
      * 两种方言都要注册的基础设施属性（Redis / RabbitMQ / 内部密钥）。
-     * {@code spring.datasource.url} **不在**这里 —— 它正是两个 flavour 的分叉点。
+     * {@code spring.datasource.url} <b>不在</b>这里 —— 它正是两个 flavour 的分叉点。
      */
     public static void registerInfrastructure(DynamicPropertyRegistry registry) {
         registry.add("spring.datasource.username", MYSQL::getUsername);

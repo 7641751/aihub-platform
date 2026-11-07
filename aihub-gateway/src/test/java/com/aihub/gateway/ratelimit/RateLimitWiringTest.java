@@ -23,28 +23,28 @@ import java.util.concurrent.TimeoutException;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * G8：**限流链真的接进了跑起来的网关**（不是「某个 bean 存在」）。
+ * G8：<b>限流链真的接进了跑起来的网关</b>（不是「某个 bean 存在」）。
  *
  * <p>为什么必须有这一条：{@code RateLimitFilterTest} 自己 {@code new} 过滤器，因此它对
  * 「生产代码里根本没有 {@code RateLimitResolver} / {@code RateLimiter} 的 bean、过滤器压根不在
- * 链上」这类故障**完全免疫** —— 那正是 M3 前几个任务留下来的真实缺口（限流器全写好了，一行都没接）。
+ * 链上」这类故障<b>完全免疫</b> —— 那正是 M3 前几个任务留下来的真实缺口（限流器全写好了，一行都没接）。
  * 本类不构造任何限流组件，只发真实 HTTP、只读响应，因此它红就等于「线上不会限流」。
  *
  * <p>装配（假 admin、死端口 Redis、请求辅助方法）全部来自 {@link RateLimitWiringSupport} ——
- * 本类是它的**预热**子类（冷缓存那一半由 {@code RateLimitColdStartTest} 与
- * {@code RateLimitColdCacheAuthDisabledTest} 负责）。上一轮本类曾自带一份**平行**的
+ * 本类是它的<b>预热</b>子类（冷缓存那一半由 {@code RateLimitColdStartTest} 与
+ * {@code RateLimitColdCacheAuthDisabledTest} 负责）。上一轮本类曾自带一份<b>平行</b>的
  * {@code FakeAdmin} / {@code @DynamicPropertySource} / 请求辅助，并在 javadoc 里声称两者「只差预热
  * 与否」——那段声明当时是假的（两份副本已经漂移：support 设了 {@code aihub.config.local-ttl}，
  * 本类没有）。现在本类真的继承 support，声明与事实一致。
  *
  * <p>被钉住的四个事实，每一个都只能由「真的接上了」来解释：
  * <ol>
- *   <li>请求一直打到**出现 429 为止**，且这个 429 必然落在尝试次数上界（{@link #MAX_ATTEMPTS}）之内
+ *   <li>请求一直打到<b>出现 429 为止</b>，且这个 429 必然落在尝试次数上界（{@link #MAX_ATTEMPTS}）之内
  *       —— 钉的是规则（超限必拒）而不是时序：「第几个请求被拒」取决于机器快慢，
  *       写死次数就是一条依赖时序的假断言；</li>
- *   <li>该 429 的 body 是 **OpenAI 形状**（数据面铁律，不是 admin 信封），并带 IETF 头
+ *   <li>该 429 的 body 是 <b>OpenAI 形状</b>（数据面铁律，不是 admin 信封），并带 IETF 头
  *       （{@code RateLimit-Limit: 1, 30} / {@code RateLimit-Remaining: 0} / 退避头）；
- *       这里的 {@code 1, 30} 是**控制面快照**下发的租户级策略，**不是**内置默认 {@code 10, 20}
+ *       这里的 {@code 1, 30} 是<b>控制面快照</b>下发的租户级策略，<b>不是</b>内置默认 {@code 10, 20}
  *       —— 内置默认的补充速率恰好追平本类的请求速率，桶永远耗不干净，那样连 429 都打不出来；</li>
  *   <li>{@code /healthz} 仍然 200：限流只守 {@code /v1/**}，运维端点不受影响；</li>
  *   <li><b>流式（SSE）路径在限流开启时仍然是流式的</b>：判定被 offload 到
@@ -54,22 +54,22 @@ import static org.assertj.core.api.Assertions.assertThat;
  * </ol>
  *
  * <p><b>Redis 指向死端口</b>（{@code spring.data.redis.port=1}，与 M1/M2/M3 既有做法一致）：
- * 本类证明的因此是**降级路径**上的端到端限流 —— 即「Redis 挂了也照样拒绝超限请求」，
+ * 本类证明的因此是<b>降级路径</b>上的端到端限流 —— 即「Redis 挂了也照样拒绝超限请求」，
  * 而这正是 §9 与控制器 ruling 要求的那一条（降级 ≠ 放行全部）。连接被拒是毫秒级的，
  * 加上短超时，整套用例的附加延迟是秒级而不是「每个请求 2 秒」。
  *
  * <p><b>本类也清脏上下文</b>（{@code @DirtiesContext(BEFORE_CLASS)}）：三个子类的上下文配置
- * （除鉴权开关外）完全相同，于是 Spring 会**复用**上一个类缓存下来的上下文 —— 而那个上下文里的
+ * （除鉴权开关外）完全相同，于是 Spring 会<b>复用</b>上一个类缓存下来的上下文 —— 而那个上下文里的
  * {@code aihub.upstream.base-url} 是上一个类那次 {@code FakeUpstream} 的端口，它的
  * {@code @AfterAll} 已经把服务器停掉了。复用等于让本类打到一台已经关掉的假上游（实测：502 +
- * {@code Connection refused}）。类前置清脏保证每个子类的上下文都按**自己**这次启动的假上游解析
+ * {@code Connection refused}）。类前置清脏保证每个子类的上下文都按<b>自己</b>这次启动的假上游解析
  * base-url，与 {@code RateLimitColdStartTest} 的理由相同。
  */
 @DirtiesContext(classMode = DirtiesContext.ClassMode.BEFORE_CLASS)
 class RateLimitWiringTest extends RateLimitWiringSupport {
 
     /**
-     * 客户端读到 SSE 第一帧的预算。与 {@code SseStreamingTest} 同一个量级：它必须**远小于**
+     * 客户端读到 SSE 第一帧的预算。与 {@code SseStreamingTest} 同一个量级：它必须<b>远小于</b>
      * 上游扣留第二帧的预算（{@code FakeUpstream.SECOND_FRAME_HOLD_BUDGET_SECONDS} = 30 s），
      * 否则「谁先到期」由时序抖动决定。
      */
@@ -85,17 +85,17 @@ class RateLimitWiringTest extends RateLimitWiringSupport {
     private ConfigClient configClient;
 
     /**
-     * 在**测试线程**上把配置快照灌进本地缓存（{@code ConfigClient} 的 TTL 是 30 秒，足够本类跑完）。
+     * 在<b>测试线程</b>上把配置快照灌进本地缓存（{@code ConfigClient} 的 TTL 是 30 秒，足够本类跑完）。
      *
      * <p><b>为什么必须有这一句</b>：{@code ConfigClient.current()} 在两级缓存都空时走
-     * {@code refreshBlocking()}，而它内部是 {@code Mono.block()}。{@code block()} 在**非阻塞线程**
+     * {@code refreshBlocking()}，而它内部是 {@code Mono.block()}。{@code block()} 在<b>非阻塞线程</b>
      * （Netty event loop）上会抛 {@code IllegalStateException: block()/blockFirst()/blockLast() are
      * blocking}，被 {@code refreshBlocking} 吞成一次「回源失败」，于是 {@code current()} 只能回落到
      * 遗留单渠道、策略静默变回内置默认 {@code 10/20}。这是 Task 7 的 {@code ConfigClient} 自身的性质，
-     * **不是限流链的问题**。
+     * <b>不是限流链的问题</b>。
      *
      * <p><b>这条性质的成立条件比看上去窄</b>（本轮实测更正）：那个检查发生在 {@code subscribe()}
-     * **之后**，因此若控制面是**同步**的，回源会在抛异常之前就跑完并写进本地缓存，第二次
+     * <b>之后</b>，因此若控制面是<b>同步</b>的，回源会在抛异常之前就跑完并写进本地缓存，第二次
      * {@code resolve()} 照样拿得到快照 —— 症状被夹具掩盖。真实的 {@code AdminClient.Http} 是 WebClient
      * （异步），所以生产形状下它确实会丢掉这一次回源。判别性用例是
      * {@code RateLimitColdCacheAuthDisabledTest}（鉴权关闭 + 冷缓存 + 异步控制面：修复前实测拿到
@@ -111,7 +111,7 @@ class RateLimitWiringTest extends RateLimitWiringSupport {
     }
 
     /**
-     * 链子上的限流组件必须**存在且被 Spring 装配**：这条只是最小的接线证据，
+     * 链子上的限流组件必须<b>存在且被 Spring 装配</b>：这条只是最小的接线证据，
      * 单靠它不足以证明「过滤器真的在跑」（那由下面几条 HTTP 用例证明）。
      */
     @Test
@@ -128,8 +128,8 @@ class RateLimitWiringTest extends RateLimitWiringSupport {
      *
      * <p><b>为什么是「打到超限」而不是「第 31 个」</b>：桶在两次请求之间按 {@code qps} 补充，
      * 因此「打空 burst 需要几个请求」取决于机器快慢 —— 钉死次数就是一条依赖时序的假断言
-     * （实测：{@code burst=3} 的版本因为补充速度不同，红法都不一样）。这里改为钉住**规则本身**：
-     * 前若干个必须放行、且**在尝试次数上界之内**必然出现拒绝。
+     * （实测：{@code burst=3} 的版本因为补充速度不同，红法都不一样）。这里改为钉住<b>规则本身</b>：
+     * 前若干个必须放行、且<b>在尝试次数上界之内</b>必然出现拒绝。
      *
      * <p>尝试次数上界不是随手写的：补充速率是 {@code QPS=1}/秒，把 {@code BURST=30} 打空需要
      * 约 30 秒；本类每个请求实际耗时是毫秒级（见实测），因此几百次内必然出现拒绝 ——
@@ -169,12 +169,12 @@ class RateLimitWiringTest extends RateLimitWiringSupport {
     }
 
     /**
-     * 同一套上下文里的反向证据：**没有超限的请求照常成功**。
+     * 同一套上下文里的反向证据：<b>没有超限的请求照常成功</b>。
      * <p>它同时是「降级 ≠ 一律拒绝」的那一半：Redis 整个死掉期间，网关仍然正常转发。
      * 与 {@link #anOverLimitRequestIsRejectedWithAnOpenAiShaped429EvenWithRedisDown} 一起，
      * 两条合起来才是 §9 的完整语义（既不放行全部，也不拒绝全部）。
      *
-     * <p><b>顺序无关</b>：本方法用**另一个密钥**（→ 另一个桶），且自己那个桶此刻必然还没被碰过，
+     * <p><b>顺序无关</b>：本方法用<b>另一个密钥</b>（→ 另一个桶），且自己那个桶此刻必然还没被碰过，
      * 因此单个请求必然放行 —— 不依赖「另一个用例先跑还是后跑」。
      */
     @Test
@@ -203,8 +203,8 @@ class RateLimitWiringTest extends RateLimitWiringSupport {
      *
      * <p>为什么这条必须存在：判定被 {@code subscribeOn(LIMITER_SCHEDULER)} 整体 offload 到
      * {@code boundedElastic} 之后，放行分支的 {@code chain.filter(exchange)}（中继 → 上游 SSE）
-     * 也在**弹性线程**上被订阅，订阅线程与 M1/M2 时不再是同一个。这是一个真实的线程模型变更，
-     * 而在本轮之前**没有任何用例执行过它**：测试资源里 {@code aihub.ratelimit.enabled=false}，
+     * 也在<b>弹性线程</b>上被订阅，订阅线程与 M1/M2 时不再是同一个。这是一个真实的线程模型变更，
+     * 而在本轮之前<b>没有任何用例执行过它</b>：测试资源里 {@code aihub.ratelimit.enabled=false}，
      * 于是 {@code SseStreamingTest} / {@code RelayMeteringFlowTest} / {@code ChatRelayControllerTest}
      * 全部走的是「过滤器直接 {@code chain.filter}」那条早退分支。引用「全反应堆绿」来为这个
      * blast radius 背书，等于什么都没证。
@@ -213,7 +213,7 @@ class RateLimitWiringTest extends RateLimitWiringSupport {
      * <ol>
      *   <li>响应头里有限流结论（{@code RateLimit-Limit: 1, 30} 来自控制面快照）——
      *       证过滤器真的在这一跳上跑了；</li>
-     *   <li>第一帧在上游**还没写第二帧**时就到了客户端（随后放行才收到 {@code [DONE]}）——
+     *   <li>第一帧在上游<b>还没写第二帧</b>时就到了客户端（随后放行才收到 {@code [DONE]}）——
      *       证 offload 之后中继仍然逐帧 flush，M1 的字节级透传语义没有被线程模型变更破坏。</li>
      * </ol>
      * 断言顺序无关：本用例用 {@link RateLimitWiringSupport#IN_LIMIT_SECRET}（burst 30，

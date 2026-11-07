@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 捕获器是「计量」与「字节透传」的交汇点：它读上游响应体，但**绝不能消费/改动**那些字节。
+ * 捕获器是「计量」与「字节透传」的交汇点：它读上游响应体，但<b>绝不能消费/改动</b>那些字节。
  * 本类里 {@code doesNotConsumeTheDataBuffer} 就是这条铁律的单元级防线 ——
  * 一旦实现改用会推进读写位置的读法，客户端的响应体就会缺字节，而它必然变红。
  */
@@ -44,7 +44,7 @@ class UsageCaptureTest {
     }
 
     /**
-     * **区分性用例**：{@code onChunk} 之后 DataBuffer 的可读字节必须一字不差。
+     * <b>区分性用例</b>：{@code onChunk} 之后 DataBuffer 的可读字节必须一字不差。
      * 实现若用 {@code read(...)} / {@code DataBufferUtils.join} 这类会推进读写位置的读法，
      * 透传出去的就是残缺 body —— 本用例变红，而其它用例（只看计量结果）可能全绿。
      */
@@ -125,7 +125,7 @@ class UsageCaptureTest {
 
     /**
      * {@code latencyMs()} 的口径是「从收到请求（构造）到响应写完成（收尾时取数）」，与「什么时候收到
-     * 第一个字节」无关 —— 因此用**非流式**请求来钉：它没有 TTFT，但耗时照样必须测出来。
+     * 第一个字节」无关 —— 因此用<b>非流式</b>请求来钉：它没有 TTFT，但耗时照样必须测出来。
      * <p>Task 3 的测试此前从未调用过它，于是「耗时恒为 0」这种实现也能全绿。
      */
     @Test
@@ -145,7 +145,7 @@ class UsageCaptureTest {
     }
 
     /**
-     * 决策 6 的**单元级**钉子，也是本类里最容易踩的脚坑：非流式请求里
+     * 决策 6 的<b>单元级</b>钉子，也是本类里最容易踩的脚坑：非流式请求里
      * {@link UsageCapture#ttftMs()} 仍然测「第一个响应体字节」（这是它的定义，供测试直接验证语义），
      * 但真正落库的 {@link UsageCapture.Captured#ttftMs()} 必须是 {@code null}。
      * <p>把两者混为一谈（例如控制器/计量改用 {@code capture.ttftMs()} 组装事件）就会给非流式请求
@@ -163,7 +163,7 @@ class UsageCaptureTest {
     }
 
     /**
-     * 起始时刻只在**构造时**采样一次：用假时钟把这一条钉死（{@code start(...)} 走真实 {@code nanoTime}，
+     * 起始时刻只在<b>构造时</b>采样一次：用假时钟把这一条钉死（{@code start(...)} 走真实 {@code nanoTime}，
      * 混用两种时钟只会测出负数，所以这里用构造器；{@code start(...)} 本身由下面那条用例覆盖）。
      * <p>若实现改成「每次 {@code latencyMs()} 都重新采样起始时刻」，第二次取数会退回 0 —— 这条挡住它。
      */
@@ -191,11 +191,11 @@ class UsageCaptureTest {
     }
 
     /**
-     * 非流式的捕获上限底线：**尾部**滑窗对「整体 JSON」是危险的 —— 一旦 body 超过窗口，头部被丢掉、
+     * 非流式的捕获上限底线：<b>尾部</b>滑窗对「整体 JSON」是危险的 —— 一旦 body 超过窗口，头部被丢掉、
      * JSON 不再可解析，精确 usage 会被静默降级成 {@code usage_missing} + {@code prompt_tokens = 0}。
-     * 本用例用一个**远大于**现实非流式 body（300 KB 正文 + usage）的响应，在**配置里的**上限下
+     * 本用例用一个<b>远大于</b>现实非流式 body（300 KB 正文 + usage）的响应，在<b>配置里的</b>上限下
      * 断言 usage 仍然精确可解析。
-     * <p>上限是**绑定出来的**（{@code MeteringProperties} 的 {@code @DefaultValue}，并与出厂
+     * <p>上限是<b>绑定出来的</b>（{@code MeteringProperties} 的 {@code @DefaultValue}，并与出厂
      * {@code application.yml} 核对一致），不是写死在测试里的字面量：把
      * {@code aihub.metering.max-capture-bytes} 调到 300 KB 以下（改注解默认值或改 application.yml），
      * 本用例必然变红 —— 这就是「默认值够不够大」这条判断的可执行版本
@@ -219,8 +219,8 @@ class UsageCaptureTest {
     }
 
     /**
-     * 绑定**当前生效的**捕获上限：源里只放一个同级键（Spring Boot 的 Binder 必须看到
-     * {@code aihub.metering.*} 存在才会进入值对象绑定），{@code max-capture-bytes} 本身**不在**源里，
+     * 绑定<b>当前生效的</b>捕获上限：源里只放一个同级键（Spring Boot 的 Binder 必须看到
+     * {@code aihub.metering.*} 存在才会进入值对象绑定），{@code max-capture-bytes} 本身<b>不在</b>源里，
      * 因此绑出来的只可能是 {@code MeteringProperties} 的 {@code @DefaultValue} —— 也就是网关在没有配置
      * 这个键时真正用的值。随后与出厂 {@code application.yml} 里的显式键核对：两者漂移时这里立刻变红，
      * 而不是让上面那条底线测试继续对着一个已经不发货的数字放行。
@@ -254,7 +254,7 @@ class UsageCaptureTest {
 
     /**
      * 反过来把「降级而不是崩」钉住：捕获窗口小于非流式 body 时，结果是 {@code MISSING} + 全 0，
-     * 而**不是**异常、也不是「用残缺 JSON 抢救出来的一堆假 token」。
+     * 而<b>不是</b>异常、也不是「用残缺 JSON 抢救出来的一堆假 token」。
      */
     @Test
     void aTooSmallCaptureWindowDegradesInsteadOfThrowing() {

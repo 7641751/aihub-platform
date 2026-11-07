@@ -8,7 +8,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 计量事件的线格式是 gateway（发布）与 admin（消费）之间的**跨服务契约**：
+ * 计量事件的线格式是 gateway（发布）与 admin（消费）之间的<b>跨服务契约</b>：
  * 两侧共用 {@link MeteringEventCodec}，任何一侧私自改字段顺序或转义规则都不会编译报错，
  * 只会表现为「消息能收、内容全错」。因此把固定向量与畸形载荷都压在这里。
  * <p>本类不需要 Spring 上下文，也不需要 Docker。

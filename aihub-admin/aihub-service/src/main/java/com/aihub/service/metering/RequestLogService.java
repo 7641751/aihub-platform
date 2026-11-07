@@ -16,7 +16,7 @@ import java.time.ZoneOffset;
  * 计量事件落 {@code request_log}。真相源（派生数据可重建，但重建需要它）。
  *
  * <p><b>幂等</b>：唯一键 {@code (request_id, created_at)} 就是设计文档 §8.3 的「request_id 唯一键，
- * 重复消费直接丢弃」。因此 {@code created_at} **必须**取事件里由网关生成的值：
+ * 重复消费直接丢弃」。因此 {@code created_at} <b>必须</b>取事件里由网关生成的值：
  * 用 {@code now()} 会让每一次重投都变成新行（实测：created_at 差 1 毫秒即两行）。
  *
  * <p>只吞 {@link DuplicateKeyException}；其它 {@code DataAccessException}（列超长、约束、连接失败）
@@ -31,12 +31,12 @@ public class RequestLogService implements MeteringSink {
     private static final Logger log = LoggerFactory.getLogger(RequestLogService.class);
 
     /**
-     * 本类幂等语义所假定的**唯一**唯一键，对应 V1 的
+     * 本类幂等语义所假定的<b>唯一</b>唯一键，对应 V1 的
      * {@code UNIQUE KEY uk_request_log_request_id (request_id, created_at)}。
      *
      * <p>下面的 {@code catch (DuplicateKeyException)} 把「任何重复键冲突」都解释成「重复消费」；
-     * 这只有在 {@code request_log} 上**恰好只有这一个**唯一索引时才成立。
-     * 将来若给该表再加唯一索引（例如 (request_id) 或 (tenant_id, created_at)），一种**全新的**冲突
+     * 这只有在 {@code request_log} 上<b>恰好只有这一个</b>唯一索引时才成立。
+     * 将来若给该表再加唯一索引（例如 (request_id) 或 (tenant_id, created_at)），一种<b>全新的</b>冲突
      * 也会被静默吞成 false → 丢事件。届时必须同步修改这里的映射（按约束名区分，或改成先查后写）。
      */
     private static final String ASSUMED_IDEMPOTENCY_UNIQUE_KEY =

@@ -15,10 +15,10 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 控制台的登录接口（{@code POST /api/auth/login}）与一个**读数探针**（{@code GET /api/ping}）。
+ * 控制台的登录接口（{@code POST /api/auth/login}）与一个<b>读数探针</b>（{@code GET /api/ping}）。
  *
  * <p><b>为什么会有 {@code /api/ping}</b>：本任务要给"带令牌 200 / VIEWER 写操作 403"两条正向用例
- * 一个**真实存在**的靶子，而 {@code /api/**} 在 M4 的 Task 6 里只有登录一个映射（{@code /api/tenants}
+ * 一个<b>真实存在</b>的靶子，而 {@code /api/**} 在 M4 的 Task 6 里只有登录一个映射（{@code /api/tenants}
  * 要等 Task 8）。它只回读 {@code ATTRIBUTE_CLAIMS} 里的三个字段，没有任何业务语义。
  *
  * <p><b>令牌在这里签发</b>（{@link ConsoleAuthService#login} 只产出载荷，
@@ -48,7 +48,7 @@ public class ConsoleAuthController {
      * 登录成功的响应体：令牌 + 角色 + 到期时刻。
      *
      * <p>{@code role} 与 {@code expiresAtEpochSecond} 是给管理台用的（前端只读它们，不再自己解令牌）：
-     * 令牌是**不透明**的凭据，前端不该解析它（D9 的 vanilla JS 只把它放进 {@code sessionStorage}）。
+     * 令牌是<b>不透明</b>的凭据，前端不该解析它（D9 的 vanilla JS 只把它放进 {@code sessionStorage}）。
      */
     public record LoginResponse(String token, String role, long expiresAtEpochSecond) {
     }

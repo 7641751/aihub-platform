@@ -9,19 +9,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * M5 Task 4 的**零上下文单测**（不启 Spring）：{@link KbChunker} 的切分边界。
+ * M5 Task 4 的<b>零上下文单测</b>（不启 Spring）：{@link KbChunker} 的切分边界。
  *
  * <p><b>为什么放在 {@code aihub-web} 而不是 {@code aihub-service}</b>：{@code aihub-service}
- * 模块**没有 {@code src/test}、{@code pom.xml} 里也没有任何测试依赖**（实测）⇒ 计划原文写的
- * {@code aihub-service/src/test/...} 编译不过。放这里（纯 JUnit + AssertJ，**不启 Spring**）
- * 既不占上下文预算，也**不许**为此改任何 {@code pom.xml}。
+ * 模块<b>没有 {@code src/test}、{@code pom.xml} 里也没有任何测试依赖</b>（实测）⇒ 计划原文写的
+ * {@code aihub-service/src/test/...} 编译不过。放这里（纯 JUnit + AssertJ，<b>不启 Spring</b>）
+ * 既不占上下文预算，也<b>不许</b>为此改任何 {@code pom.xml}。
  *
  * <p><b>⚠️ 与计划原文的一处偏差（算术证明）</b>：计划写
  * {@code chunk("x".repeat(2500), 800, 100)).hasSize(3)} 并注 "800 + 700 + 700（带 100 重叠）"。
- * 但那在算术上**不可能**：3 段、每段 ≤ 800、相邻重叠 100 ⇒ 最多覆盖
- * {@code 3*800 − 2*100 = 2200 < 2500}，会**静默丢掉 300 个字符**。无缝隙滑窗的正确下界是
+ * 但那在算术上<b>不可能</b>：3 段、每段 ≤ 800、相邻重叠 100 ⇒ 最多覆盖
+ * {@code 3*800 − 2*100 = 2200 < 2500}，会<b>静默丢掉 300 个字符</b>。无缝隙滑窗的正确下界是
  * {@code ceil((2500 − 100) / (800 − 100)) = ceil(2400/700) = 4}。本实现按"无缝隙 + 相邻恰好重叠
- * {@code overlap} 个字符"做，断言因此如实写 **4**（并额外断言"拼接去重后能逐字还原全文"，把
+ * {@code overlap} 个字符"做，断言因此如实写 <b>4</b>（并额外断言"拼接去重后能逐字还原全文"，把
  * "丢字符"变成可证伪的失败）。
  */
 class KbChunkerTest {

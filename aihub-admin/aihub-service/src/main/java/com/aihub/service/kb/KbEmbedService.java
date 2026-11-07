@@ -24,14 +24,14 @@ import java.util.Map;
  * 嵌入阶段的实现（M5 Task 5）：实现 {@link KbEmbedSink}，被 {@code KbEmbedConsumer} 调用。
  *
  * <p>流水线：读 {@code [seqFrom, seqTo]} 的段（连同文档行的 {@code tenant_id}）→ 调 embeddings 上游
- * → **按 {@code vector_id} upsert 进 Chroma**（metadata `doc_id`/`tenant_id`/`seq`，附录 A 的跨仓库契约）
- * → 给这些段打 {@code embedded_at} → 若该 doc 的段**全部**已打满 ⇒ 条件迁移 {@code EMBEDDING → READY}。
+ * → <b>按 {@code vector_id} upsert 进 Chroma</b>（metadata `doc_id`/`tenant_id`/`seq`，附录 A 的跨仓库契约）
+ * → 给这些段打 {@code embedded_at} → 若该 doc 的段<b>全部</b>已打满 ⇒ 条件迁移 {@code EMBEDDING → READY}。
  *
- * <p><b>为什么这里刻意**没有** {@code @Transactional}</b>（与解析阶段的"整段一个事务"形成对照）：
- * 解析阶段的那个事务保护一个**真不变量**（段 + {@code chunk_count} + 状态必须一起成立）；
+ * <p><b>为什么这里刻意<b>没有</b> {@code @Transactional}</b>（与解析阶段的"整段一个事务"形成对照）：
+ * 解析阶段的那个事务保护一个<b>真不变量</b>（段 + {@code chunk_count} + 状态必须一起成立）；
  * 而嵌入阶段的两个外部调用（embeddings、Chroma）各有最长 30 秒的超时，把它们包进一个数据库事务
- * 会让连接被**网络等待**占住；而这里的"单元"其实都是**单条条件语句**（打 {@code embedded_at}、`EMBEDDING→READY`），
- * 并且 {@code READY} 的判定是**从行数算出来的**（`embedded == total`）⇒ 中途失败后**重试会自愈**，
+ * 会让连接被<b>网络等待</b>占住；而这里的"单元"其实都是<b>单条条件语句</b>（打 {@code embedded_at}、`EMBEDDING→READY`），
+ * 并且 {@code READY} 的判定是<b>从行数算出来的</b>（`embedded == total`）⇒ 中途失败后<b>重试会自愈</b>，
  * 不需要（也不该有）跨网络调用的事务。
  *
  * <p><b>D14 的出口不在这里</b>：{@code 0 段 ⇒ FAILED("无可提取文本")} 由解析阶段判（Task 4）。
@@ -110,9 +110,9 @@ public class KbEmbedService implements KbEmbedSink {
     }
 
     /**
-     * 全部段都嵌入之后才把文档推到 {@code READY}（**从行数算出来的**，因此可重入、可自愈）。
+     * 全部段都嵌入之后才把文档推到 {@code READY}（<b>从行数算出来的</b>，因此可重入、可自愈）。
      *
-     * <p>迁移**带条件**（`status = EMBEDDING`）：若这期间有人把它置成 {@code FAILED}，本方法不许把它"救活"
+     * <p>迁移<b>带条件</b>（`status = EMBEDDING`）：若这期间有人把它置成 {@code FAILED}，本方法不许把它"救活"
      * —— 那会掩盖一次真实的失败（受影响行数 0 就什么都不做）。
      */
     private void promoteToReadyWhenEveryChunkIsEmbedded(long docId) {
@@ -142,7 +142,7 @@ public class KbEmbedService implements KbEmbedSink {
         return chunk.getDocId() + ":" + chunk.getSeq();
     }
 
-    /** Chroma 的 metadata：**逐字**照计划附录 A 的必填字段（改字段名对检索侧是破坏性变更）。 */
+    /** Chroma 的 metadata：<b>逐字</b>照计划附录 A 的必填字段（改字段名对检索侧是破坏性变更）。 */
     private static Map<String, Object> metadataOf(KbChunkEntity chunk, long tenantId) {
         Map<String, Object> metadata = new LinkedHashMap<>();
         metadata.put("doc_id", chunk.getDocId());

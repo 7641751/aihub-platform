@@ -12,10 +12,10 @@ import java.util.Base64;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 解密发生在**网关本地**（设计文档 §6.1：admin 只下发密文，gateway 持主密钥在本地解密），
+ * 解密发生在<b>网关本地</b>（设计文档 §6.1：admin 只下发密文，gateway 持主密钥在本地解密），
  * 因此这个类就是「明文密钥不跨越网络」这句话的落点。
  *
- * <p>失败语义：解不开的渠道必须变成**空 Optional**（调用方跳过它去试下一个候选），
+ * <p>失败语义：解不开的渠道必须变成<b>空 Optional</b>（调用方跳过它去试下一个候选），
  * 而不是抛异常 —— 否则一次主密钥轮换事故会变成全量 500。
  */
 class ChannelKeyDecryptorTest {
@@ -59,7 +59,7 @@ class ChannelKeyDecryptorTest {
                 .contains("legacy-configured-key");
     }
 
-    /** 本地 Ollama 这类无密钥上游：**空字符串的语义是「不注入任何 Authorization」**，不是失败。 */
+    /** 本地 Ollama 这类无密钥上游：<b>空字符串的语义是「不注入任何 Authorization」</b>，不是失败。 */
     @Test
     void legacyChannelWithNoConfiguredKeyYieldsEmptyString() {
         UpstreamProperties legacy = upstream("");

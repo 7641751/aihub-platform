@@ -20,14 +20,14 @@ import java.util.concurrent.TimeoutException;
  *       只有 broker 确认了才算投递成功，否则落 spool 重投；</li>
  *   <li><b>persistent</b>：broker 重启不丢；</li>
  *   <li><b>mandatory</b>：交换器存在但没绑队列时能被 {@code ReturnsCallback} 发现 ——
- *       否则 broker 会**静默丢弃**这条消息，客户端毫无察觉。
- *       <br>注意：被退回的消息 broker **照样 ack**（只是另发一条 {@code basic.return} 并把消息挂到
+ *       否则 broker 会<b>静默丢弃</b>这条消息，客户端毫无察觉。
+ *       <br>注意：被退回的消息 broker <b>照样 ack</b>（只是另发一条 {@code basic.return} 并把消息挂到
  *       {@code CorrelationData} 上），所以「confirm 是 ack」并不等于「投递成功」，
  *       {@link #send} 必须同时检查 {@link CorrelationData#getReturned()}，否则不可路由会被误报成功、
  *       事件永远不会落 spool。</li>
  * </ol>
  *
- * <p>本方法**阻塞**（等 confirm），因此只能在 {@code MeteringDispatcher} 的守护线程或调度线程上调用，
+ * <p>本方法<b>阻塞</b>（等 confirm），因此只能在 {@code MeteringDispatcher} 的守护线程或调度线程上调用，
  * 绝不允许在 event loop 上调用。
  *
  * <p>不声明任何拓扑：唯一的声明方是 admin（见计划「决策登记」第 4 条）。admin 还没起过时，

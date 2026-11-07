@@ -17,11 +17,11 @@ import java.util.List;
 
 /**
  * 审计日志的运营查询（{@code GET /api/audit}，Task 11）：由 {@link ConsoleAuthFilter} 守门（只读）。
- * 语义与 {@link LogQueryController} **统一**：必须显式 {@code tenantId}（§10 R3.1 运营查询）+ 时间范围，
+ * 语义与 {@link LogQueryController} <b>统一</b>：必须显式 {@code tenantId}（§10 R3.1 运营查询）+ 时间范围，
  * {@code size} 缺省 20 / 钳到 200 / {@code <1} 即 400，{@code page} 缺省 0 / {@code <0} 即 400，
  * {@code from <= to}，排序 {@code created_at DESC}。
  *
- * <p>校验助手与 {@link LogQueryController} 逐字相同是**有意**的：Task 11 的文件集封闭（计划里没有共享
+ * <p>校验助手与 {@link LogQueryController} 逐字相同是<b>有意</b>的：Task 11 的文件集封闭（计划里没有共享
  * 工具类），所以各自持有一份小助手而不是新建未声明的文件（理由同 {@code LogQueryController} 的类注释）。
  *
  * <p>错误一律走 {@link BizException} → {@code GlobalExceptionHandler}。

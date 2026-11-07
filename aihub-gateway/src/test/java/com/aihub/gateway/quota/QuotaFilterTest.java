@@ -29,19 +29,19 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 配额过滤器是「429 {@code insufficient_quota} 长什么样、Redis 挂了怎么办、脚本坏了怎么区分」的
- * 唯一落点。本类**只**覆盖过滤器自己那一层（判定怎么变成响应、降级怎么计数、缓存怎么透传字节）：
+ * 唯一落点。本类<b>只</b>覆盖过滤器自己那一层（判定怎么变成响应、降级怎么计数、缓存怎么透传字节）：
  * 它自己 {@code new} 过滤器、自己塞 exchange 属性，因此对它而言「过滤器有没有被 Spring 装进链上」
  * 是无意义的 —— 那条由 {@code QuotaDegradeTest}（真实 HTTP + 真实过滤器链）证明。
  *
  * <p>必须钉住的四条规则：
  * <ol>
  *   <li><b>超限是 429 + 数据面契约</b>（D6）：{@code code = type = "insufficient_quota"}，且
- *       **不含** {@code rate_limit_exceeded}（与限流区分开）；</li>
- *   <li><b>降级 ≠ 放行全部，也 ≠ 拒绝全部</b>：配额是**记账**，Redis 不可用 → 放行 + {@code degraded} 计数
+ *       <b>不含</b> {@code rate_limit_exceeded}（与限流区分开）；</li>
+ *   <li><b>降级 ≠ 放行全部，也 ≠ 拒绝全部</b>：配额是<b>记账</b>，Redis 不可用 → 放行 + {@code degraded} 计数
  *       （与限流的「降级仍拒绝」刻意相反，D7）；</li>
  *   <li><b>两种「没生效」分开计数</b>（F6 / E.4-(a)）：脚本形状异常落 {@code script_error}，
  *       {@code degraded} 必须保持 0 —— 合成一个计数器会让「Lua 写错了」永远藏在「Redis 挂了」后面；</li>
- *   <li><b>缓存请求体不得改变转发字节</b>（D17 + M1 铁律）：过滤器的下游链读到的必须是**逐字节**原样
+ *   <li><b>缓存请求体不得改变转发字节</b>（D17 + M1 铁律）：过滤器的下游链读到的必须是<b>逐字节</b>原样
  *       的请求体（本用例直接用含 {@code NUL}/{@code 0xFF}/{@code 0xED} 的原始字节比较）。</li>
  * </ol>
  */
@@ -293,7 +293,7 @@ class QuotaFilterTest {
         return new QuotaReservationRegistry(ENABLED);
     }
 
-    /** 一条 (tenantId, period, tokenLimit, requestLimit) 的快照（period 取**现在**，与过滤器一致）。 */
+    /** 一条 (tenantId, period, tokenLimit, requestLimit) 的快照（period 取<b>现在</b>，与过滤器一致）。 */
     private static QuotaResolver resolver(long tenantId, long tokenLimit, long requestLimit) {
         QuotaDescriptor quota = new QuotaDescriptor(tenantId, QuotaPeriod.of(System.currentTimeMillis()),
                 tokenLimit, requestLimit);

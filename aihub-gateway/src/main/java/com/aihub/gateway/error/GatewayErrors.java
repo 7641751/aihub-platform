@@ -14,7 +14,7 @@ import java.util.Map;
 
 /**
  * 网关 {@code /v1/**} 的 OpenAI 兼容错误体。
- * <p>注意：这里**不用** admin 的 {@code {code,message,data}} 信封 —— 数据面遵循 OpenAI 协议，
+ * <p>注意：这里<b>不用</b> admin 的 {@code {code,message,data}} 信封 —— 数据面遵循 OpenAI 协议，
  * 客户端（各种 OpenAI SDK）按 {@code error.message} 取值。
  */
 public final class GatewayErrors {

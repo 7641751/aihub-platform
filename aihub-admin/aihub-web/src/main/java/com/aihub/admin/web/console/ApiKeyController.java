@@ -22,7 +22,7 @@ import java.util.List;
  * API Key 控制面接口（{@code /api/api-keys}，D11）：由 {@link ConsoleAuthFilter} 守门
  * （ADMIN 可读写、VIEWER 只读），本类只做「HTTP DTO ↔ 服务层入参」的转换与 {@link ApiResponse} 包装。
  *
- * <p><b>响应契约是 admin 信封</b>（{@code {"code","message","data"}}），**不是** gateway {@code /v1}
+ * <p><b>响应契约是 admin 信封</b>（{@code {"code","message","data"}}），<b>不是</b> gateway {@code /v1}
  * 的 OpenAI 兼容体。
  *
  * <p><b>明文只在一个响应里出现</b>：{@code POST /api/api-keys} 的 {@code data.plaintextKey}。
@@ -32,7 +32,7 @@ import java.util.List;
  * 无法用一个查询参数跨租户读。计划只定死了 {@code ApiKeyAdminService.list(long tenantId)}，来源由本类
  * 决定 —— 这是最小惊讶且 fail-closed 的那个选择。
  *
- * <p><b>错误一律走 {@link BizException} → {@code GlobalExceptionHandler}**
+ * <p><b>错误一律走 {@link BizException} → {@code GlobalExceptionHandler}</b>
  * （{@code INVALID_PARAM} 400 / {@code NOT_FOUND} 404 / {@code UNAUTHORIZED} 401），本类不写自定义错误体。
  */
 @RestController

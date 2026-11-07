@@ -48,31 +48,31 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * M5 Task 2 的**线上契约**：上传（同步半段）—— 原子落盘 + sha256 去重 + 审计 + 列表边界。
+ * M5 Task 2 的<b>线上契约</b>：上传（同步半段）—— 原子落盘 + sha256 去重 + 审计 + 列表边界。
  *
- * <p><b>真容器 + 真 HTTP + 真令牌</b>，复用**已有**的 Spring 上下文（继承 {@link AbstractIntegrationTest}）。
- * 刻意**不**为存储根目录声明 {@code @TestPropertySource} / {@code @DynamicPropertySource}：改属性会改变
+ * <p><b>真容器 + 真 HTTP + 真令牌</b>，复用<b>已有</b>的 Spring 上下文（继承 {@link AbstractIntegrationTest}）。
+ * 刻意<b>不</b>为存储根目录声明 {@code @TestPropertySource} / {@code @DynamicPropertySource}：改属性会改变
  * 上下文缓存键 ⇒ fork 出第 8 个上下文，违反 M5 的「{@code Tomcat started on port} 保持 7」硬约束。
- * 存储根目录因此用 {@code application.yml} 的**默认值**（{@code target/kb-storage}，可丢弃），
- * 每个用例在 {@code @BeforeEach} 里**按租户**清自己的子目录。
+ * 存储根目录因此用 {@code application.yml} 的<b>默认值</b>（{@code target/kb-storage}，可丢弃），
+ * 每个用例在 {@code @BeforeEach} 里<b>按租户</b>清自己的子目录。
  *
- * <p><b>「无残留文件」断言必须定向</b>：只查 {@code {root}/{tenantId}/} 子目录，**不是**整个根目录 ——
+ * <p><b>「无残留文件」断言必须定向</b>：只查 {@code {root}/{tenantId}/} 子目录，<b>不是</b>整个根目录 ——
  * 容器与根目录都是 JVM 级共享的，全根断言会变成顺序依赖。
  *
  * <p><b>本项目没有 multipart 测试先例</b>：请求体自搭 {@link MultiValueMap} + {@link ByteArrayResource}
- * （覆写 {@link NamedByteArrayResource#getFilename()}），{@code tenantId} 作为**文本 part** 一起发。
+ * （覆写 {@link NamedByteArrayResource#getFilename()}），{@code tenantId} 作为<b>文本 part</b> 一起发。
  * {@code ConsoleAuthFilter} 不读 body，因此不会吃掉 multipart 流。
  *
- * <p>审计断言按**本次文档 id**（自增主键，不会跨用例复用）+ {@code action} 定向查，绝不做全表计数
+ * <p>审计断言按<b>本次文档 id</b>（自增主键，不会跨用例复用）+ {@code action} 定向查，绝不做全表计数
  * （{@code audit_log} 是共享表）。
  *
  * <p><b>唯一一处 {@code @TestPropertySource} 是控制台签名密钥</b>（D16：{@code application.yml} 对
- * {@code aihub.console.secret} **刻意没有默认值**，
+ * {@code aihub.console.secret} <b>刻意没有默认值</b>，
  * 空 = 门关着 ⇒ 集成测试必须自己注入一把合规的）：下面这把字面量与 {@code ConsoleLoginIntegrationTest} /
- * {@code ApiKeyAdminIntegrationTest} **逐字相同**，且本类**不加** {@code @Import} —— 两件事合起来才让本类
- * **共用它们那个已有的 Spring 上下文**（上下文缓存键由合并后的配置决定）。
- * 这是本项目的硬约束：套件里 {@code Tomcat started on port} 的次数必须保持 **7**；换个密钥字面量、
- * 或加一个 {@code @Import}（哪怕只导入一个测试专用配置类），都会 fork 出**第 8 个**上下文 ——
+ * {@code ApiKeyAdminIntegrationTest} <b>逐字相同</b>，且本类<b>不加</b> {@code @Import} —— 两件事合起来才让本类
+ * <b>共用它们那个已有的 Spring 上下文</b>（上下文缓存键由合并后的配置决定）。
+ * 这是本项目的硬约束：套件里 {@code Tomcat started on port} 的次数必须保持 <b>7</b>；换个密钥字面量、
+ * 或加一个 {@code @Import}（哪怕只导入一个测试专用配置类），都会 fork 出<b>第 8 个</b>上下文 ——
  * {@code ChannelAdminIntegrationTest:589} 已经用一次实测记下过这个坑。
  */
 @TestPropertySource(properties = {
@@ -105,7 +105,7 @@ class KbUploadIntegrationTest extends AbstractIntegrationTest {
     @LocalServerPort
     private int port;
 
-    /** 与生产 {@code application.yml} 同一个键；测试**只读**它，不改它。 */
+    /** 与生产 {@code application.yml} 同一个键；测试<b>只读</b>它，不改它。 */
     @Value("${aihub.kb.storage.root:target/kb-storage}")
     private String storageRoot;
 
@@ -257,8 +257,8 @@ class KbUploadIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 原始 socket 发一条**被截断**的 multipart 请求：{@code Content-Length} 声明的长度**大于**实际发送的
-     * 字节数，写完后**半关闭**（{@code shutdownOutput}）让服务器读到 EOF、但还能把 4xx 写回来。
+     * 原始 socket 发一条<b>被截断</b>的 multipart 请求：{@code Content-Length} 声明的长度<b>大于</b>实际发送的
+     * 字节数，写完后<b>半关闭</b>（{@code shutdownOutput}）让服务器读到 EOF、但还能把 4xx 写回来。
      * 返回解析出的 HTTP 状态码。
      */
     private int postTruncatedMultipart(String path, long tenantId, String filename, int declaredLength, int actualBytes)

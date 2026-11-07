@@ -26,12 +26,12 @@ import java.util.List;
  * <p><b>响应契约是 admin 信封</b>（{@code {"code","message","data"}}）。
  *
  * <p><b>{@code rate_limit_policy} 是租户维度资源（R2/R3.2）</b>：写是平台级（{@code tenantId} 来自请求体），
- * 但列表缺省只回**令牌里的 {@code tenantId}**（最小权限）—— 本类因此从 claims 取租户，而不是接受查询参数。
+ * 但列表缺省只回<b>令牌里的 {@code tenantId}</b>（最小权限）—— 本类因此从 claims 取租户，而不是接受查询参数。
  *
  * <p><b>{@code POST} = upsert</b>（先停用同维度旧 ACTIVE 行、再插新 ACTIVE 行）；
  * <b>{@code DELETE} = 软停用</b>（置 {@code INACTIVE}、不删行）。
  *
- * <p><b>错误一律走 {@link BizException} → {@code GlobalExceptionHandler}**
+ * <p><b>错误一律走 {@link BizException} → {@code GlobalExceptionHandler}</b>
  * （{@code INVALID_PARAM} 400 / {@code NOT_FOUND} 404），本类不写任何自定义错误体。
  */
 @RestController

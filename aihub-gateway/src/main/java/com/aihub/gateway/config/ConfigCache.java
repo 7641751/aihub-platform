@@ -14,24 +14,24 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 两级缓存的存储层（§6.3）：Caffeine（本机，30s TTL）+ Redis（跨实例共享）。**不含回源逻辑**
+ * 两级缓存的存储层（§6.3）：Caffeine（本机，30s TTL）+ Redis（跨实例共享）。<b>不含回源逻辑</b>
  * —— 回源、singleflight 与版本比对都在 {@link ConfigClient} 里，这样本类只关心「怎么存取」。
  *
- * <p>本地只有**一个** key（整个快照是一份文档），因此 Caffeine 的 {@code maximumSize} 只是形式上的
+ * <p>本地只有<b>一个</b> key（整个快照是一份文档），因此 Caffeine 的 {@code maximumSize} 只是形式上的
  * 兜底；真正的失效手段是 TTL 与两个失效入口（{@link #invalidateLocal()} /
  * {@link #invalidateAllCaches(long)}，后者的语义见那条 javadoc）。
  *
  * <p>Redis 侧用 {@link ConfigSnapshotCodec} 的分隔符载荷（决策 4），而不是 JSON：
- * 「缓存载荷」与「本地载荷」共用一份编解码只需维护一个转义器。**这不是跨服务契约**
+ * 「缓存载荷」与「本地载荷」共用一份编解码只需维护一个转义器。<b>这不是跨服务契约</b>
  * （admin 不读它，admin 只发 JSON）。
  *
  * <p><b>两级写入都拒绝「版本倒退」</b>（2026 二次复审修复 3）：回源是并发的（单飞只保证
  * 「同一时刻一次」，不保证「先发先回」），一个晚到的旧响应本来可以把新快照覆盖掉 —— 本地与 Redis
- * 两侧都有这个方向，两侧都拒绝。差别在**等号**（三次复审修复 1）：
+ * 两侧都有这个方向，两侧都拒绝。差别在<b>等号</b>（三次复审修复 1）：
  * <ul>
- *   <li>本地层 {@link #putLocal}：同版本保留**已有**那份 —— key 还在，说明这份副本刚被服务出去过；</li>
- *   <li>Redis 层 {@link #writeRedis}：同版本**必须重写** —— 条目可能已经过期，而回源拿到的往往就是
- *       「控制面没变」的那一个版本。拦掉等号会让共享缓存**永远**填不回去：此后每个实例改以本地 TTL
+ *   <li>本地层 {@link #putLocal}：同版本保留<b>已有</b>那份 —— key 还在，说明这份副本刚被服务出去过；</li>
+ *   <li>Redis 层 {@link #writeRedis}：同版本<b>必须重写</b> —— 条目可能已经过期，而回源拿到的往往就是
+ *       「控制面没变」的那一个版本。拦掉等号会让共享缓存<b>永远</b>填不回去：此后每个实例改以本地 TTL
  *       的节奏（≈2 次/分钟）去敲 admin，正是两级缓存要消除的那种控制面压力。</li>
  * </ul>
  * 这条守卫只影响「覆盖已有条目」，不影响「首次写入」，因此不改变正常回填语义。
@@ -54,12 +54,12 @@ public class ConfigCache {
 
     private volatile boolean redisUsable = true;
     /**
-     * 本实例在 Redis 上**观察到**的最高 version：一次成功的写入、或一次成功的读取
+     * 本实例在 Redis 上<b>观察到</b>的最高 version：一次成功的写入、或一次成功的读取
      * （{@link #readRedis()} 里的 {@code accumulateAndGet(..., Math::max)}）都会把它推到观察到的值。
      * 用它做「版本倒退」守卫，是为了避免每次回填都先读一次 Redis 去比版本（那样每次成功回源会多一次
      * RTT）。它的初值是「从未观察到」。
      *
-     * <p>它**不是**「Redis 里现在那一份的版本」—— 条目随时可能过期，也可能已经被别的实例写得更新。
+     * <p>它<b>不是</b>「Redis 里现在那一份的版本」—— 条目随时可能过期，也可能已经被别的实例写得更新。
      * 因此它只能证明「某个版本曾经存在过」，这正是 {@link #writeRedis} 拒绝更旧版本所需要的全部信息。
      */
     private final AtomicLong observedRedisVersion = new AtomicLong(NO_VERSION);
@@ -71,10 +71,10 @@ public class ConfigCache {
     /**
      * 测试专用接缝：本地 TTL 的读数改由注入的 {@link Ticker} 提供。
      *
-     * <p>它存在的理由是**一条真实的时间脆点**：`ConfigCacheTest` 里有一条用例必须观察到
+     * <p>它存在的理由是<b>一条真实的时间脆点</b>：`ConfigCacheTest` 里有一条用例必须观察到
      * 「一个刚写入、TTL 只有 80 ms 的本地条目」，而用真实时钟做这件事意味着任何 ≥80 ms 的停顿
      * （GC、CI 负载、整反应堆并发跑）都会把它翻成空 —— 那条用例实测在全量跑里红过一次
-     * （FAIL/PASS/PASS）。推进假时钟能把它变成**确定**的，而不必放宽任何断言。
+     * （FAIL/PASS/PASS）。推进假时钟能把它变成<b>确定</b>的，而不必放宽任何断言。
      *
      * <p>生产走 {@link Ticker#systemTicker()}（单调的纳秒读数），与改动前完全一致。
      */
@@ -95,24 +95,24 @@ public class ConfigCache {
     /**
      * 该 {@code (tenantId, period)} 的额度（Task 13：网关从快照里读额度，不连数据库）。
      *
-     * <p>额度是快照的一部分（{@link ConfigSnapshot#quota(long, String)}），本方法把它从**本地层里
-     * 那份快照**取出来 —— 网关在每次请求上都会先经 {@code ConfigClient.current()}（它会把被服务的快照
+     * <p>额度是快照的一部分（{@link ConfigSnapshot#quota(long, String)}），本方法把它从<b>本地层里
+     * 那份快照</b>取出来 —— 网关在每次请求上都会先经 {@code ConfigClient.current()}（它会把被服务的快照
      * 回填进本地层），因此到这里时本地层通常已经持有当前快照。
      *
      * <p><b>按「租户 + 周期」精确查找</b>（{@code period} 是 UTC 的 {@code YYYYMM}）：同一租户在不同
      * 周期各有额度行，跨周期取错会让错误的预算生效 —— 这正是本方法不能只按 {@code tenantId} 找的原因。
      *
-     * <p>返回空表示**不限**（决策 D15：快照里没有该 {@code (tenant, period)} 的行 = 与 M3 一致）；
-     * 返回的行里 {@code tokenLimit == 0} 同样表示**不限**。判定「是否受限」由调用方（配额过滤器）负责。
+     * <p>返回空表示<b>不限</b>（决策 D15：快照里没有该 {@code (tenant, period)} 的行 = 与 M3 一致）；
+     * 返回的行里 {@code tokenLimit == 0} 同样表示<b>不限</b>。判定「是否受限」由调用方（配额过滤器）负责。
      */
     public Optional<QuotaDescriptor> quota(long tenantId, String period) {
         return local().flatMap(snapshot -> snapshot.quota(tenantId, period));
     }
 
     /**
-     * 一级写入，**带版本守卫**：不比手上那份新就不覆盖。
+     * 一级写入，<b>带版本守卫</b>：不比手上那份新就不覆盖。
      *
-     * <p>{@code asMap().merge} 在 Caffeine 的 {@code ConcurrentMap} 视图上是**原子**的
+     * <p>{@code asMap().merge} 在 Caffeine 的 {@code ConcurrentMap} 视图上是<b>原子</b>的
      * （{@code compute} 语义），所以并发的两次回填不会交错出「旧盖新」的结果。
      */
     public void putLocal(ConfigSnapshot snapshot) {
@@ -124,9 +124,9 @@ public class ConfigCache {
     }
 
     /**
-     * 失效的**完整**含义：本地、共享条目、写入水位三者一起动。
+     * 失效的<b>完整</b>含义：本地、共享条目、写入水位三者一起动。
      *
-     * <p>只清本地是 M3 登记的缺口：紧接着的 {@code resolve()} 会读到 Redis 里**同样陈旧**的
+     * <p>只清本地是 M3 登记的缺口：紧接着的 {@code resolve()} 会读到 Redis 里<b>同样陈旧</b>的
      * 共享条目并采用它，于是「配置变了」这个信号对多实例部署完全没有效果（实测 101 秒仍不可见）。
      *
      * <p><b>水位要抬到消息里的版本，而不是重置成 {@code NO_VERSION}</b>：重置会拆掉
@@ -153,7 +153,7 @@ public class ConfigCache {
      *
      * <p><b>读到的版本同样抬升写入水位</b>（三次复审修复 1）：一次观察到的 v10 就是「v10 已知存在」
      * 的证据。少了这一步，「回源在途时读到更新的 v10、随后那条更旧的 v5 才回来」会把 v5 写进
-     * **共享**条目、毒化所有其他实例（本地那一层由 {@link #putLocal} 的守卫正确挡住）。
+     * <b>共享</b>条目、毒化所有其他实例（本地那一层由 {@link #putLocal} 的守卫正确挡住）。
      */
     public Optional<ConfigSnapshot> readRedis() {
         try {
@@ -173,19 +173,19 @@ public class ConfigCache {
     }
 
     /**
-     * 二级写入；失败只记日志（缓存是可丢的派生数据）。**带版本守卫**：version 必须**不旧于**本实例
+     * 二级写入；失败只记日志（缓存是可丢的派生数据）。<b>带版本守卫</b>：version 必须<b>不旧于</b>本实例
      * 在 Redis 上观察到的那一份（{@link #observedRedisVersion}）。
      *
      * <p><b>相等必须放行</b>（三次复审修复 1）。条目过期之后回源拿到的往往还是同一个版本（控制面
      * 根本没变），若把等号也拦掉，本地层会正常回填而共享缓存永远填不回去 —— 此后每个实例都以本地
      * TTL 的节奏（≈2 次/分钟/实例）去敲 admin，而不是大约每 10 分钟一次；Redis 重启或一次瞬时写
-     * 失败对那个版本留下同样的永久后果。**严格更旧**的版本仍然被拒绝 —— 那才是本守卫最初要挡的回归。
+     * 失败对那个版本留下同样的永久后果。<b>严格更旧</b>的版本仍然被拒绝 —— 那才是本守卫最初要挡的回归。
      *
      * <p>水位由「写入成功」与「{@link #readRedis()} 读到」共同推进，所以「回源在途时从 Redis 读到
-     * 一个更新的版本，随后那条更旧的回源结果回来」这条**同进程**路径已经被拦住。它**不需要**
+     * 一个更新的版本，随后那条更旧的回源结果回来」这条<b>同进程</b>路径已经被拦住。它<b>不需要</b>
      * Lua/CAS（与本节早期版本里的披露相反）：观察与写入都在本进程里，水位就是那次观察的结论。
      *
-     * <p>仍然拦不住的是**跨进程**的那一半：本实例既没读到过、也没写过别的实例刚写进去的 v7 时，
+     * <p>仍然拦不住的是<b>跨进程</b>的那一半：本实例既没读到过、也没写过别的实例刚写进去的 v7 时，
      * 它手上那条更旧的 v5 会把 v7 覆盖掉。要堵这一半，必须在 Redis 侧用 Lua/CAS 把「读-比-写」
      * 做成一个原子动作（M3 不具备条件；决策 16 之下 M4 之前也没有别的写入方）。
      */
@@ -212,7 +212,7 @@ public class ConfigCache {
         return redisUsable;
     }
 
-    /** 「谁更新」的合并函数：平局时保留**已有**那份（同 version 的两份快照里，先到的那份已经服务出去了）。 */
+    /** 「谁更新」的合并函数：平局时保留<b>已有</b>那份（同 version 的两份快照里，先到的那份已经服务出去了）。 */
     private static ConfigSnapshot newer(ConfigSnapshot existing, ConfigSnapshot candidate) {
         return candidate.version() > existing.version() ? candidate : existing;
     }

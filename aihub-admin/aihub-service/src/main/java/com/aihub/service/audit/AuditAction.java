@@ -1,9 +1,9 @@
 package com.aihub.service.audit;
 
 /**
- * {@code audit_log.action} 的取值集合（决策 D1/D8）。
+ * {@code audit_log.action} 的取值集合（M4 决策 1 / 决策 8）。
  *
- * <p>取值刻意是**扁平常量**而不是枚举：这张表是审计承载物，读它的人（运维、合规、Task 15 的对账、
+ * <p>取值刻意是<b>扁平常量</b>而不是枚举：这张表是审计承载物，读它的人（运维、合规、Task 15 的对账、
  * SQL 客户端）拿到的就是裸字符串；一旦用枚举，落库形态就会被 {@code @EnumValue} / ORM 的默认
  * {@code name()} 策略在无声中改变，而审计的历史行不能被一次重构改写含义。
  *
@@ -11,7 +11,7 @@ package com.aihub.service.audit;
  * 便于「按对象看变更史」的查询（V2 里有 {@code idx_audit_log_target (target_type, target_id)}）。
  *
  * <p>{@code action} 列是 {@code VARCHAR(32)}：新增常量时必须先确认长度放得下 ——
- * 超长在严格模式下是硬失败（好事），在非严格模式下会被**静默截断**成另一个动作（坏事）。
+ * 超长在严格模式下是硬失败（好事），在非严格模式下会被<b>静默截断</b>成另一个动作（坏事）。
  */
 public final class AuditAction {
 
@@ -57,13 +57,13 @@ public final class AuditAction {
     public static final String KB_DOCUMENT_UPLOAD = "KB_DOCUMENT_UPLOAD";
 
     /**
-     * 文档进入**失败终态**（M5 Task 6，D7/D13）。由**系统**写（{@code actor_type=SYSTEM}），来源只有两处：
+     * 文档进入<b>失败终态</b>（M5 Task 6，D7/D13）。由<b>系统</b>写（{@code actor_type=SYSTEM}），来源只有两处：
      * <ul>
-     *   <li>{@code KbMessageRecoverer}：消费重试耗尽、消息被路由到 DLQ **之前**（D7："进 DLQ"与"置 FAILED"必须同一处）；</li>
+     *   <li>{@code KbMessageRecoverer}：消费重试耗尽、消息被路由到 DLQ <b>之前</b>（D7："进 DLQ"与"置 FAILED"必须同一处）；</li>
      *   <li>{@code KbParseService.markNoText}：切出 0 段（空 / 全空白文档、无文本层 PDF，D14）——
-     *       这条路**不是异常**，因此它自己写这条审计（裁定 #6②）。</li>
+     *       这条路<b>不是异常</b>，因此它自己写这条审计（裁定 #6②）。</li>
      * </ul>
-     * detail 只放**非敏感**的失败原因摘要（异常类名 + 截断后的消息），**绝不记**原件内容 / chunk 文本 / 向量。
+     * detail 只放<b>非敏感</b>的失败原因摘要（异常类名 + 截断后的消息），<b>绝不记</b>原件内容 / chunk 文本 / 向量。
      */
     public static final String KB_DOCUMENT_FAILED = "KB_DOCUMENT_FAILED";
 

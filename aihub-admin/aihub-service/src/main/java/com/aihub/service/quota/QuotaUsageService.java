@@ -15,37 +15,37 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 
 /**
- * 配额用量的**只读**出口（{@code GET /api/quotas/usage}）。
+ * 配额用量的<b>只读</b>出口（{@code GET /api/quotas/usage}）。
  *
  * <h2>为什么需要它</h2>
- * 配额的真实已用量**只在 Redis 桶**（{@code aihub:quota:{tenantId}:{YYYYMM}} 的
+ * 配额的真实已用量<b>只在 Redis 桶</b>（{@code aihub:quota:{tenantId}:{YYYYMM}} 的
  * {@link QuotaKeys#FIELD_TOKENS}/{@link QuotaKeys#FIELD_REQUESTS}）里：那是
  * {@code QuotaScript} 预扣与 {@code QuotaCorrector} 校正共同维护的账，也是判定"会不会被拒"所读的那个数。
- * MySQL 的 {@code quota.token_used}/{@code request_used} 是**预留但未接线的列**（全仓库唯一的
+ * MySQL 的 {@code quota.token_used}/{@code request_used} 是<b>预留但未接线的列</b>（全仓库唯一的
  * {@code UPDATE quota} 不写它们；每日对账按 D12 也"从不写"）⇒ {@code GET /api/quotas} 返回的
- * {@code tokenUsed} 恒为 0，运维要看用量在此之前**没有任何出口**。
+ * {@code tokenUsed} 恒为 0，运维要看用量在此之前<b>没有任何出口</b>。
  *
  * <h2>口径（随数一起返回，不许客户端猜）</h2>
- * 桶里是**预扣估算**累计（{@code QuotaEstimator} 刻意偏保守、偏大），**不是**账单口径 —— 因此
+ * 桶里是<b>预扣估算</b>累计（{@code QuotaEstimator} 刻意偏保守、偏大），<b>不是</b>账单口径 —— 因此
  * {@link UsageView#source()} 恒为 {@link #SOURCE_REDIS_BUCKET}、{@link UsageView#estimate()} 恒为 true。
- * 选它的理由只有一个：**所见即所拦**（与判定同一个数）。真实落账口径请用
+ * 选它的理由只有一个：<b>所见即所拦</b>（与判定同一个数）。真实落账口径请用
  * {@code GET /api/billing/daily}，两者的差额由每日对账（D12）负责报告。
  *
  * <h2>三条不变量</h2>
  * <ol>
- *   <li><b>只读</b>（D12 红线）：不写 {@code quota} 表（**也不惰性物化** —— 那是
- *       {@link QuotaAdminService#getOrCreate} 的行为，本类刻意**不用**它）、不写桶、不刷新桶的 TTL；</li>
+ *   <li><b>只读</b>（D12 红线）：不写 {@code quota} 表（<b>也不惰性物化</b> —— 那是
+ *       {@link QuotaAdminService#getOrCreate} 的行为，本类刻意<b>不用</b>它）、不写桶、不刷新桶的 TTL；</li>
  *   <li><b>不改判</b>：本类的 {@code remaining} 与 {@code QuotaScript} 的
  *       {@code math.max(0, limit - used)}、{@code -1 = 不限} 逐字同规则 —— 两套算法迟早会漂移，
  *       而"运维看到的剩余"与"判定用的剩余"不一致是最难查的一类不一致；</li>
  *   <li><b>读不到就报错，绝不用 0 冒充</b>：Redis 不可用 ⇒ {@code INTERNAL_ERROR}；桶值畸形 ⇒
  *       {@code INTERNAL_ERROR}（缺陷不是降级，与每日对账对同一列的处理同款）。方向与网关侧配额的
- *       fail-open（D7）**相反**，因为读接口没有"放行"这个概念。</li>
+ *       fail-open（D7）<b>相反</b>，因为读接口没有"放行"这个概念。</li>
  * </ol>
  *
  * <p><b>桶缺失不是错误</b>：该周期还没发生任何预扣时两个字段都读回 {@code null} ⇒ 报
  * {@code used=0} + {@link UsageView#bucketMissing()} {@code = true}（显式标记，免得"没有记录"
- * 看起来像"用了 0"）。字段被写成**空串**算"存在但为 0"，不算缺失。
+ * 看起来像"用了 0"）。字段被写成<b>空串</b>算"存在但为 0"，不算缺失。
  *
  * <p><b>租户维度只由调用方（控制器）从令牌里取</b>（R3.2，least privilege）：本类不提供"指定别的租户"
  * 的入口，也不做跨租户列举。
@@ -72,13 +72,13 @@ public class QuotaUsageService {
     /**
      * 用量视图。
      *
-     * <p>{@code tokenRemaining}/{@code requestRemaining} 由**服务端**算好（{@code -1} = 该维不限，D15）：
+     * <p>{@code tokenRemaining}/{@code requestRemaining} 由<b>服务端</b>算好（{@code -1} = 该维不限，D15）：
      * "0 的限额表示不限"这条语义在项目里只允许有一处定义，不许推给客户端。
      *
      * @param unlimited      两个限额都 ≤ 0（= 无配额行 / 零额度行）⇒ 该租户本周期不受额度约束
      * @param source         口径来源，恒为 {@link #SOURCE_REDIS_BUCKET}
-     * @param estimate       {@code true} = 桶里是预扣**估算**而非真实 usage（恒为 true）
-     * @param bucketMissing  {@code true} = 该周期**还没有任何预扣记录**（桶的两个字段都不存在）；
+     * @param estimate       {@code true} = 桶里是预扣<b>估算</b>而非真实 usage（恒为 true）
+     * @param bucketMissing  {@code true} = 该周期<b>还没有任何预扣记录</b>（桶的两个字段都不存在）；
      *                       此时 {@code used} 全是 0，但这与"确实用了 0"是两件事
      */
     public record UsageView(long tenantId, String period, long tokenLimit, long tokenUsed, long tokenRemaining,
@@ -136,7 +136,7 @@ public class QuotaUsageService {
         }
     }
 
-    /** 桶值 → 已用量：{@code null}/空串算 0（桶没写过或写过空串），畸形值算**缺陷**（响亮失败）。 */
+    /** 桶值 → 已用量：{@code null}/空串算 0（桶没写过或写过空串），畸形值算<b>缺陷</b>（响亮失败）。 */
     private static long parse(String raw, String key, String field) {
         if (raw == null || raw.isBlank()) {
             return 0L;
@@ -153,7 +153,7 @@ public class QuotaUsageService {
 
     /**
      * 剩余量：限额为正时 {@code max(0, limit - used)}，否则 {@code -1}（该维不限）。
-     * **与 {@code QuotaScript} 逐字同规则**（含"超用夹到 0"这一条）。
+     * <b>与 {@code QuotaScript} 逐字同规则</b>（含"超用夹到 0"这一条）。
      */
     private static long remaining(long limit, long used) {
         return limit > 0L ? Math.max(0L, limit - used) : UNLIMITED;

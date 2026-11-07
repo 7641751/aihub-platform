@@ -24,32 +24,32 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * **Lua 令牌桶在真 Redis 上的证据**：容器（{@code redis:7-alpine}）由 {@link AbstractIntegrationTest}
+ * <b>Lua 令牌桶在真 Redis 上的证据</b>：容器（{@code redis:7-alpine}）由 {@link AbstractIntegrationTest}
  * 单例启动，被测的脚本与调用约定就是网关跑的那一份 —— {@link RateLimitScript#SCRIPT} 是共享模块里的
  * 同一个常量，网关的 {@code LuaTokenBucket.SCRIPT} 直接就是它。
  *
  * <h2>为什么放在 admin 侧</h2>
- * 网关的测试**明令禁止依赖 Docker**：{@code RedisRateLimiterTest} 的类注释把「脚本真的在 Redis 里
+ * 网关的测试<b>明令禁止依赖 Docker</b>：{@code RedisRateLimiterTest} 的类注释把「脚本真的在 Redis 里
  * 原子地补充/拒绝」这条行为证据明确委托给了本类。本模块（`aihub-web`）是仓库里唯一带
  * Testcontainers 的模块。
  *
  * <h2>「判定来自 Redis」是怎么被钉住的</h2>
- * 模块图上有一条硬约束：`aihub-web` 的测试**看不到** {@code com.aihub.gateway.ratelimit} 包
+ * 模块图上有一条硬约束：`aihub-web` 的测试<b>看不到</b> {@code com.aihub.gateway.ratelimit} 包
  * （`aihub-web` 只依赖 common/dao/service/mq；根 pom 里网关也不是它的依赖），因此本类无法直接调用
  * {@code RedisRateLimiter.tryConsume}、也无法断言 {@code RateLimitDecision.source()} ——
- * 而派单又禁止为此添加依赖。于是这里改用**前提与结论的分解**，两侧相乘才等于
+ * 而派单又禁止为此添加依赖。于是这里改用<b>前提与结论的分解</b>，两侧相乘才等于
  * 「真容器上 {@code source() == REDIS}」：
  * <ul>
  *   <li>（网关侧，无 Docker）{@code RedisRateLimiterTest} 钉住两件事：脚本对象用的是共享常量与
  *       {@code List.class} 结果类型、ARGV 向量是 {@code {now, qps, burst, ttlMillis}}；
- *       并且**恰好 3 个 {@code Long}** 的返回值会被判成 {@code Source.REDIS}；</li>
+ *       并且<b>恰好 3 个 {@code Long}</b> 的返回值会被判成 {@code Source.REDIS}；</li>
  *   <li>（本类，真 Redis）{@link #redisReplyMatchesTheReturnContractThatYieldsSourceRedis} 钉住：
  *       同一个脚本、同一个 {@code List.class}、同一形状的 ARGV 在真容器上执行时，返回值非 null、
- *       恰好 3 个元素、元素的**运行时类型是 {@code java.lang.Long}** —— 于是生产代码的准入闸门
+ *       恰好 3 个元素、元素的<b>运行时类型是 {@code java.lang.Long}</b> —— 于是生产代码的准入闸门
  *       （{@code result == null || result.size() != 3}）与 {@code long allowed = result.get(0)}
  *       的拆箱都不可能失败。</li>
  * </ul>
- * 这道分解要防的正是「返回类型不匹配**不会响亮地失败**」：元素若在运行时是 {@code Integer}，
+ * 这道分解要防的正是「返回类型不匹配<b>不会响亮地失败</b>」：元素若在运行时是 {@code Integer}，
  * {@code long allowed = result.get(0)} 会抛 {@code ClassCastException}，被生产代码 catch 成
  * 「Redis 不可用」→ 从此永远走本机桶，只留下一条 WARN。
  * {@link #theContractAssertionRejectsRealRedisRepliesOfTheWrongShape} 用真 Redis 返回的两种错形状
@@ -58,12 +58,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <h2>原子性 / 键布局 / 服务端补充</h2>
  * <ul>
  *   <li>{@link #concurrentRequestsNeverExceedBurst}：20 线程 × 20 次打同一个 key，{@code burst=25}、
- *       {@code qps=0}，且 400 次调用共用**同一个调用方时间戳**（`elapsed` 恒为 0，与墙钟和线程交错
+ *       {@code qps=0}，且 400 次调用共用<b>同一个调用方时间戳</b>（`elapsed` 恒为 0，与墙钟和线程交错
  *       都无关）⇒ 恰好放行 25 次；服务端 {@code t} 也被恰好扣到 0（两本独立的账互相交叉验证）。
  *       把「补充 + 判定 + 扣减」拆成多次客户端往返（HGET → 判定 → HSET）会显著超发。</li>
- *   <li>{@link #bucketKeyIsAHashWithTheDocumentedFieldsAndTtl}：键在真 Redis 里是 **Hash**、字段恰好是
+ *   <li>{@link #bucketKeyIsAHashWithTheDocumentedFieldsAndTtl}：键在真 Redis 里是 <b>Hash</b>、字段恰好是
  *       契约里的 {@code t}/{@code k}、并且每次调用都重新 {@code PEXPIRE}。</li>
- *   <li>{@link #refillIsComputedServerSideFromTheCallerSuppliedClock}：只把**时钟参数**往前推，
+ *   <li>{@link #refillIsComputedServerSideFromTheCallerSuppliedClock}：只把<b>时钟参数</b>往前推，
  *       耗尽（服务器端 {@code t=0}）的桶就重新放行，且补充结果由脚本落盘 —— 补充是 Redis 算的，
  *       不是 Java 纯算术镜像算的。</li>
  * </ul>
@@ -114,9 +114,9 @@ class RedisTokenBucketIntegrationTest extends AbstractIntegrationTest {
     // ------------------------------------------------------------------ 返回值契约
 
     /**
-     * **证明判定来自 Redis 的那个用例。** 见类注释：本类看不到 {@code RateLimitDecision}，
+     * <b>证明判定来自 Redis 的那个用例。</b> 见类注释：本类看不到 {@code RateLimitDecision}，
      * 因此这里断言的是 {@code RedisRateLimiter} 那条唯一产出 {@code Source.REDIS} 的分支的
-     * **全部前提**，加上只有 Redis 路径才可能留下的服务端痕迹。
+     * <b>全部前提</b>，加上只有 Redis 路径才可能留下的服务端痕迹。
      */
     @Test
     void redisReplyMatchesTheReturnContractThatYieldsSourceRedis() {
@@ -144,7 +144,7 @@ class RedisTokenBucketIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 反证：上面那道契约断言**会失败**。两种形状都来自真 Redis（不是构造出来的 Java 对象），
+     * 反证：上面那道契约断言<b>会失败</b>。两种形状都来自真 Redis（不是构造出来的 Java 对象），
      * 正好对应生产代码的两处准入 —— 元素拆箱与 {@code size() != 3}。
      */
     @Test
@@ -199,7 +199,7 @@ class RedisTokenBucketIntegrationTest extends AbstractIntegrationTest {
                 .isEqualTo(3_600_000L);
     }
 
-    /** 时间戳是参数 ⇒ 用一个「未来」的时刻就能立刻观察到补充，**不需要 sleep**。 */
+    /** 时间戳是参数 ⇒ 用一个「未来」的时刻就能立刻观察到补充，<b>不需要 sleep</b>。 */
     @Test
     void tokensRefillAccordingToQps() {
         for (int i = 0; i < 3; i++) {
@@ -227,7 +227,7 @@ class RedisTokenBucketIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * **服务端补充**：桶在 Redis 里被耗尽（服务端 {@code t == 0}），只把**调用方时钟**往前推，
+     * <b>服务端补充</b>：桶在 Redis 里被耗尽（服务端 {@code t == 0}），只把<b>调用方时钟</b>往前推，
      * 重新放行，并且补充的结果由脚本落盘 —— 补充是 Redis 算的，不是 Java 纯算术镜像算的。
      */
     @Test
@@ -253,7 +253,7 @@ class RedisTokenBucketIntegrationTest extends AbstractIntegrationTest {
     // ------------------------------------------------------------------ 并发原子性
 
     /**
-     * **原子性的可证伪证据**：20 个线程各尝试 20 次（共 400 次），桶容量 25、qps=0 →
+     * <b>原子性的可证伪证据</b>：20 个线程各尝试 20 次（共 400 次），桶容量 25、qps=0 →
      * 恰好 25 次被放行。所有调用共用 {@link #FIXED_NOW}（`elapsed` 恒为 0）⇒ 与墙钟、与线程交错无关。
      * 分步实现（HGET 之后 HSET，两次客户端往返）会显著超过 25；丢掉扣减则 400 次全放行。
      */

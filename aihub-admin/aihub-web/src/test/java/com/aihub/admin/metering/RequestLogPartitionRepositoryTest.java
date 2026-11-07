@@ -12,9 +12,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * {@code reorganizePmax} 的本地护栏（纯单元，不碰数据库、不起容器）。
  *
- * <p>这是给一条**会重写线上表数据**的 DDL 做入参校验：空列表会拼出
+ * <p>这是给一条<b>会重写线上表数据</b>的 DDL 做入参校验：空列表会拼出
  * {@code INTO (, PARTITION pmax …)} 这种非法语句，边界乱序 / 含 MAXVALUE 只会在语句发出去之后
- * 才被 MySQL 以 1493 拒绝。护栏必须在 {@code jdbcTemplate.execute} **之前**拦下来。
+ * 才被 MySQL 以 1493 拒绝。护栏必须在 {@code jdbcTemplate.execute} <b>之前</b>拦下来。
  *
  * <p>因此这里故意传 {@code null} 的 JdbcTemplate：只要护栏没有先抛
  * {@link IllegalArgumentException}，就会变成 {@link NullPointerException}（或真的去连库），

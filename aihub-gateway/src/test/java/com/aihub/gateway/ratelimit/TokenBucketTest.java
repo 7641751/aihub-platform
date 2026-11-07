@@ -5,11 +5,11 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 令牌桶的**纯算术**是「Redis Lua 实现」与「Redis 挂了时的本机实现」共享的单一真相：
+ * 令牌桶的<b>纯算术</b>是「Redis Lua 实现」与「Redis 挂了时的本机实现」共享的单一真相：
  * 两边的补充速率、封顶、拒绝时的退避时间都必须逐字一致，否则降级前后客户端会看到两种行为。
  * 因此这里把语义钉死，Redis 侧只负责「原子地调用它」。
  *
- * <p>令牌数用**千分之一**的整数（{@code tokensMilli}）存：浮点在 Lua 与 Java 两侧的取整规则
+ * <p>令牌数用<b>千分之一</b>的整数（{@code tokensMilli}）存：浮点在 Lua 与 Java 两侧的取整规则
  * 不完全一致，整数毫令牌让「同一状态、同一时刻」在两侧得到完全相同的判定。
  */
 class TokenBucketTest {

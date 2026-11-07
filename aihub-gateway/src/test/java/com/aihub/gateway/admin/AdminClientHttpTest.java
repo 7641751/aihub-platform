@@ -63,7 +63,7 @@ class AdminClientHttpTest {
     }
 
     /**
-     * 决策 14 消费者侧的**另一半**：admin 的响应里带数值主键时，它必须真的被读进视图。
+     * 决策 14 消费者侧的<b>另一半</b>：admin 的响应里带数值主键时，它必须真的被读进视图。
      * <p>上面那条用例的 fixture 里根本没有 {@code apiKeyId}，只覆盖了「缺失 → null」这一支；
      * 少了本条，把 JSON 键名写错（`apiKeyId` → `apiKeyID`）或把 {@code isNumber()} 判断写反
      * 都不会有任何测试变红 —— 网关会静默把所有 key 的 {@code apiKeyId} 都当成 null，
@@ -116,7 +116,7 @@ class AdminClientHttpTest {
      * 出厂默认 {@code aihub.internal.secret} 为空串：{@code InternalHmac.sign} 必抛。
      * 契约是「resolve 不抛异常」，所以这里必须拿到 {@code Optional.empty()}（调用方据此 401），
      * 而不是让 {@code IllegalStateException} 逃出去（那会变成 500）。
-     * 换句话说：签名必须发生在 {@code Mono.defer} **内部**，{@code onErrorResume} 才看得见它。
+     * 换句话说：签名必须发生在 {@code Mono.defer} <b>内部</b>，{@code onErrorResume} 才看得见它。
      */
     @Test
     void blankInternalSecretFailsClosedInsteadOfThrowing() {

@@ -25,7 +25,7 @@ import java.util.List;
  * （ADMIN 可读写、VIEWER 只读），本类只做「HTTP DTO ↔ 服务层入参」的转换与
  * {@link ApiResponse} 包装。
  *
- * <p><b>响应契约是 admin 信封</b>（{@code {"code","message","data"}}），**不是** gateway {@code /v1}
+ * <p><b>响应契约是 admin 信封</b>（{@code {"code","message","data"}}），<b>不是</b> gateway {@code /v1}
  * 的 OpenAI 兼容体 —— 两套契约不许混用。
  *
  * <p><b>明文密钥只在请求体里出现一次</b>：{@code apiKey} 被原样交给服务层，本类不记日志、
@@ -87,11 +87,11 @@ public class ChannelController {
     }
 
     /**
-     * 渠道探测（Task 11）：用渠道自己的 {@code baseUrl} + 密钥向上游打**一次**请求并回报可达性。
+     * 渠道探测（Task 11）：用渠道自己的 {@code baseUrl} + 密钥向上游打<b>一次</b>请求并回报可达性。
      *
-     * <p>它是**诊断动作**而不是数据面调用 ⇒ **不做写审计**、**不检查渠道是否停用**（停用仍可探测）；
+     * <p>它是<b>诊断动作</b>而不是数据面调用 ⇒ <b>不做写审计</b>、<b>不检查渠道是否停用</b>（停用仍可探测）；
      * 渠道不存在时服务层抛 {@code NOT_FOUND}（404）。响应是 {@link ChannelProbeService.ProbeResult}，
-     * **绝不回显密钥**（{@code ChannelProbeService} 的类注释）。
+     * <b>绝不回显密钥</b>（{@code ChannelProbeService} 的类注释）。
      */
     @PostMapping("/{id}/probe")
     public ResponseEntity<ApiResponse<ChannelProbeService.ProbeResult>> probe(@PathVariable long id) {

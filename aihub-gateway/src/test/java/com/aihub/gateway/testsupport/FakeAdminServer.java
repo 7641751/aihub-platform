@@ -20,12 +20,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 基于 JDK 内置 {@link HttpServer} 的假 admin 内部接口：无需 Docker、无需 Redis，与
  * {@link FakeUpstream} 同款。每个 {@link #start()} 绑定随机端口；按入队顺序（FIFO）返回预置响应，
  * 队列空时返回 200 + 空 JSON。
- * <p>与 {@code FakeUpstream} 的唯一区别：这里记录 {@code getRawPath()}（**原始**路径），
+ * <p>与 {@code FakeUpstream} 的唯一区别：这里记录 {@code getRawPath()}（<b>原始</b>路径），
  * 因为「签名/请求打的是应用内相对路径而不是带前缀的 URL」正是要钉住的契约，用解码后的
  * {@code getPath()} 断言会掩盖一次编码/前缀改写。
  *
  * <p><b>按路径入队</b>（{@link #enqueueJsonForPath} / {@link #enqueueStalledJsonForPath}）：真实的
- * {@code AdminClient.Http} 会为**两个**内部接口回源 —— {@code POST /internal/api-keys/resolve} 与
+ * {@code AdminClient.Http} 会为<b>两个</b>内部接口回源 —— {@code POST /internal/api-keys/resolve} 与
  * {@code GET /internal/config/snapshot}。用同一个 FIFO 队列时，控制面快照那一跳会悄悄吃掉本来预置给
  * 密钥解析的响应（顺序还取决于控制面刷新的时机），于是"第几个请求拿到哪一份响应"变成不确定的。
  * 按路径分开之后，每条内部接口各有一条自己的队列；没有专属队列的路径仍然走全局队列（既有语义不变）。
@@ -82,9 +82,9 @@ public final class FakeAdminServer {
     }
 
     /**
-     * 为该路径入队一个**迟到**的响应：先睡 {@code delayMillis} 再回答。
+     * 为该路径入队一个<b>迟到</b>的响应：先睡 {@code delayMillis} 再回答。
      * {@code 3500} 会跨过网关给内部跳的 {@code responseTimeout(3s)}，于是网关这次回源以
-     * 传输故障收场 —— 这正是 D1 在 compose 上实测到的形状（WARN→ERROR 恰好 3.01 秒）。
+     * 传输故障收场 —— 这正是 BUG-D1 在 compose 上实测到的形状（WARN→ERROR 恰好 3.01 秒）。
      */
     public synchronized void enqueueStalledJsonForPath(String path, int status, String body, long delayMillis) {
         queueFor(path).add(new Response(status, "application/json; charset=utf-8", body, delayMillis));
@@ -94,14 +94,14 @@ public final class FakeAdminServer {
         return queuedByPath.computeIfAbsent(path, ignored -> new ArrayDeque<>());
     }
 
-    /** 假 admin 收到的**全部**请求数（含控制面快照那一跳）。 */
+    /** 假 admin 收到的<b>全部</b>请求数（含控制面快照那一跳）。 */
     public int requestCount() {
         return requestCount.get();
     }
 
     /**
      * 清空所有预置响应与计数器。同一个类里的用例共享同一个假 admin（Spring 上下文按类缓存），
-     * 而"排一个诱饵响应来证明某条路径**没有**回源"这种手法会把诱饵**留在队列里**、
+     * 而"排一个诱饵响应来证明某条路径<b>没有</b>回源"这种手法会把诱饵<b>留在队列里</b>、
      * 污染下一个用例。用例之间必须显式 {@code reset()}。
      */
     public synchronized void reset() {

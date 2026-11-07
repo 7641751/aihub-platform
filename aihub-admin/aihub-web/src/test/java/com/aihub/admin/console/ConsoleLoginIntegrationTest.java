@@ -28,31 +28,31 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 登录与 {@code /api/**} 鉴权的**线上契约**：真容器（MySQL）+ 真 bcrypt + 真 HTTP + 真令牌。
+ * 登录与 {@code /api/**} 鉴权的<b>线上契约</b>：真容器（MySQL）+ 真 bcrypt + 真 HTTP + 真令牌。
  *
  * <p><b>密钥从 {@code aihub.console.secret} 注入</b>（{@code @TestPropertySource}）：登录要能签发，
  * 就必须有一把合规（≥32 字符）的密钥，而 {@code application.yml} 的默认值是空（D16 刻意没有默认值）。
- * 这是**合成**密钥，只活在这个测试上下文里。
+ * 这是<b>合成</b>密钥，只活在这个测试上下文里。
  *
  * <p><b>夹具的纪律</b>：{@code sys_user} 行由测试自己用 {@link SysUserMapper} 插入（口令是
- * 测试里现算的 bcrypt 哈希，明文是**合成**的，绝不是任何真实凭证）；{@link AbstractIntegrationTest}
- * 是 JVM 级共享的 Testcontainers 单例且**没有全局清理**，因此每条夹具都用唯一用户名（{@code console-it-}
+ * 测试里现算的 bcrypt 哈希，明文是<b>合成</b>的，绝不是任何真实凭证）；{@link AbstractIntegrationTest}
+ * 是 JVM 级共享的 Testcontainers 单例且<b>没有全局清理</b>，因此每条夹具都用唯一用户名（{@code console-it-}
  * 前缀 + 随机后缀），并在前后各删一次该前缀的行 —— 既不依赖"表是干净的"，也不留垃圾给别的用例。
  *
- * <p><b>为什么"口令错"与"用户名不存在"要逐字比较响应体</b>：两条路径的**状态码**一样并不能阻止枚举用户
+ * <p><b>为什么"口令错"与"用户名不存在"要逐字比较响应体</b>：两条路径的<b>状态码</b>一样并不能阻止枚举用户
  * ——真正的判据是信封逐字节相同（这正是本类断言 equalTo 而不是断言两个 code 的原因）；
  * 时序那一半由 {@code ConsoleAuthFilterTest#aMissingUserStillPaysTheBcryptCost} 在单元层钉住。
  *
- * <p><b>为什么本上下文不再关掉 MQ 监听器</b>：本类因为要注入合成密钥而必然是一个**独立**的 Spring
+ * <p><b>为什么本上下文不再关掉 MQ 监听器</b>：本类因为要注入合成密钥而必然是一个<b>独立</b>的 Spring
  * 上下文（{@code @TestPropertySource} 会改变上下文缓存的键，这是不可避免的：密钥必须有值），
- * 而 Testcontainers 的 broker 与队列是**整个 JVM 共享**的，于是本类活在场上时队列上会同时挂
- * **两个**消费者。早先本类用 {@code spring.rabbitmq.listener.simple.auto-startup=false} 把自己的
- * 监听器关掉来回避这个问题 —— 那是一处**合法的**临时缓解，但它把本上下文变成了生产接线的**不忠实副本**
+ * 而 Testcontainers 的 broker 与队列是<b>整个 JVM 共享</b>的，于是本类活在场上时队列上会同时挂
+ * <b>两个</b>消费者。早先本类用 {@code spring.rabbitmq.listener.simple.auto-startup=false} 把自己的
+ * 监听器关掉来回避这个问题 —— 那是一处<b>合法的</b>临时缓解，但它把本上下文变成了生产接线的<b>不忠实副本</b>
  * （将来若有人往本类里加一条 MQ 相关断言，会因为它压根没在消费而静默恒真）。
  *
  * <p>那个缓解已随 {@code MeteringConsumerIntegrationTest} 的修复一并删除：该用例原先依赖
- * "队列是单消费者 FIFO"这条**顺序假设**（两个消费者会让它红），现在改成对"重复消息的 INFO"做
- * **有界轮询**，因此多一个消费者不再影响它的结论，本上下文也就恢复成忠实的生产接线。
+ * "队列是单消费者 FIFO"这条<b>顺序假设</b>（两个消费者会让它红），现在改成对"重复消息的 INFO"做
+ * <b>有界轮询</b>，因此多一个消费者不再影响它的结论，本上下文也就恢复成忠实的生产接线。
  * 实测（原始日志见 {@code m4-task-6-fix-report.md}）：在修复前删掉那一行，本类与 metering 一起跑
  * 就会红在 {@code MeteringConsumerIntegrationTest.java:153}；修复后同样的组合绿。
  */
@@ -64,7 +64,7 @@ class ConsoleLoginIntegrationTest extends AbstractIntegrationTest {
     /**
      * 合成密钥（≥32 字符）：只为让登录路径有一把合规密钥。
      *
-     * <p>刻意**不是** {@code private}：{@code @TestPropertySource} 上的常量表达式引用本类的私有常量时
+     * <p>刻意<b>不是</b> {@code private}：{@code @TestPropertySource} 上的常量表达式引用本类的私有常量时
      * javac 会报"private 访问控制"（注解值不在类的成员访问上下文里求值），实测如此。
      */
     static final String SECRET = "console-it-secret-0123456789abcdefghijklmn";

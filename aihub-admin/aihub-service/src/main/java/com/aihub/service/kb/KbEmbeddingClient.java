@@ -21,17 +21,17 @@ import java.util.Comparator;
 import java.util.List;
 
 /**
- * embeddings 上游客户端（M5 决策 D6）：一个**配置化**的 OpenAI 兼容 {@code POST /v1/embeddings}。
+ * embeddings 上游客户端（M5 决策 D6）：一个<b>配置化</b>的 OpenAI 兼容 {@code POST /v1/embeddings}。
  *
- * <p><b>为什么不接真实计费 API</b>：真 embeddings 需要密钥、网络与计费 ⇒ 验收**不可重复**；
+ * <p><b>为什么不接真实计费 API</b>：真 embeddings 需要密钥、网络与计费 ⇒ 验收<b>不可重复</b>；
  * 而假上游（{@code FakeEmbeddingUpstream}，宿主进程内的 JDK {@code HttpServer}）能把
- * "第 N 批才失败""挂住不答"这些**失败路径**变成可编排的输入 —— 这正是 Task 6 的官方验收需要的。
+ * "第 N 批才失败""挂住不答"这些<b>失败路径</b>变成可编排的输入 —— 这正是 Task 6 的官方验收需要的。
  * 生产上把 {@code AIHUB_KB_EMBEDDING_BASE_URL} 指向真的 OpenAI 兼容服务即可，代码一行不改。
  *
- * <p><b>为什么必须有显式超时</b>：没有超时的 HTTP 调用会把消费线程**无限期挂住**，
+ * <p><b>为什么必须有显式超时</b>：没有超时的 HTTP 调用会把消费线程<b>无限期挂住</b>，
  * 于是消息既不 ack 也不进 DLQ、状态永远停在 {@code EMBEDDING} —— 那是比"失败"更糟的形态
  * （没有任何观测面，也没有任何出口）。超时值来自 {@code aihub.kb.embedding.timeout-seconds}
- * （默认 {@value #DEFAULT_TIMEOUT_SECONDS} 秒），并且**判据文字与配置项必须是同一个数**：
+ * （默认 {@value #DEFAULT_TIMEOUT_SECONDS} 秒），并且<b>判据文字与配置项必须是同一个数</b>：
  * {@code KbEmbeddingClientTest} 会断言"配置读到的值 == 文档写的值"。
  *
  * <p><b>失败一律抛，绝不吞</b>：把"上游不可用"降级成"返回空向量"会让整篇文档被写成空向量
@@ -40,7 +40,7 @@ import java.util.List;
 @Service
 public class KbEmbeddingClient {
 
-    /** 与 {@code application.yml} 的默认值、以及用例里的判据文字必须是**同一个数**。 */
+    /** 与 {@code application.yml} 的默认值、以及用例里的判据文字必须是<b>同一个数</b>。 */
     public static final int DEFAULT_TIMEOUT_SECONDS = 30;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -83,7 +83,7 @@ public class KbEmbeddingClient {
     }
 
     /**
-     * 把一批文本嵌成向量，顺序与入参**一一对应**。
+     * 把一批文本嵌成向量，顺序与入参<b>一一对应</b>。
      *
      * @throws IllegalStateException 上游未配置 / 非 2xx / 返回条数对不上 / 超时或连接失败
      */

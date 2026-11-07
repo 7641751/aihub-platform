@@ -7,7 +7,7 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import java.time.LocalDateTime;
 
 /**
- * 对应 Flyway V1 的 {@code kb_document}（M5 Task 1 只做实体，**不改表**）。
+ * 对应 Flyway V1 的 {@code kb_document}（M5 Task 1 只做实体，<b>不改表</b>）。
  *
  * <p><b>列与字段一一对应，以 V1 的 SQL 为准</b>（{@code V1__init_schema.sql:135-149}）：
  * {@code id / tenant_id / filename / size_bytes / sha256 / status / chunk_count / error_msg /
@@ -20,7 +20,7 @@ import java.time.LocalDateTime;
  * <p>{@code status} 的取值见 {@code com.aihub.common.kb.KbStatus}（裸字符串常量）。
  *
  * <p>{@code createdAt} / {@code updatedAt} 用 {@link LocalDateTime} 而不是 {@code Instant}：
- * {@code datetime(3)} 列在应用侧显式按 **UTC** 写入（CONVENTIONS §7），
+ * {@code datetime(3)} 列在应用侧显式按 <b>UTC</b> 写入（CONVENTIONS §7），
  * {@code LocalDateTime} + 显式 UTC 赋值读写对称，与 JVM 默认时区、JDBC 驱动的时区推导都无关。
  */
 @TableName("kb_document")

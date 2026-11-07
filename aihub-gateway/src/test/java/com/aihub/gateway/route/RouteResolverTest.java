@@ -17,14 +17,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 路由是「一次请求打到哪条渠道」的唯一决策点，也是故障转移的**输入**：它返回的是**有序候选列表**，
+ * 路由是「一次请求打到哪条渠道」的唯一决策点，也是故障转移的<b>输入</b>：它返回的是<b>有序候选列表</b>，
  * 不是单个渠道 —— 切换能力来自「列表里还有下一个」。
  *
- * <p>选择算法的两条硬规则：① `priority` **数字小的先**（分层，主备就是两个 priority）；
- * ② 同一 priority 内按**权重随机**（而不是轮询或取第一个），这是「按权重分流」的字面含义。
+ * <p>选择算法的两条硬规则：① `priority` <b>数字小的先</b>（分层，主备就是两个 priority）；
+ * ② 同一 priority 内按<b>权重随机</b>（而不是轮询或取第一个），这是「按权重分流」的字面含义。
  * 随机源由构造器注入，因此「权重分布」可以被确定性地断言（固定种子），测试不赌运气。
  *
- * <p>熔断渠道被排到**候选组最后**而不是直接删掉：删掉会让「唯一候选恰好被熔断」变成无候选
+ * <p>熔断渠道被排到<b>候选组最后</b>而不是直接删掉：删掉会让「唯一候选恰好被熔断」变成无候选
  * （客户端 404），而那是一种比「试一试」更糟的结果（决策 10 对全熔断场景的同一套理由）。
  */
 class RouteResolverTest {
@@ -114,7 +114,7 @@ class RouteResolverTest {
                 .containsExactly(2L, 1L);
     }
 
-    /** 决策 10：全候选熔断时**仍然放行最好的一组**，而不是回 503/404。 */
+    /** 决策 10：全候选熔断时<b>仍然放行最好的一组</b>，而不是回 503/404。 */
     @Test
     void servesTheBestGroupAnywayWhenEveryCandidateIsCircuitBroken() {
         ConfigSnapshot snapshot = snapshot(List.of(
@@ -130,13 +130,13 @@ class RouteResolverTest {
     }
 
     /**
-     * 决策 10 的「最后手段」层同样必须**按权重随机**：全熔断时首选渠道不能永远由配置顺序决定，
+     * 决策 10 的「最后手段」层同样必须<b>按权重随机</b>：全熔断时首选渠道不能永远由配置顺序决定，
      * 否则一条 weight=0 的渠道会永久压过 weight=1000 的渠道，relay 的首次尝试也就不再按权重分散。
      *
      * <p>{@code rounds} 从 4000 降到 600：每次 {@code candidates()} 在全熔断分支都会打一条 WARN
      * （决策 10 要求 WARN + 计数器），4000 轮会往日志里灌几千行噪声。600 轮对 1:3 的权重、
      * 25% 的期望比例来说，15%–35% 的带宽仍有 ~3 个标准差的余量，而修复前的行为是
-     * **100%**（配置顺序永远赢），因此判别力没有被削弱 —— 这一点由反向变异实测过。
+     * <b>100%</b>（配置顺序永远赢），因此判别力没有被削弱 —— 这一点由反向变异实测过。
      */
     @Test
     void distributesByWeightInsideTheAllBrokenTierToo() {
@@ -273,8 +273,8 @@ class RouteResolverTest {
     }
 
     /**
-     * 决策 10 要求全熔断分支「WARN + **计数器**」：API 只返回 {@code List<ChannelDescriptor>}，
-     * 里面没有任何熔断标记，调用方**无法**自己认出这种情况，所以计数只能在这里做。
+     * 决策 10 要求全熔断分支「WARN + <b>计数器</b>」：API 只返回 {@code List<ChannelDescriptor>}，
+     * 里面没有任何熔断标记，调用方<b>无法</b>自己认出这种情况，所以计数只能在这里做。
      */
     @Test
     void countsTheAllBrokenFallbackInTheRegistry() {

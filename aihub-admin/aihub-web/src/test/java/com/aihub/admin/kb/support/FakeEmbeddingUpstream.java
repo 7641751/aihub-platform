@@ -18,38 +18,38 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * **假的 embeddings 上游**（M5 决策 D6）：一个跑在**宿主进程内**的 JDK {@link HttpServer}，
+ * <b>假的 embeddings 上游</b>（M5 决策 D6）：一个跑在<b>宿主进程内</b>的 JDK {@link HttpServer}，
  * 提供 OpenAI 兼容的 {@code POST /v1/embeddings}。既有先例是
  * {@code ChannelAdminIntegrationTest} 里那个假的 {@code /models} 上游（同样的
  * {@code HttpServer.create(loopback, 0)} 形状）。
  *
  * <p><b>为什么是"宿主机上的 JVM 级单例"而不是每个测试类一个</b>：它的 URL 必须由
- * {@code TestContainers.registerInfrastructure} 注册 —— 那是**唯一**的共享注册点，
- * 在某个测试类上单独注册 URL 会改变 Spring 上下文缓存键、**fork 出第 8 个上下文**
+ * {@code TestContainers.registerInfrastructure} 注册 —— 那是<b>唯一</b>的共享注册点，
+ * 在某个测试类上单独注册 URL 会改变 Spring 上下文缓存键、<b>fork 出第 8 个上下文</b>
  * （M5 的硬约束是全量 {@code Tomcat started on port} 保持 7）。而每一个上下文里都跑着
- * embed 消费者（它们争抢同一个共享队列）⇒ 每个上下文都必须拿到**可用**的上游 URL。
+ * embed 消费者（它们争抢同一个共享队列）⇒ 每个上下文都必须拿到<b>可用</b>的上游 URL。
  *
  * <p><b>行为可编排、且必须能复位</b>：它是 JVM 级单例，用例之间会互相污染 ⇒ 每个用例
  * 在 {@code @BeforeEach} 里调 {@link #reset()}。可编排的三件事：
  * <ul>
- *   <li>{@link #respondWithDeterministicVectors(int)} —— 正常应答；向量**可推导**：
+ *   <li>{@link #respondWithDeterministicVectors(int)} —— 正常应答；向量<b>可推导</b>：
  *       第 {@code i} 条输入的第 {@code j} 维 = {@code (i + 1) * (j + 1) / 100.0}
  *       （所以测试能独立算出期望值，而不是"看起来像个数组"）；</li>
- *   <li>{@link #neverRespond()} —— 收到请求后**挂住不答**（客户端必须靠**自己的超时**逃出来，
+ *   <li>{@link #neverRespond()} —— 收到请求后<b>挂住不答</b>（客户端必须靠<b>自己的超时</b>逃出来，
  *       这就是"超时有界"的判别形式）；</li>
- *   <li>{@link #failOnCall(int)} —— **只**第 {@code n} 次调用回 500（用于单测里"一次失败"的形状）；</li>
- *   <li>{@link #failFromBatch(int)} —— **从第 {@code n} 次调用起一直**回 500（Task 6 用）。
- *       ⚠️ 它与 {@code failOnCall} 的区别是本质的：{@code failOnCall} 只失败一次，**容器一重试就会成功**，
+ *   <li>{@link #failOnCall(int)} —— <b>只</b>第 {@code n} 次调用回 500（用于单测里"一次失败"的形状）；</li>
+ *   <li>{@link #failFromBatch(int)} —— <b>从第 {@code n} 次调用起一直</b>回 500（Task 6 用）。
+ *       ⚠️ 它与 {@code failOnCall} 的区别是本质的：{@code failOnCall} 只失败一次，<b>容器一重试就会成功</b>，
  *       于是永远到不了失败终态（D7 的 {@code MessageRecoverer} 根本不会被调用）；本任务要的是
  *       "重试 3 次全失败 ⇒ 恢复器接管 ⇒ 置 FAILED + 清理 + 进 DLQ"，所以需要"起了就一直失败"。</li>
  * </ul>
  *
- * <p>请求体只读 {@code input} 数组的**长度**（要生成几条向量），不关心模型名 ——
+ * <p>请求体只读 {@code input} 数组的<b>长度</b>（要生成几条向量），不关心模型名 ——
  * 上游是假的，模型名只用来证明"配置化"这件事（真值由运维给）。
  */
 public final class FakeEmbeddingUpstream {
 
-    /** 与附录 A 一致：假上游**固定 8 维**（真维度由上游/配置决定）。 */
+    /** 与附录 A 一致：假上游<b>固定 8 维</b>（真维度由上游/配置决定）。 */
     public static final int DEFAULT_DIMENSION = 8;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -66,10 +66,10 @@ public final class FakeEmbeddingUpstream {
     /** 是否挂住不答（客户端只能靠自己的超时逃出来）。 */
     private static volatile boolean neverRespond;
 
-    /** 第 n 次调用回 500（0 = 不注入失败）。**只失败那一次**，重试会成功。 */
+    /** 第 n 次调用回 500（0 = 不注入失败）。<b>只失败那一次</b>，重试会成功。 */
     private static volatile int failOnCall;
 
-    /** 从第 n 次调用**起一直**回 500（0 = 不注入失败）。与 {@link #failOnCall} 互斥。 */
+    /** 从第 n 次调用<b>起一直</b>回 500（0 = 不注入失败）。与 {@link #failOnCall} 互斥。 */
     private static volatile int failFromBatch;
 
     /** 已收到的调用次数（用例可断言"确实打到了上游"）。 */
@@ -78,7 +78,7 @@ public final class FakeEmbeddingUpstream {
     private FakeEmbeddingUpstream() {
     }
 
-    /** 上游的 base url（**懒启动**：第一次被问到才起，端口由内核分配）。 */
+    /** 上游的 base url（<b>懒启动</b>：第一次被问到才起，端口由内核分配）。 */
     public static String baseUrl() {
         ensureStarted();
         return "http://" + server.getAddress().getHostString() + ":" + server.getAddress().getPort();
@@ -111,7 +111,7 @@ public final class FakeEmbeddingUpstream {
     }
 
     /**
-     * 从第 {@code n} 次调用起**一直**失败（{@code n <= 0} = 不注入）。
+     * 从第 {@code n} 次调用起<b>一直</b>失败（{@code n <= 0} = 不注入）。
      *
      * <p>与 {@link #failOnCall(int)} 互斥（后者只失败一次）。Task 6 的失败终态用例必须用它 ——
      * 用 {@code failOnCall} 的话，容器重试第二次就成功，{@code MessageRecoverer} 永远不被调用。

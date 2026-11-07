@@ -77,7 +77,7 @@ public class MeteringDispatcher {
         drain.shutdownNow();
     }
 
-    /** event loop 上唯一允许的调用：非阻塞。返回 false 表示**已丢弃**（并已计数 + 打 ERROR）。 */
+    /** event loop 上唯一允许的调用：非阻塞。返回 false 表示<b>已丢弃</b>（并已计数 + 打 ERROR）。 */
     public boolean enqueue(String payload) {
         if (queue.offer(payload)) {
             return true;

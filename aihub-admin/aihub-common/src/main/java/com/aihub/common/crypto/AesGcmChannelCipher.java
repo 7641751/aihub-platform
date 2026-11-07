@@ -14,14 +14,14 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 渠道密钥的 AES-GCM 加解密。**JDK 自带实现，不引第三方加密库**。
+ * 渠道密钥的 AES-GCM 加解密。<b>JDK 自带实现，不引第三方加密库</b>。
  *
- * <p><b>密文自描述</b>：{@code v{版本}:{Base64(nonce ‖ ciphertext+tag)}}。网关解密时**从载荷里
- * 读版本**，而不是去查 {@code channel.key_version} 列 —— 轮换期间只要有一条行的那一列写歪，
+ * <p><b>密文自描述</b>：{@code v{版本}:{Base64(nonce ‖ ciphertext+tag)}}。网关解密时<b>从载荷里
+ * 读版本</b>，而不是去查 {@code channel.key_version} 列 —— 轮换期间只要有一条行的那一列写歪，
  * 「查列选密钥」的实现就会把一条本来完好的密文变成永久不可解的数据丢失。自描述载荷让回退安全：
  * 把新密钥从环境变量里去掉，旧密文照样可解。
  *
- * <p><b>失败语义</b>：{@link #decrypt} **永不抛异常**，畸形载荷 / 未知版本 / tag 校验失败一律返回
+ * <p><b>失败语义</b>：{@link #decrypt} <b>永不抛异常</b>，畸形载荷 / 未知版本 / tag 校验失败一律返回
  * 空 {@link Optional}。调用它的是数据面请求路径，配置错误不能变成客户端 500
  * （与 M1「缓存故障绝不变成 500」同一条纪律）。{@link #encrypt} 相反：它只在 admin 的写入路径上被
  * 调用，没有可用主密钥时直接抛 {@link IllegalStateException} —— 静默写坏数据比启动失败糟得多。

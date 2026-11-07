@@ -23,12 +23,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 熔断状态必须**跨实例共享**（设计文档 §9 的明文要求）：一个实例发现某渠道 429 了，
+ * 熔断状态必须<b>跨实例共享</b>（设计文档 §9 的明文要求）：一个实例发现某渠道 429 了，
  * 另外九个实例应该立刻停止往它上面打流量。Redis 的 key + TTL 是唯一能同时做到「共享」与
  * 「自动过期」的载体（30 秒是 spec 写死的数字）。
  *
- * <p>Redis 不可用时退化为**本机**熔断表：单机近似，但绝不阻断数据面（决策 10）。
- * 所有判定都必须**永不抛异常** —— 它跑在请求路径上。
+ * <p>Redis 不可用时退化为<b>本机</b>熔断表：单机近似，但绝不阻断数据面（决策 10）。
+ * 所有判定都必须<b>永不抛异常</b> —— 它跑在请求路径上。
  */
 @SuppressWarnings("unchecked")
 class ChannelCircuitBreakerTest {

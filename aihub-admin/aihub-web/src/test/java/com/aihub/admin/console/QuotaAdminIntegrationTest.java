@@ -53,35 +53,35 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 配额控制面 {@code /api/quotas} 的**线上 HTTP 契约**（Task 12，覆盖缺口 I-2 / M-2）：真容器
+ * 配额控制面 {@code /api/quotas} 的<b>线上 HTTP 契约</b>（Task 12，覆盖缺口 I-2 / M-2）：真容器
  * （MySQL + Redis + RabbitMQ）、真 HTTP、真控制台令牌、真鉴权过滤器。
  *
  * <p>被测的是 {@code QuotaController} + {@code ConsoleAuthFilter} + {@code QuotaAdminService} 的端到端接线，
- * 断言**只经 HTTP 与既有 mapper**（不引用控制器内部类型），因此它描述的就是运维会看到的行为。
+ * 断言<b>只经 HTTP 与既有 mapper</b>（不引用控制器内部类型），因此它描述的就是运维会看到的行为。
  *
  * <h2>覆盖点（逐条对应 docs/CONVENTIONS.md §10 与评审 I-2）</h2>
  * <ul>
- *   <li>R3.2（查）：{@code GET /api/quotas} 缺省只服务**令牌租户**的行；缺 {@code period} 时用**当前 UTC 周期**；</li>
- *   <li>R2（写）：{@code PUT} 的 {@code tenantId} 来自**请求体**（平台级写），写的是**指定租户**，
- *       不是令牌租户；审计的 {@code tenant_id} 记**目标配额行**的租户；</li>
- *   <li>入参校验：缺 {@code tenantId}、{@code tokenLimit} 超过 {@code 2^53} 或为负 ⇒ **400 {@code INVALID_PARAM}**
+ *   <li>R3.2（查）：{@code GET /api/quotas} 缺省只服务<b>令牌租户</b>的行；缺 {@code period} 时用<b>当前 UTC 周期</b>；</li>
+ *   <li>R2（写）：{@code PUT} 的 {@code tenantId} 来自<b>请求体</b>（平台级写），写的是<b>指定租户</b>，
+ *       不是令牌租户；审计的 {@code tenant_id} 记<b>目标配额行</b>的租户；</li>
+ *   <li>入参校验：缺 {@code tenantId}、{@code tokenLimit} 超过 {@code 2^53} 或为负 ⇒ <b>400 {@code INVALID_PARAM}</b>
  *       （边界复用 {@code QuotaScript.assertWithinRange} 的语义）；</li>
  *   <li>两级角色：{@code VIEWER} 对 {@code PUT} ⇒ 403、对 {@code GET} ⇒ 200；</li>
- *   <li>乐观锁冲突经 HTTP 折成的码（{@code ErrorCode} 里**没有** 409）—— 见
+ *   <li>乐观锁冲突经 HTTP 折成的码（{@code ErrorCode} 里<b>没有</b> 409）—— 见
  *       {@link #anOptimisticLockConflictOverHttpFoldsTo400InvalidParam()}；</li>
  *   <li>审计副作用（M-2）：PUT 后按本次 {@code target_id} 定向查到一条 {@code QUOTA_UPDATE}。</li>
  * </ul>
  *
  * <h2>为什么本类与 {@code ConsoleLoginIntegrationTest} 共用同一个 Spring 上下文</h2>
- * 本类只需要一把合规的控制台签名密钥，属性集与 {@code ConsoleLoginIntegrationTest} **逐字相同**
- * （值直接引用它的 {@code SECRET} 常量）、且**不加** {@code @Import} / {@code @TestConfiguration} /
+ * 本类只需要一把合规的控制台签名密钥，属性集与 {@code ConsoleLoginIntegrationTest} <b>逐字相同</b>
+ * （值直接引用它的 {@code SECRET} 常量）、且<b>不加</b> {@code @Import} / {@code @TestConfiguration} /
  * {@code @MockitoBean}，因此 Spring 复用那个已经存在的上下文（{@code docs/CONVENTIONS.md} §8 item 5/6
- * 的 7 上下文预算不增加）。这也是本类**不能**用 mock 服务来制造乐观锁冲突的原因 —— 那会 fork 一个新上下文。
+ * 的 7 上下文预算不增加）。这也是本类<b>不能</b>用 mock 服务来制造乐观锁冲突的原因 —— 那会 fork 一个新上下文。
  *
  * <h2>夹具纪律</h2>
  * 配额表（{@code (tenant_id, period)} 唯一）与 {@code audit_log}、以及 Testcontainers 容器都是
- * **JVM 级共享**的（{@link AbstractIntegrationTest} 没有全局清理），因此每个用例用**自己的
- * {@code tenantId}**、前后各清一次；审计断言一律按**本次用例的数值主键**（{@code target_id}）定向查，
+ * <b>JVM 级共享</b>的（{@link AbstractIntegrationTest} 没有全局清理），因此每个用例用<b>自己的
+ * {@code tenantId}</b>、前后各清一次；审计断言一律按<b>本次用例的数值主键</b>（{@code target_id}）定向查，
  * 绝不做全表计数。租户 id 取 {@code 901_0xx} 段，与别类的 {@code 900_1xx} 段不重叠。
  */
 @TestPropertySource(properties = {
@@ -103,9 +103,9 @@ class QuotaAdminIntegrationTest extends AbstractIntegrationTest {
     private static final long WAIT_SECONDS = 30L;
 
     /**
-     * 收一条失效广播的**有界窗口**（与 {@code RouteAndRateLimitAdminIntegrationTest} 同一口径）：
+     * 收一条失效广播的<b>有界窗口</b>（与 {@code RouteAndRateLimitAdminIntegrationTest} 同一口径）：
      * 先至多等 {@link #MESSAGE_TIMEOUT} 拿第一条，再 poll 到 {@link #QUIET_WINDOW} 静默为止，收齐这一小段
-     * 窗口里的**全部**消息 —— 断言因此可以要求 reason **集合恰好等于** {@code {quota.update}}。
+     * 窗口里的<b>全部</b>消息 —— 断言因此可以要求 reason <b>集合恰好等于</b> {@code {quota.update}}。
      */
     private static final Duration MESSAGE_TIMEOUT = Duration.ofSeconds(5);
     private static final Duration QUIET_WINDOW = Duration.ofSeconds(2);
@@ -176,8 +176,8 @@ class QuotaAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 1) GET = R3.2 + period 缺省
 
     /**
-     * {@code GET /api/quotas}（**无显式 tenantId**）必须用**令牌租户**（R3.2，least privilege）；
-     * 缺 {@code period} 时必须用**当前 UTC 周期**（{@code QuotaPeriod.of(now)}，与注入的 {@code Clock} 同基准）。
+     * {@code GET /api/quotas}（<b>无显式 tenantId</b>）必须用<b>令牌租户</b>（R3.2，least privilege）；
+     * 缺 {@code period} 时必须用<b>当前 UTC 周期</b>（{@code QuotaPeriod.of(now)}，与注入的 {@code Clock} 同基准）。
      *
      * <p>判别力：把 GET 的租户从 {@code claims.tenantId()} 改成别的来源、或把缺省 period 换成非当前周期
      * 即红（前者让 {@code tenantId} 断言红，后者让 {@code period} 断言红）。
@@ -202,8 +202,8 @@ class QuotaAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 2) PUT = R2（写指定租户）
 
     /**
-     * {@code PUT /api/quotas} 的 {@code tenantId} 来自**请求体**（R2，平台级写）：用两个不同租户钉住
-     * 「写的是**请求体指定**的租户，**不是**令牌租户」。
+     * {@code PUT /api/quotas} 的 {@code tenantId} 来自<b>请求体</b>（R2，平台级写）：用两个不同租户钉住
+     * 「写的是<b>请求体指定</b>的租户，<b>不是</b>令牌租户」。
      *
      * <p>判别力：把控制器的 tenantId 改成取令牌租户（评审 X-2）即红 —— 响应 {@code data.tenantId} 与
      * {@code findQuota(bodyTenant)} 两处断言都精确变红。
@@ -234,7 +234,7 @@ class QuotaAdminIntegrationTest extends AbstractIntegrationTest {
 
     /**
      * 入参校验一律 400 {@code INVALID_PARAM}（不是 500、也不是别的码）：缺 {@code tenantId}、
-     * {@code tokenLimit} 超过 {@code 2^53}、{@code tokenLimit} 为负；且**被拒的请求绝不留行**。
+     * {@code tokenLimit} 超过 {@code 2^53}、{@code tokenLimit} 为负；且<b>被拒的请求绝不留行</b>。
      */
     @Test
     void putRejectsMissingTenantIdAndOutOfRangeLimitsAs400InvalidParam() throws Exception {
@@ -270,7 +270,7 @@ class QuotaAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 4) 两级角色
 
     /**
-     * 两级角色（D10）：{@code VIEWER} 对 {@code GET} ⇒ 200（可读），对 {@code PUT} ⇒ **403**
+     * 两级角色（D10）：{@code VIEWER} 对 {@code GET} ⇒ 200（可读），对 {@code PUT} ⇒ <b>403</b>
      * （过滤器拦成 admin 信封，而不是落到 MVC 的 405）。
      */
     @Test
@@ -308,9 +308,9 @@ class QuotaAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 6) 审计副作用（M-2）
 
     /**
-     * PUT 的审计副作用（M-2）：按**本次 {@code target_id}** 定向查 {@code audit_log}，断言
-     * {@code target_type=QUOTA}、{@code action} 是**既有常量** {@link AuditAction#QUOTA_UPDATE}
-     * （不新增常量）、且 {@code tenant_id} = **目标配额行的租户**（R2 的审计语义，而不是令牌租户 —— 因此这里
+     * PUT 的审计副作用（M-2）：按<b>本次 {@code target_id}</b> 定向查 {@code audit_log}，断言
+     * {@code target_type=QUOTA}、{@code action} 是<b>既有常量</b> {@link AuditAction#QUOTA_UPDATE}
+     * （不新增常量）、且 {@code tenant_id} = <b>目标配额行的租户</b>（R2 的审计语义，而不是令牌租户 —— 因此这里
      * 用两个不同租户）。
      *
      * <p>判别力：把服务层 {@code auditService.record(...)} 去掉（评审 X-4）⇒ 查不到行，本用例精确变红。
@@ -342,9 +342,9 @@ class QuotaAdminIntegrationTest extends AbstractIntegrationTest {
     // ---------------------------------------------------------------- 7) 提交后广播（Task 13）
 
     /**
-     * Task 13：一次成功的配额写必须**恰好**广播一条 {@code quota.update}（额度已进快照，网关靠这条消息
-     * 立刻丢掉旧快照）。断言照抄 {@code RouteAndRateLimitAdminIntegrationTest} 的纪律：把**有界窗口**里的
-     * 消息**收齐**，其 reason **集合恰好等于** {@code {quota.update}} —— 只断言「恰好一条」是 reason
+     * Task 13：一次成功的配额写必须<b>恰好</b>广播一条 {@code quota.update}（额度已进快照，网关靠这条消息
+     * 立刻丢掉旧快照）。断言照抄 {@code RouteAndRateLimitAdminIntegrationTest} 的纪律：把<b>有界窗口</b>里的
+     * 消息<b>收齐</b>，其 reason <b>集合恰好等于</b> {@code {quota.update}} —— 只断言「恰好一条」是 reason
      * 受限的，多发一条别的 reason 不会被发现。
      *
      * <p>判别力由变异体③（去掉 {@code QuotaAdminService.update} 里的
@@ -382,7 +382,7 @@ class QuotaAdminIntegrationTest extends AbstractIntegrationTest {
         return listenerContainer;
     }
 
-    /** 装一条真 Redis 订阅，并在返回之前**确认订阅已经建立**（否则第一条真消息会被静默丢掉）。 */
+    /** 装一条真 Redis 订阅，并在返回之前<b>确认订阅已经建立</b>（否则第一条真消息会被静默丢掉）。 */
     private BlockingQueue<String> subscribeAndAwait() throws InterruptedException {
         BlockingQueue<String> received = new LinkedBlockingQueue<>();
         container().addMessageListener((message, channel) -> received.add(new String(message.getBody())),
@@ -406,8 +406,8 @@ class QuotaAdminIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 在一个**有界窗口**内收齐频道上的**全部**失效消息（不是「等到一条匹配的就返回」）。
-     * 先至多等 {@link #MESSAGE_TIMEOUT} 拿第一条（拿不到**直接变红**，空集会让「集合恰好等于 {X}」假绿），
+     * 在一个<b>有界窗口</b>内收齐频道上的<b>全部</b>失效消息（不是「等到一条匹配的就返回」）。
+     * 先至多等 {@link #MESSAGE_TIMEOUT} 拿第一条（拿不到<b>直接变红</b>，空集会让「集合恰好等于 {X}」假绿），
      * 拿到后继续 poll 到 {@link #QUIET_WINDOW} 静默为止。
      */
     private static List<ConfigInvalidateMessage> drainBoundedWindow(BlockingQueue<String> received)

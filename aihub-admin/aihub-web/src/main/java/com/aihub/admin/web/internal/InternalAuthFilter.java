@@ -28,7 +28,7 @@ import java.time.Instant;
  * 签名校验被静默移除（fail-open）。这里改用 {@link UrlPathHelper#defaultInstance}
  * —— MVC 匹配用的同一个工具 —— 于是守卫与 context path、与 URI 编码都无关。
  *
- * <p>这同时定义了签名契约：被签名的 path 是**应用内路径** {@code /internal/api-keys/resolve}，
+ * <p>这同时定义了签名契约：被签名的 path 是<b>应用内路径</b> {@code /internal/api-keys/resolve}，
  * 不含 context path。gateway 侧对「base-url 之后追加的那段路径」签名即可。
  */
 @Component

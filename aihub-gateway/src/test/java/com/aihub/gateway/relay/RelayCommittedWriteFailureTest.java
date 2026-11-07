@@ -44,24 +44,24 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * 决策 7 的「响应**已提交之后**写回客户端失败」分支（{@code ChatRelayController} 里那个
+ * 决策 7 的「响应<b>已提交之后</b>写回客户端失败」分支（{@code ChatRelayController} 里那个
  * {@code onErrorResume(ex)} → {@code metering.onClientDisconnected()}）的钉子。
  *
  * <p><b>为什么必须单独钉</b>：{@code SseStreamingTest.clientDisconnectIsMeteredAsCancelled()}
- * 虽然在真实 HTTP 上断连，但 JDK HttpClient 关流走的是**取消订阅**：{@code doFinally} 收到 CANCEL，
+ * 虽然在真实 HTTP 上断连，但 JDK HttpClient 关流走的是<b>取消订阅</b>：{@code doFinally} 收到 CANCEL，
  * 事件里的 {@code CANCELLED} / {@code client_disconnected} 由
  * {@code RelayMetering.toEvent} 的 CANCEL 分支产生，与控制器这个分支无关。实测：把
- * {@code onClientDisconnected()} 改成直接抛异常，那条端到端用例**照样全绿** —— 也就是说，
+ * {@code onClientDisconnected()} 改成直接抛异常，那条端到端用例<b>照样全绿</b> —— 也就是说，
  * 该分支此前没有任何测试覆盖，而且「断连用例绿」这件事本身证明不了它。
  *
  * <p><b>为什么不用端到端</b>：端到端无法稳定造出「已提交 + 写失败」（Netty 在客户端半关时给的是
- * 取消而不是错误）。所以这里把**客户端侧**换成确定性的 {@link MockServerWebExchange}：
+ * 取消而不是错误）。所以这里把<b>客户端侧</b>换成确定性的 {@link MockServerWebExchange}：
  * 字节照常读出去（计量观察者因此看到内容），随后写回失败；其余全是生产路径 —— 真实 WebClient、
  * 真实假上游、真实控制器与计量链（{@code MeteringPublisher → MeteringDispatcher → transport}）。
  *
  * <p><b>判别力</b>：控制器在这个分支里用 {@code response.setComplete()} 收尾，所以终态信号是
  * {@code ON_COMPLETE} 而不是 {@code CANCEL}。{@code ON_COMPLETE} 下事件仍是 {@code CANCELLED} +
- * {@code client_disconnected}，**只可能**是因为 {@code onClientDisconnected()} 真的被调用过
+ * {@code client_disconnected}，<b>只可能</b>是因为 {@code onClientDisconnected()} 真的被调用过
  * （把该调用去掉，事件会变成 SUCCESS + usage_missing，本条即红）。
  */
 class RelayCommittedWriteFailureTest {
@@ -83,10 +83,10 @@ class RelayCommittedWriteFailureTest {
     }
 
     /**
-     * 每个用例手工装配网关侧依赖：drain 循环**不启动**，改用 {@link MeteringDispatcher#drainOnce()}
+     * 每个用例手工装配网关侧依赖：drain 循环<b>不启动</b>，改用 {@link MeteringDispatcher#drainOnce()}
      * 手工投递，测试因此既不依赖线程也不需要 sleep。
      *
-     * <p>M3 起控制器按**候选渠道**转发，因此这里喂一条候选：遗留单渠道（哨兵 id → 密钥来自
+     * <p>M3 起控制器按<b>候选渠道</b>转发，因此这里喂一条候选：遗留单渠道（哨兵 id → 密钥来自
      * {@code aihub.upstream.api-key}，这里是空串 = 不发 Authorization），base-url 指向假上游。
      */
     @BeforeEach
@@ -151,12 +151,12 @@ class RelayCommittedWriteFailureTest {
     }
 
     /**
-     * 客户端断连的**第二种收尾形状**：Netty 把「响应写被取消」以 {@code onComplete} 收尾，同时取消
+     * 客户端断连的<b>第二种收尾形状</b>：Netty 把「响应写被取消」以 {@code onComplete} 收尾，同时取消
      * 上游 body 的订阅。这在真实网关里实测出现过（全量套件下 {@code SseStreamingTest} 的断连用例
      * 偶发红：上游 body 收到 {@code cancel}，而控制器顶层 {@code doFinally} 拿到的是 {@code ON_COMPLETE}），
      * 一次被客户端掐断的流于是被记成 SUCCESS。
      *
-     * <p>本用例把那种形状**确定化**：响应写只取第一块就完成（{@code take(1)} 会取消上游 body），
+     * <p>本用例把那种形状<b>确定化</b>：响应写只取第一块就完成（{@code take(1)} 会取消上游 body），
      * 模拟客户端读完第一帧就走。计量必须与「写失败」那条路径给出同一个事实：CANCELLED +
      * client_disconnected + 按已收内容估算的 token。判别性在于：只依赖顶层终态信号的实现会得到
      * SUCCESS（{@code usage_missing}），本用例立刻红。

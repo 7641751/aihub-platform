@@ -28,11 +28,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 失效消息的**语义契约**（D4 / M3 登记的 A14）：一次失效必须同时动三样东西 —— 本地层、
+ * 失效消息的<b>语义契约</b>（M4 决策 4 / M3 登记的 A14）：一次失效必须同时动三样东西 —— 本地层、
  * 共享条目 {@link ConfigCache#REDIS_KEY}、以及写入水位。
  *
  * <p>它钉的是 M3 那个用户可见的缺口（{@code docs/CONVENTIONS.md} §6.6 的 10 分钟上界）：
- * 只清本地层的失效**什么都没做** —— 紧接着的 {@code resolve()} 会从 Redis 读到**同样陈旧**的
+ * 只清本地层的失效<b>什么都没做</b> —— 紧接着的 {@code resolve()} 会从 Redis 读到<b>同样陈旧</b>的
  * 共享条目并采用它，于是「配置变了」这个信号对多实例部署完全无效（实测 101 秒仍不可见，
  * 只有人工 {@code DEL aihub:config:snapshot} 才收敛）。
  *

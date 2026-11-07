@@ -33,13 +33,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * 开发演示数据 seeder。**真容器**：它是一条写路径，要钉住的是「写了哪些行、密文是谁产出的、
+ * 开发演示数据 seeder。<b>真容器</b>：它是一条写路径，要钉住的是「写了哪些行、密文是谁产出的、
  * 再跑一次会不会写第二遍」这些落库事实。
  *
  * <p>三条控制器裁决在这里落地：
  * <ol>
- *   <li><b>默认关闭</b>：默认配置下上下文里**没有** seeder bean（写路径不该在启动时自动改数据）；</li>
- *   <li><b>主密钥为空时必须响亮失败**且不写任何行**</b>：不能把一条解不开的密文写进
+ *   <li><b>默认关闭</b>：默认配置下上下文里<b>没有</b> seeder bean（写路径不该在启动时自动改数据）；</li>
+ *   <li><b>主密钥为空时必须响亮失败<b>且不写任何行</b></b>：不能把一条解不开的密文写进
  *       {@code channel.api_key_cipher}（admin 侧「加密失败即拒绝写」的契约）；</li>
  *   <li><b>渠道密钥来自配置/环境</b>：明文值只从构造参数（= 配置属性 / 环境变量）来，落库前一律
  *       过 {@code ChannelKeyService.encrypt}；测试里的值由字节算出 / 一眼可辨的合成串，
@@ -116,7 +116,7 @@ class DemoChannelSeederTest extends AbstractIntegrationTest {
     /**
      * 裁决 ②：主密钥为空 → 响亮失败 + 一行都不写。
      *
-     * <p>消息必须同时点出**本 seeder 的开关**与主密钥属性：只说「主密钥缺失」会让运维以为
+     * <p>消息必须同时点出<b>本 seeder 的开关</b>与主密钥属性：只说「主密钥缺失」会让运维以为
      * 是别处的配置问题（这条同时是「seeder 自己的守卫在起作用、而不是恰好由 ChannelKeyService 兜住」
      * 的判别点）。
      */
@@ -139,7 +139,7 @@ class DemoChannelSeederTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 裁决 ③：演示渠道的明文密钥**只来自配置**（{@code aihub.demo-seed.primary-api-key} 等）。
+     * 裁决 ③：演示渠道的明文密钥<b>只来自配置</b>（{@code aihub.demo-seed.primary-api-key} 等）。
      * 本类不提供任何密钥默认值 —— 缺了就响亮失败，而不是把「空明文」或某个写死的合成串加密后落库。
      */
     @Test
@@ -156,7 +156,7 @@ class DemoChannelSeederTest extends AbstractIntegrationTest {
 
     /**
      * 裁决 ③ + 验收标准 5：打开且配了主密钥时写入 2 渠道 + 2 路由 + 1 租户级 + 1 key 级策略，
-     * 且再跑一次不产生重复行（幂等）。key 级策略作用于该租户的**第一把** API Key。
+     * 且再跑一次不产生重复行（幂等）。key 级策略作用于该租户的<b>第一把</b> API Key。
      */
     @Test
     void itWritesTheDocumentedDemoTopologyFromConfigurationAndIsIdempotent() {
@@ -218,7 +218,7 @@ class DemoChannelSeederTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 演示数据不全（租户还没有 API Key）时**只 WARN 并跳过** key 级策略：先铸一把 key 再重启即可。
+     * 演示数据不全（租户还没有 API Key）时<b>只 WARN 并跳过</b> key 级策略：先铸一把 key 再重启即可。
      * 这里同时钉住「跳过」不是「中断」—— 渠道与租户级策略照样写入。
      */
     @Test

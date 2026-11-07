@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 快照的分隔符编解码。**只服务 gateway 自己的两级缓存**（Caffeine 值 + Redis value），
+ * 快照的分隔符编解码。<b>只服务 gateway 自己的两级缓存</b>（Caffeine 值 + Redis value），
  * 不是跨服务契约 —— admin 发的是 JSON（网关用 Jackson 解），因此这里不需要
  * 「两侧共用同一份字面量」的强约束，只需要「严格互逆 + 畸形不炸」。
  *
@@ -17,11 +17,11 @@ import java.util.List;
  * Q|{tenantId}|{period}|{tokenLimit}|{requestLimit}
  * </pre>
  * 字段内转义 {@code \} {@code |} {@code \n} {@code \r}（与 {@code MeteringEventCodec} /
- * {@code ApiKeyCacheCodec} 同一套转义器语义）。**未知段字母被跳过**：将来加新段时，老网关
+ * {@code ApiKeyCacheCodec} 同一套转义器语义）。<b>未知段字母被跳过</b>：将来加新段时，老网关
  * 读到新载荷不会整体判死，而是丢掉不认识的那一段。
  *
  * <p><b>{@code Q} 段（Task 13 新增）</b>：租户周期额度，{@code period} 是 UTC 的 {@code YYYYMM}。
- * 它**必须**与 {@code C}/{@code R}/{@code L} 一样被编**和**解 —— 只编不解会让本地/Redis 往返静默丢掉额度
+ * 它<b>必须</b>与 {@code C}/{@code R}/{@code L} 一样被编<b>和</b>解 —— 只编不解会让本地/Redis 往返静默丢掉额度
  * （快照里 {@code quotas} 变成空表 = 所有租户都不限，正好是 D15 的默认值，于是缺陷不可见）。
  */
 public final class ConfigSnapshotCodec {

@@ -6,7 +6,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 控制器唯一依赖的发布门面：编码 + 入队（**非阻塞**）。
+ * 控制器唯一依赖的发布门面：编码 + 入队（<b>非阻塞</b>）。
  *
  * <p>它被调用的位置是响应收尾（{@code doFinally}，即 Netty event loop），因此这里绝不允许出现
  * 任何网络或磁盘 I/O —— 真正的投递在 {@link MeteringDispatcher} 的守护线程上。

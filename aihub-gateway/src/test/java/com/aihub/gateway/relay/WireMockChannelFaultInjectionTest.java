@@ -55,12 +55,12 @@ import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * <b>M3 的正式验收（里程碑表那一行的原文口径）</b>：用 <b>WireMock</b> 扮**多条命名渠道**，
- * 分别注入 <b>429 / 挂住超时 / 中途断流</b>，验证网关按规则**自动切换**。
+ * <b>M3 的正式验收（里程碑表那一行的原文口径）</b>：用 <b>WireMock</b> 扮<b>多条命名渠道</b>，
+ * 分别注入 <b>429 / 挂住超时 / 中途断流</b>，验证网关按规则<b>自动切换</b>。
  *
  * <p>设计文档 §10 / §12 把多渠道故障注入的验收方式点名成 WireMock；此前所有任务都刻意把这层留给
  * Task 15（{@code FailoverRelayTest} 用 JDK {@code HttpServer} 夹具承担细粒度口径，两者并存、不是
- * 替代关系）。本类**完全进程内**：WireMock 与网关在同一个 JVM 里，<b>不需要 Docker、不需要活 broker、
+ * 替代关系）。本类<b>完全进程内</b>：WireMock 与网关在同一个 JVM 里，<b>不需要 Docker、不需要活 broker、
  * 不需要活 Redis</b>（Redis 指向死端口 → 熔断走本机降级表，这本身也是降级路径的证据）。
  *
  * <p><b>每条命名桩 = 一条渠道</b>（各自一个 {@link WireMockServer}、各自一个带名字的 mapping），
@@ -78,21 +78,21 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p><b>本类证明的东西</b>（每条都由一个会因该行为被破坏而变红的用例钉住）：
  * <ol>
- *   <li>{@code 429} → 给该渠道打 30 秒熔断标记，**立即**换下一个候选，客户端拿到健康桩的 200；
- *       而且**下一个请求直接走健康桩**（熔断标记真的参与了路由，不只是个计数）；</li>
- *   <li>{@code 5xx} 与「首字节之前的超时」→ 换下一个候选，但**不打熔断标记**（决策 10：熔断只由 429 触发）；</li>
- *   <li>三条命名桩串起来的一次请求：429 → 超时 → 健康，说明切换是**按 priority 逐个候选**走的，
+ *   <li>{@code 429} → 给该渠道打 30 秒熔断标记，<b>立即</b>换下一个候选，客户端拿到健康桩的 200；
+ *       而且<b>下一个请求直接走健康桩</b>（熔断标记真的参与了路由，不只是个计数）；</li>
+ *   <li>{@code 5xx} 与「首字节之前的超时」→ 换下一个候选，但<b>不打熔断标记</b>（决策 10：熔断只由 429 触发）；</li>
+ *   <li>三条命名桩串起来的一次请求：429 → 超时 → 健康，说明切换是<b>按 priority 逐个候选</b>走的，
  *       最终服务的那条只被调用一次（上界 = {@code min(候选数, MAX_ATTEMPTS)}）；</li>
  *   <li><b>中途断流</b>：第一帧已经转发给客户端（响应已提交）之后上游断开 → <b>结束这段流，
  *       绝不把备用的完整响应拼进来</b>（备用桩一次都不许被调用）。</li>
  * </ol>
  *
- * <p><b>本类**不**声称的东西</b>（如实登记，见 README「已知边界」）：
+ * <p><b>本类<b>不</b>声称的东西</b>（如实登记，见 README「已知边界」）：
  * <ul>
- *   <li>中途断流的**计量归类**仍是 {@code CANCELLED / client_disconnected} —— 一次「非超时」的上游
+ *   <li>中途断流的<b>计量归类</b>仍是 {@code CANCELLED / client_disconnected} —— 一次「非超时」的上游
  *       中途中断在响应提交之后与客户端断连在 Reactor 里形状相同（{@code RelayAttempts.isUpstreamFailure}
  *       按原因链只认超时与连接失败）。本类用 {@code midStreamBreakIsMeteredAsAClientDisconnect} 把这个
- *       **已知缺口**钉成可执行事实，而不是把它写成「已修复」；</li>
+ *       <b>已知缺口</b>钉成可执行事实，而不是把它写成「已修复」；</li>
  *   <li>熔断的 30 秒 TTL 边界（29.999s 仍开 / 30.001s 已恢复）由 {@code ChannelCircuitBreakerTest}
  *       用注入时钟钉住，本类的 Redis 是死的，只能验「降级为本机表时标记生效」；</li>
  *   <li>真实 Redis 上的跨实例共享熔断由 M3 的 compose 验收承担（需要真容器），不在本类。</li>
@@ -109,23 +109,23 @@ class WireMockChannelFaultInjectionTest {
     private static final String MODEL = "wiremock-matrix-model";
     private static final String CHAT = ChatRelayController.CHAT_COMPLETIONS_PATH;
 
-    /** 每条渠道**自己的**渠道密钥（合成）：用来证明凭据是逐请求、按渠道注入的。 */
+    /** 每条渠道<b>自己的</b>渠道密钥（合成）：用来证明凭据是逐请求、按渠道注入的。 */
     private static final String ALPHA_KEY = "sk-alpha-synthetic";
     private static final String BETA_KEY = "sk-beta-synthetic";
     private static final String GAMMA_KEY = "sk-gamma-synthetic";
     private static final String DELTA_KEY = "sk-delta-synthetic";
     private static final String EPSILON_KEY = "sk-epsilon-synthetic";
 
-    /** 中途断流那一幕的**第一帧**：它一定会在连接被关掉之前到达客户端。 */
+    /** 中途断流那一幕的<b>第一帧</b>：它一定会在连接被关掉之前到达客户端。 */
     private static final String FIRST_FRAME =
             "data: {\"choices\":[{\"delta\":{\"content\":\"delta-first-frame\"}}]}\n\n";
 
     /**
      * WireMock 用「声明一个远大于实际 body 的 Content-Length，然后只写第一帧就关连接」来构造
-     * **真正的**中途断流：客户端先收到响应头与第一帧（响应因此被提交），随后是 EOF/对端关闭。
+     * <b>真正的</b>中途断流：客户端先收到响应头与第一帧（响应因此被提交），随后是 EOF/对端关闭。
      * 这不是 WireMock 的 {@code Fault} 枚举（{@code MALFORMED_RESPONSE_CHUNK} 只发头 + 垃圾字节，
      * 一帧合法字节都到不了客户端，因此证明不了「已提交之后不得切换」）；这是本机实测过、
-     * 唯一能在**同一响应内**先交付字节再断开的构造。
+     * 唯一能在<b>同一响应内</b>先交付字节再断开的构造。
      */
     private static final int BROKEN_CONTENT_LENGTH = 4096;
 
@@ -143,7 +143,7 @@ class WireMockChannelFaultInjectionTest {
     private static NamedStub epsilon5xx;
     private static List<NamedStub> stubs;
 
-    /** 本次快照里的候选渠道。**每个用例都显式声明**（同 {@code FailoverRelayTest} 的理由）。 */
+    /** 本次快照里的候选渠道。<b>每个用例都显式声明</b>（同 {@code FailoverRelayTest} 的理由）。 */
     private static final AtomicReference<List<ChannelDescriptor>> CHANNELS = new AtomicReference<>(List.of());
     private static final AtomicInteger SNAPSHOT_VERSION = new AtomicInteger(1);
 
@@ -227,13 +227,13 @@ class WireMockChannelFaultInjectionTest {
             circuitBreaker.clear(stub.channelId());
         }
         // 夹具复位（不是广播）：0 低于本夹具 admin 会给出的任何版本，因此既清掉两级缓存
-        // 又不会挡住紧接着的回填。生产路径是 ConfigSubscriber 传进来的**消息版本**（D4）。
+        // 又不会挡住紧接着的回填。生产路径是 ConfigSubscriber 传进来的**消息版本**（M4 决策 4）。
         configClient.invalidate(0L);
     }
 
     // --- 用例 -------------------------------------------------------------
 
-    /** 夹具自证：五条渠道确实是**各自独立**的 WireMock 服务器上的**具名** stub。
+    /** 夹具自证：五条渠道确实是<b>各自独立</b>的 WireMock 服务器上的<b>具名</b> stub。
      * 这条用例防的是「以后有人把 {@code withName} 删掉、或把几条渠道塌成同一台服务器」——
      * 那样「用 WireMock 的多条命名 stub 扮多条渠道」这句话就不再成立，而其余用例看不出来。
      */
@@ -256,8 +256,8 @@ class WireMockChannelFaultInjectionTest {
     }
 
     /**
-     * 429：**立即**换下一个候选 + 给该渠道打 30 秒熔断标记，客户端拿到健康桩的 200，
-     * 计量里的 {@code channel_id} 是**实际服务**的那条（22，不是被 429 的 21）。
+     * 429：<b>立即</b>换下一个候选 + 给该渠道打 30 秒熔断标记，客户端拿到健康桩的 200，
+     * 计量里的 {@code channel_id} 是<b>实际服务</b>的那条（22，不是被 429 的 21）。
      */
     @Test
     void upstream429MarksTheChannelOpenAndSwitchesToTheHealthyStubImmediately() throws Exception {
@@ -288,7 +288,7 @@ class WireMockChannelFaultInjectionTest {
     }
 
     /**
-     * 熔断标记必须**参与路由**，而不只是个计数：第一次请求被 429 之后，第二次请求应当**直接**走健康桩，
+     * 熔断标记必须<b>参与路由</b>，而不只是个计数：第一次请求被 429 之后，第二次请求应当<b>直接</b>走健康桩，
      * 被熔断的渠道一次都不再被打（这正是 compose 验收里「第 2 次应该直接走好上游」那一条）。
      */
     @Test
@@ -313,8 +313,8 @@ class WireMockChannelFaultInjectionTest {
     }
 
     /**
-     * 「首字节之前的超时」→ 换下一个候选；**不**打熔断标记（决策 10：熔断只由 429 触发，
-     * 5xx 与超时只做**当次**切换）。
+     * 「首字节之前的超时」→ 换下一个候选；<b>不</b>打熔断标记（决策 10：熔断只由 429 触发，
+     * 5xx 与超时只做<b>当次</b>切换）。
      */
     @Test
     void aHangBeforeTheFirstByteSwitchesButDoesNotCircuitBreak() throws Exception {
@@ -358,8 +358,8 @@ class WireMockChannelFaultInjectionTest {
 
     /**
      * 一次请求串起三条命名桩：{@code alpha-429 → gamma-slow → beta-ok}，最终由健康桩服务。
-     * 这条用例是「多渠道故障注入矩阵」最直白的形态：三个**不同的真实端点**在同一次请求里依次失败，
-     * 切换严格按 priority 前进，且每条候选**恰好被订阅一次**（上界 = {@code min(候选数, MAX_ATTEMPTS)}）。
+     * 这条用例是「多渠道故障注入矩阵」最直白的形态：三个<b>不同的真实端点</b>在同一次请求里依次失败，
+     * 切换严格按 priority 前进，且每条候选<b>恰好被订阅一次</b>（上界 = {@code min(候选数, MAX_ATTEMPTS)}）。
      */
     @Test
     void oneRequestWalksTheNamedStubsInPriorityOrderAndTheHealthyOneAnswers() throws Exception {
@@ -394,7 +394,7 @@ class WireMockChannelFaultInjectionTest {
      *
      * <p>必须发生两件事，缺一不可：
      * <ol>
-     *   <li>客户端拿到的字节**只有第一帧**（说明它确实收到了上游已经开始回写的证据）；</li>
+     *   <li>客户端拿到的字节<b>只有第一帧</b>（说明它确实收到了上游已经开始回写的证据）；</li>
      *   <li>健康桩<b>一次都不许被打</b>，备用的完整响应绝不能被拼进这段流里 —— 那就是脏数据。</li>
      * </ol>
      *
@@ -423,12 +423,12 @@ class WireMockChannelFaultInjectionTest {
     }
 
     /**
-     * 「中途断流的计量归类」这一格是**已知缺口**的可执行登记（README「已知边界」里如实披露）：
-     * 响应提交之后的**非超时**上游中断，在 Reactor 里的形状与客户端断连无法区分
+     * 「中途断流的计量归类」这一格是<b>已知缺口</b>的可执行登记（README「已知边界」里如实披露）：
+     * 响应提交之后的<b>非超时</b>上游中断，在 Reactor 里的形状与客户端断连无法区分
      * （{@code RelayAttempts.isUpstreamFailure} 按原因链只认超时与连接失败），因此被记成
      * {@code CANCELLED / client_disconnected}，而不是 {@code ERROR / upstream_stream_error}。
      *
-     * <p>这条用例的价值是**把缺口钉死、并让「有人改了分类」立刻可见**：它既不是「已修复」，
+     * <p>这条用例的价值是<b>把缺口钉死、并让「有人改了分类」立刻可见</b>：它既不是「已修复」，
      * 也不是「没测过」。
      */
     @Test
@@ -449,7 +449,7 @@ class WireMockChannelFaultInjectionTest {
     // --- 命名桩与快照的脚手架 ---------------------------------------------
 
     /**
-     * 起一条命名桩：一个独立进程内的 WireMock 服务器 + 一个**以渠道名命名**的 mapping。
+     * 起一条命名桩：一个独立进程内的 WireMock 服务器 + 一个<b>以渠道名命名</b>的 mapping。
      * 名字在这里统一挂上（而不是每个调用点各写一次）：这样「桩名 = mapping 名」是结构性的，
      * {@code theFiveChannelsAreSeparateNamedWireMockStubs} 断言的正是这条结构。
      */
@@ -547,7 +547,7 @@ class WireMockChannelFaultInjectionTest {
     }
 
     /**
-     * 打网关的 HTTP helper。刻意**不**叫 {@code post}：那会遮蔽 WireMock 的静态
+     * 打网关的 HTTP helper。刻意<b>不</b>叫 {@code post}：那会遮蔽 WireMock 的静态
      * {@code post(...)}（内层作用域优先于静态导入），让 {@code post(urlEqualTo(...))} 变成一次
      * 「UrlPattern 不能转成 String」的编译错误。
      */

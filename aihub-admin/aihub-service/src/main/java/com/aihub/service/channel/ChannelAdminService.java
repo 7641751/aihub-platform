@@ -29,21 +29,21 @@ import java.util.Map;
  *
  * <p><b>每次写都在同一个事务里做三件事</b>：业务写 + 审计（{@link AuditService} 刻意不加
  * {@code REQUIRES_NEW}，因此加入本方法的事务）+ {@link ConfigChangePublisher#publishAfterCommit(String)}
- * （注册 after-commit 钩子，**提交之后**才抬水位并广播）。
+ * （注册 after-commit 钩子，<b>提交之后</b>才抬水位并广播）。
  * 回滚时三者一起作废 —— 这正是 {@code ChannelAdminIntegrationTest} 的回滚用例钉住的不变量。
  *
  * <p><b>{@code models_json} 只做展示性校验</b>（D14）：非法 JSON 直接 400 {@code INVALID_PARAM}，
- * 合法则**规范化**（{@code JsonNode.toString()}）后落库。它**不参与路由** —— M3 的路由只用
+ * 合法则<b>规范化</b>（{@code JsonNode.toString()}）后落库。它<b>不参与路由</b> —— M3 的路由只用
  * {@code model_route} 表（{@code ChannelEntity} 的类注释）。
  *
  * <p><b>{@code status} 的「空白不对称」是有意保留的（Task 8 的独立评审登记，N3）</b>：创建时
  * {@code null} 与空白都落到默认值 {@code ACTIVE}（{@code write.status() == null || isBlank()}），
- * 而更新时空白是**非法值** —— 走 {@link #requireText} 抛 400 {@code INVALID_PARAM}。语义是
+ * 而更新时空白是<b>非法值</b> —— 走 {@link #requireText} 抛 400 {@code INVALID_PARAM}。语义是
  * 「更新时 {@code null} = 不改动；给了空白 = 给了一个非法值」。{@code TenantAdminService} 行为一致。
- * 哪些字符串算合法状态今天**没有任何地方规定**，因此这里不臆造取值校验（登记为残余）。
+ * 哪些字符串算合法状态今天<b>没有任何地方规定</b>，因此这里不臆造取值校验（登记为残余）。
  *
  * <p><b>审计的 {@code tenant_id} 传 {@code null}</b>：{@code channel} 在本 schema 里不是租户级资源
- * （V1 的建表没有 {@code tenant_id} 列），因此「影响了哪个租户」这个维度**不存在** ——
+ * （V1 的建表没有 {@code tenant_id} 列），因此「影响了哪个租户」这个维度<b>不存在</b> ——
  * 传 {@code null}（SQL NULL）而不是拿操作者的租户去冒充它。操作者记在 {@code actor} 列里。
  */
 @Service
@@ -74,14 +74,14 @@ public class ChannelAdminService {
     /**
      * 渠道写请求。更新语义下 {@code null} 字段表示「不修改」；创建语义下除可选项外都必须给出。
      *
-     * @param apiKey 明文渠道密钥。**只在这一次调用里存在**：除加密入口外不落库、不落审计、不进日志
+     * @param apiKey 明文渠道密钥。<b>只在这一次调用里存在</b>：除加密入口外不落库、不落审计、不进日志
      */
     public record Write(String name, String provider, String baseUrl, String apiKey, String modelsJson,
                         Integer weight, Integer priority, Integer timeoutMs, String status) {
     }
 
     /**
-     * 渠道的展示视图。**刻意没有 {@code apiKeyCipher} 字段**：任何 GET/写响应的 DTO 都不含密文，
+     * 渠道的展示视图。<b>刻意没有 {@code apiKeyCipher} 字段</b>：任何 GET/写响应的 DTO 都不含密文，
      * 密钥材料的存在性只用 {@code hasKey} 这一位表示，版本只用 {@code keyVersion} 表示。
      */
     public record View(Long id, String name, String provider, String baseUrl, int keyVersion, boolean hasKey,
@@ -184,11 +184,11 @@ public class ChannelAdminService {
     }
 
     /**
-     * 主密钥轮换：把这条渠道的**已有明文**用**当前**主密钥重新加密，{@code key_version} 跟着前进。
+     * 主密钥轮换：把这条渠道的<b>已有明文</b>用<b>当前</b>主密钥重新加密，{@code key_version} 跟着前进。
      *
      * <p>实现要点：先把落库密文解回明文（{@link ChannelKeyService#decrypt} 只在主密钥表里还有旧版本时
-     * 成功），再用当前版本加密 —— 因此「轮换」= 换**加密版本**，不是换上游密钥（上游密钥由运维提供，
-     * 本平台不生成）。解不开的密文**响亮地失败**（{@code CONFIGURATION_ERROR}），绝不写一条
+     * 成功），再用当前版本加密 —— 因此「轮换」= 换<b>加密版本</b>，不是换上游密钥（上游密钥由运维提供，
+     * 本平台不生成）。解不开的密文<b>响亮地失败</b>（{@code CONFIGURATION_ERROR}），绝不写一条
      * 同样解不开的新密文。
      */
     @Transactional
@@ -211,7 +211,7 @@ public class ChannelAdminService {
 
     // ---------------------------------------------------------------- 内部
 
-    /** 审计写在**调用方事务**里（{@link AuditService#record} 不加 {@code REQUIRES_NEW}）。 */
+    /** 审计写在<b>调用方事务</b>里（{@link AuditService#record} 不加 {@code REQUIRES_NEW}）。 */
     private void audit(AuditService.Actor actor, String action, ChannelEntity entity, Map<String, Object> detail) {
         auditService.record(null, actor, action, TARGET_TYPE, String.valueOf(entity.getId()), detail);
     }
@@ -226,10 +226,10 @@ public class ChannelAdminService {
 
     /**
      * 展示性 JSON 校验（D14）：{@code null}/空白当作「未提供」落 SQL NULL；非空必须是合法 JSON，
-     * 否则 400 {@code INVALID_PARAM}。落库的是**规范化**后的文本（{@code JsonNode.toString()}），
+     * 否则 400 {@code INVALID_PARAM}。落库的是<b>规范化</b>后的文本（{@code JsonNode.toString()}），
      * 这样库里那一格与校验通过的那个 JSON 树逐字对应。
      *
-     * <p>它**不参与路由**：路由只用 {@code model_route} 表。
+     * <p>它<b>不参与路由</b>：路由只用 {@code model_route} 表。
      */
     private static String normalizeModelsJson(String modelsJson) {
         if (modelsJson == null || modelsJson.isBlank()) {

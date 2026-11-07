@@ -16,17 +16,17 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 决策 D5：快照 {@code version} 的**单调性**。必须真起容器 —— 这里要钉住的是「水位那一行
+ * 决策 D5：快照 {@code version} 的<b>单调性</b>。必须真起容器 —— 这里要钉住的是「水位那一行
  * （{@code config_version.id = 1}）真的活在 MySQL 里」这件数据库层面的事实，换成内存替身就只是
  * 「测自己写的 Math.max」。
  *
  * <p><b>修的是 M3 登记的 A2 缺口</b>：M4 之前 {@code version = max(updated_at)}，删掉最新那一行
- * 会让版本**倒退**，而网关的本地/Redis 两侧比对与 {@code lastGood} 用的都是严格 {@code >} ——
- * 于是一份**更旧**的快照会被记住并继续服务，且没有任何收敛信号。水位（{@code config_version}）
+ * 会让版本<b>倒退</b>，而网关的本地/Redis 两侧比对与 {@code lastGood} 用的都是严格 {@code >} ——
+ * 于是一份<b>更旧</b>的快照会被记住并继续服务，且没有任何收敛信号。水位（{@code config_version}）
  * 只抬不降，删除因此不再让版本回退。
  *
  * <p><b>抬水位的唯一入口是配置写入路径</b>（{@code ConfigChangePublisher.bumpAndPublish}，Task 2）：
- * {@code currentVersion()} 是**纯读**，因为 {@code snapshot()} 是 {@code @Transactional(readOnly = true)}，
+ * {@code currentVersion()} 是<b>纯读</b>，因为 {@code snapshot()} 是 {@code @Transactional(readOnly = true)}，
  * 而 MySQL + Connector/J 的 {@code readOnlyPropagatesToServer} 默认是开的（会发
  * {@code SET SESSION TRANSACTION READ ONLY}），在只读事务里写库会直接 {@code ERROR 1792} ——
  * 正好打在 {@code GET /internal/config/snapshot} 这条里程碑依赖的路径上。
@@ -36,14 +36,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code currentVersion() >= v2}，而此刻能解释这个版本的只剩水位那一行（退化成纯
  * {@code max(updated_at)} 的实现在这里回到 0）。旧写法（抬水位在插入之前）把终局断言挂在
  * {@code withRow = max(行, 水位)} 上：行自己的 {@code updated_at} 挡在水位前面，水位的贡献
- * **从未被隔离**，而它的红只来自「删行后三张表恰好是空的」—— state-fragile（否则残留一行更新的
- * {@code updated_at} 就能让那个实现蒙混过关）。**不要把这个顺序改回去。**
+ * <b>从未被隔离</b>，而它的红只来自「删行后三张表恰好是空的」—— state-fragile（否则残留一行更新的
+ * {@code updated_at} 就能让那个实现蒙混过关）。<b>不要把这个顺序改回去。</b>
  *
- * <p><b>本类只覆盖这一条路径</b>：两个用例都在删除**之前**显式走过 {@code bumpAndPublish}，钉住的是
- * 「水位已被抬起时 raw SQL 删除不回退」。水位**从未被抬起**的纯 SQL 路径（seeder 插行后直接 delete）
- * 仍可能回退一次 —— 那是 D5 登记在案的残余，本类**没有**去钉它。
+ * <p><b>本类只覆盖这一条路径</b>：两个用例都在删除<b>之前</b>显式走过 {@code bumpAndPublish}，钉住的是
+ * 「水位已被抬起时 raw SQL 删除不回退」。水位<b>从未被抬起</b>的纯 SQL 路径（seeder 插行后直接 delete）
+ * 仍可能回退一次 —— 那是 D5 登记在案的残余，本类<b>没有</b>去钉它。
  *
- * <p>本类不复位水位：**水位持久**正是本任务的意义所在，复位会把用例变成对执行顺序的断言。
+ * <p>本类不复位水位：<b>水位持久</b>正是本任务的意义所在，复位会把用例变成对执行顺序的断言。
  * 清空三张表（{@code @BeforeEach}）对「红」也是必要的 —— 删行之后必须真的没有别的行能解释版本 ——
  * 但它属于执行环境，不是被钉住的性质本身。
  */
@@ -75,7 +75,7 @@ class ConfigSnapshotVersionTest extends AbstractIntegrationTest {
     @Autowired
     private ConfigVersionMapper configVersionMapper;
 
-    /** 容器是 JVM 级共享的：别的用例类可能留下配置行，这里只清行、**不动水位**。 */
+    /** 容器是 JVM 级共享的：别的用例类可能留下配置行，这里只清行、<b>不动水位</b>。 */
     @BeforeEach
     void cleanConfigRows() {
         deleteAllRoutes();

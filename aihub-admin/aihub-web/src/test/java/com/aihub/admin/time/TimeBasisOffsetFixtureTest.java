@@ -18,21 +18,21 @@ import java.time.ZoneOffset;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 时间基准位移的**可重跑夹具**：把「把 {@code expire_at} 从『连接时区墙钟』改读成 UTC」这件事的
- * 位移量按**连接时区**钉下来。
+ * 时间基准位移的<b>可重跑夹具</b>：把「把 {@code expire_at} 从『连接时区墙钟』改读成 UTC」这件事的
+ * 位移量按<b>连接时区</b>钉下来。
  *
  * <p><b>为什么它必须待在仓库里</b>（2026-09-30 从一次性探针升级而来）：{@code README.md} 与
- * {@code docs/CONVENTIONS.md} §7 引用了三个具体毫秒数，而按 §8 的纪律，**文档里的数字必须点名产生它的
- * 产物**。原先是探针、且躺在 gitignore 覆盖的 {@code .superpowers/} 下 —— 读文档的人拿不到，等于没出处。
+ * {@code docs/CONVENTIONS.md} §7 引用了三个具体毫秒数，而按 §8 的纪律，<b>文档里的数字必须点名产生它的
+ * 产物</b>。原先是探针、且躺在 gitignore 覆盖的 {@code .superpowers/} 下 —— 读文档的人拿不到，等于没出处。
  * 这个用例就是那三个数字的产物。
  *
- * <p><b>为什么断言与跑测试的 JVM 时区无关</b>：三条用例都把**连接时区显式钉死**（{@code connectionTimeZone}），
+ * <p><b>为什么断言与跑测试的 JVM 时区无关</b>：三条用例都把<b>连接时区显式钉死</b>（{@code connectionTimeZone}），
  * 于是写入与读回走的是同一个（被钉死的）偏移，{@code ZoneId.systemDefault()} 不参与。夹具用的瞬时也是固定的
  * （{@code FIXED}），所以结果可复现。
  *
- * <p><b>它证明的是什么</b>：位移量 {@code new − old} 的**符号等于写入连接偏移的符号** —— 东为正
+ * <p><b>它证明的是什么</b>：位移量 {@code new − old} 的<b>符号等于写入连接偏移的符号</b> —— 东为正
  * （瞬时后移 ⇒ 已过期的 key 仍可用 = fail-open），西为负（瞬时时移 ⇒ key 提前过期 = fail-closed），
- * UTC 为零。因此迁移指令必须**按符号**处理，而不是一句"推后 8 小时"。
+ * UTC 为零。因此迁移指令必须<b>按符号</b>处理，而不是一句"推后 8 小时"。
  */
 class TimeBasisOffsetFixtureTest {
 
@@ -48,7 +48,7 @@ class TimeBasisOffsetFixtureTest {
     }
 
     /**
-     * 用**旧代码的写法**（{@code setTimestamp(Instant)}）往 {@code datetime(3)} 里写一行，再分别用
+     * 用<b>旧代码的写法</b>（{@code setTimestamp(Instant)}）往 {@code datetime(3)} 里写一行，再分别用
      * 旧载体（{@code getTimestamp().toInstant()}）与新载体（{@code getObject(LocalDateTime)} 按 UTC 折算）
      * 读回来，返回 {@code new − old} 的毫秒数。
      */
@@ -98,17 +98,17 @@ class TimeBasisOffsetFixtureTest {
     }
 
     /**
-     * 范围窗口里**与 JVM 时区无关**的那一条性质：**连接时区被钉成 UTC**（发布配置的方言）时，
-     * 两种绑定选中**同一批行**。
+     * 范围窗口里<b>与 JVM 时区无关</b>的那一条性质：<b>连接时区被钉成 UTC</b>（发布配置的方言）时，
+     * 两种绑定选中<b>同一批行</b>。
      *
      * <p><b>为什么只断言 UTC 方言</b>（这是 2026-09-30 实测纠正过的）：{@code connectionTimeZone=Asia/Shanghai}
-     * 时两种绑定**并不相等**（本机实测 `LocalDateTime(UTC)=1` 对 `Timestamp=3`）—— 因为本 fixture 混用了
-     * `setObject(LocalDateTime@UTC)` 与 `setTimestamp(...)` 两种**写法**，在非 UTC 连接上这两类行本来就落在
-     * 不同的墙上时间，两种边界自然选中不同的行。那是 **fixture 的构造**造成的，不是"绑定方式错"。
-     * 所以「钉死即相等」是**错的**；能成立、且正是文档要说的那一条是：**只在 UTC 方言下**，
+     * 时两种绑定<b>并不相等</b>（本机实测 `LocalDateTime(UTC)=1` 对 `Timestamp=3`）—— 因为本 fixture 混用了
+     * `setObject(LocalDateTime@UTC)` 与 `setTimestamp(...)` 两种<b>写法</b>，在非 UTC 连接上这两类行本来就落在
+     * 不同的墙上时间，两种边界自然选中不同的行。那是 <b>fixture 的构造</b>造成的，不是"绑定方式错"。
+     * 所以「钉死即相等」是<b>错的</b>；能成立、且正是文档要说的那一条是：<b>只在 UTC 方言下</b>，
      * 承载方式（`LocalDateTime@UTC` 还是 `Timestamp`）不影响窗口选到哪些行。
      *
-     * <p>非 UTC 方言的计数随 JVM 时区与 fixture 变化，因此这里只**打印**、不断言；
+     * <p>非 UTC 方言的计数随 JVM 时区与 fixture 变化，因此这里只<b>打印</b>、不断言；
      * {@code docs/CONVENTIONS.md} §7 里那组具体计数的 fixture 写在正文里，可照它重建。
      */
     @Test

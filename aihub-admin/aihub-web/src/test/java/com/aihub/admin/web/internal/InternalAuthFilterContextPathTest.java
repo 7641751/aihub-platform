@@ -28,7 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 控制器照样映射 {@code /internal/api-keys/resolve} 并对外服务，等于没有鉴权。
  * 因此 {@link #unsignedRequestUnderAContextPathIsStillRejected} 在改动前会失败（未签名请求会直接打到控制器）。
  *
- * <p>本类刻意用**绝对 URL + 自己 new 出来的 {@link TestRestTemplate}**：容器自动注入的那个
+ * <p>本类刻意用<b>绝对 URL + 自己 new 出来的 {@link TestRestTemplate}</b>：容器自动注入的那个
  * 会按 {@code server.servlet.context-path} 自动补前缀，用它就分不清「context path 没生效」和
  * 「生效了但过滤器没跑」。配套的对照断言（不带 context path 的同一 URL 必须 404）保证本类
  * 在 context path 被删掉时也会失败，而不是变成一个永远为真的空测试。

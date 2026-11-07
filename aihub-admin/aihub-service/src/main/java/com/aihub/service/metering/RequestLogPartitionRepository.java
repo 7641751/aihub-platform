@@ -30,7 +30,7 @@ public class RequestLogPartitionRepository {
     }
 
     /**
-     * 按物理顺序读取分区：{@code PARTITION_DESCRIPTION} 对 RANGE COLUMNS 是**带单引号**的日期
+     * 按物理顺序读取分区：{@code PARTITION_DESCRIPTION} 对 RANGE COLUMNS 是<b>带单引号</b>的日期
      * 字面量（实测 {@code '2026-10-01'}），pmax 是 {@code MAXVALUE}。
      */
     public List<Partition> partitions() {
@@ -45,13 +45,13 @@ public class RequestLogPartitionRepository {
     /**
      * 把 {@code pmax} 劈成「新分区 + 新的 pmax」。
      *
-     * <p>REORGANIZE 的新分区表必须**恰好**覆盖 pmax 原来的区间，因此末尾必须原样带回
+     * <p>REORGANIZE 的新分区表必须<b>恰好</b>覆盖 pmax 原来的区间，因此末尾必须原样带回
      * {@code pmax VALUES LESS THAN (MAXVALUE)}；新分区从 pmax 的下界（即最后一个有界分区的上界）
      * 开始逐月递增，正好满足 MySQL「边界严格递增」的要求。
      *
-     * <p>这是一条会**重写表数据**的语句，所以入参先过 {@link #requireReorganizable(List)}：
+     * <p>这是一条会<b>重写表数据</b>的语句，所以入参先过 {@link #requireReorganizable(List)}：
      * 空列表会拼出非法 DDL（{@code INTO (, PARTITION pmax …)}），边界乱序或含 {@code MAXVALUE}
-     * 则只会在语句已经发到线上表之后才被服务端以 1493 拒绝。合法入参生成的 SQL 与护栏引入前**逐字节相同**。
+     * 则只会在语句已经发到线上表之后才被服务端以 1493 拒绝。合法入参生成的 SQL 与护栏引入前<b>逐字节相同</b>。
      *
      * @throws IllegalArgumentException 列表为空/null、分区缺名字、含 {@code MAXVALUE}、上界非严格递增
      */
@@ -66,7 +66,7 @@ public class RequestLogPartitionRepository {
     }
 
     /**
-     * 本地护栏（在 {@code execute} **之前**跑，不碰数据库）：把「参数错了」变成调用点上的
+     * 本地护栏（在 {@code execute} <b>之前</b>跑，不碰数据库）：把「参数错了」变成调用点上的
      * {@link IllegalArgumentException}，而不是线上表上的一条半成品 DDL。
      *
      * <p>只做便宜的检查：空列表、缺名字、含 {@code MAXVALUE}、上界非严格递增。语句尾部永远是

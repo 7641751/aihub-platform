@@ -37,11 +37,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
 
-    /** 幂等用例里**重复投递**的那个 id。判据用例与集成用例共用这一处定义，不许各写一份字面量。 */
+    /** 幂等用例里<b>重复投递</b>的那个 id。判据用例与集成用例共用这一处定义，不许各写一份字面量。 */
     private static final String DUPLICATE_REQUEST_ID = "req-mq-idempotent";
 
     /**
-     * 时序栅栏事件的 id —— 它**以重复 id 为前缀**（{@code req-mq-idempotent-fence}）。
+     * 时序栅栏事件的 id —— 它<b>以重复 id 为前缀</b>（{@code req-mq-idempotent-fence}）。
      * 这个形状正是旧 {@code \b} 判据会误判的输入，因此这里显式命名而不是就地拼接。
      */
     private static final String FENCE_REQUEST_ID = DUPLICATE_REQUEST_ID + "-fence";
@@ -58,8 +58,8 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 按**发布端真实的内容类型**投递：{@code RabbitTemplate} 的默认转换器打的是
-     * {@code contentType=text/plain} 加一个**单独**的 {@code contentEncoding=UTF-8}，
+     * 按<b>发布端真实的内容类型</b>投递：{@code RabbitTemplate} 的默认转换器打的是
+     * {@code contentType=text/plain} 加一个<b>单独</b>的 {@code contentEncoding=UTF-8}，
      * 而网关发的是 {@link MeteringTopology#MESSAGE_CONTENT_TYPE}（{@code text/plain;charset=UTF-8}，
      * 见 {@code RabbitMeteringTransport.java:58}）。不在这里盖一刀，本用例验的就不是真实线格式。
      */
@@ -125,14 +125,14 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
      *
      * <p><b>为什么不能靠"栅栏行出现 ⇒ 重复消息已经处理完"这条推理</b>：它隐含"队列是单消费者 FIFO"这条
      * 假设。Testcontainers 的 broker 与队列是整个 JVM 共享的单例，而 Spring 的测试上下文缓存不关，
-     * 于是只要本类之前存在**另一个**装着 {@code @RabbitListener} 的活上下文，队列上就有**两个**消费者：
+     * 于是只要本类之前存在<b>另一个</b>装着 {@code @RabbitListener} 的活上下文，队列上就有<b>两个</b>消费者：
      * 重复消息与栅栏消息可能被不同的消费者取走，"栅栏落库"就不再蕴含"重复消息的 INFO 已经打出来"。
-     * 实测（只用既有类、surefire 反序）该假设会以同一句断言变红 —— 那是**顺序**问题，不是幂等坏了。
+     * 实测（只用既有类、surefire 反序）该假设会以同一句断言变红 —— 那是<b>顺序</b>问题，不是幂等坏了。
      *
-     * <p>所以这里对"重复消息的 INFO"改成**有界轮询**：{@code MeteringConsumer} 的 logger 是全局的，
-     * 挂在它上面的 appender 会捕获**任何**消费者实例打出的记录，所以"这条 INFO 真的出现了"仍然
+     * <p>所以这里对"重复消息的 INFO"改成<b>有界轮询</b>：{@code MeteringConsumer} 的 logger 是全局的，
+     * 挂在它上面的 appender 会捕获<b>任何</b>消费者实例打出的记录，所以"这条 INFO 真的出现了"仍然
      * 只能是「重复消息到达了消费者并在消费端被幂等丢弃」。轮询等的是异步观测，不是放宽断言：
-     * 若重复消息**从未**被重新投递/消费，轮询到超时后断言照样红。
+     * 若重复消息<b>从未</b>被重新投递/消费，轮询到超时后断言照样红。
      */
     @Test
     void theSameEventTwiceInsertsExactlyOneRow() throws Exception {
@@ -190,7 +190,7 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 垃圾载荷**不许被静默 ACK**：它必须重试 3 次然后进死信队列，等人排查。
+     * 垃圾载荷<b>不许被静默 ACK</b>：它必须重试 3 次然后进死信队列，等人排查。
      * 反证：把消费者改成「解码失败就 log + return」→ 本用例拿不到死信消息。
      */
     @Test
@@ -238,7 +238,7 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 把 appender 挂到消费者**自己的** logger 上并返回它；用完必须 {@link #detachConsumerAppender}。
+     * 把 appender 挂到消费者<b>自己的</b> logger 上并返回它；用完必须 {@link #detachConsumerAppender}。
      *
      * <p>{@code appender.list} 默认是普通 {@code ArrayList}（写发生在消费者线程、读发生在测试线程），
      * 换成同步包装以便读侧在同一个对象上加锁（见 {@link #records}）。
@@ -259,10 +259,10 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 读 appender 里**指定级别**的记录。名字叫 {@code errorRecords} 就必须真的只数 ERROR：
-     * 早先的实现不过滤级别，{@code hasSize(3)} 数的是窗口内该 logger 上的**全部**事件 ——
-     * 今天恰好安全只是因为那里没人打别的级别，而本类的幂等用例恰恰要断言一条 **INFO** 幂等记录；
-     * 一旦将来（并发、重投递、测试顺序变化）它落进重试用例的窗口，重试次数断言就会因**无关原因**变红。
+     * 读 appender 里<b>指定级别</b>的记录。名字叫 {@code errorRecords} 就必须真的只数 ERROR：
+     * 早先的实现不过滤级别，{@code hasSize(3)} 数的是窗口内该 logger 上的<b>全部</b>事件 ——
+     * 今天恰好安全只是因为那里没人打别的级别，而本类的幂等用例恰恰要断言一条 <b>INFO</b> 幂等记录；
+     * 一旦将来（并发、重投递、测试顺序变化）它落进重试用例的窗口，重试次数断言就会因<b>无关原因</b>变红。
      *
      * <p>加锁的理由：logback 的 {@code ListAppender.list} 本身不是线程安全的，
      * 而 {@code appender.list} 已换成 {@code synchronizedList} 包装，读写锁在同一个对象上。
@@ -285,19 +285,19 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 形如 {@code request_id=<id>} 的日志片段必须按**整词**匹配，不能用 {@code contains}：
-     * 本用例的栅栏事件 id（{@code req-mq-idempotent-fence}）是重复事件 id 的**前缀超串**，
+     * 形如 {@code request_id=<id>} 的日志片段必须按<b>整词</b>匹配，不能用 {@code contains}：
+     * 本用例的栅栏事件 id（{@code req-mq-idempotent-fence}）是重复事件 id 的<b>前缀超串</b>，
      * {@code contains} 会把栅栏的日志也算成重复消息的日志。
      *
      * <p><b>为什么"整词"不能用 {@code \b} 表达</b>：{@code \b} 只要求"词字符与非词字符的交界"。
-     * 栅栏 id 里 {@code idempotent} 的 {@code t} 与随后的 {@code -} 之间**恰好**就有一个这样的交界，
+     * 栅栏 id 里 {@code idempotent} 的 {@code t} 与随后的 {@code -} 之间<b>恰好</b>就有一个这样的交界，
      * 于是 {@code request_id=req-mq-idempotent-fence} 会被旧判据
-     * （{@code request_id=} + {@code \Qreq-mq-idempotent\E} + {@code \b}）判成**重复 id 的记录**。
-     * 收尾边界必须改成 {@code (?![\w-])}：重复 id 之后**不允许**再跟词字符或连字符，
+     * （{@code request_id=} + {@code \Qreq-mq-idempotent\E} + {@code \b}）判成<b>重复 id 的记录</b>。
+     * 收尾边界必须改成 {@code (?![\w-])}：重复 id 之后<b>不允许</b>再跟词字符或连字符，
      * "另一个以重复 id 开头的 id"因此一律不算数。
      *
      * <p>这条负向先行断言是承重的：{@code theSameEventTwiceInsertsExactlyOneRow} 里
-     * "那条 INFO 只可能来自重复消费"的陈述，正是**依赖**它把栅栏 id 排除在外才成立
+     * "那条 INFO 只可能来自重复消费"的陈述，正是<b>依赖</b>它把栅栏 id 排除在外才成立
      * （见 {@link #anIdThatExtendsTheDuplicateIdIsNotItsRecord}）。
      *
      * <p>判据只吃一个纯字符串，所以它可以脱离容器与 broker 被直接钉住 —— 下面两组
@@ -316,7 +316,7 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 反向：**以重复 id 为前缀的另一个 id** 的记录，不能算成重复 id 的记录。
+     * 反向：<b>以重复 id 为前缀的另一个 id</b> 的记录，不能算成重复 id 的记录。
      * 首条就是真实世界里唯一会出现的形状（栅栏消息自己那条 INFO 行），其余是同一类边界的变体。
      */
     @ParameterizedTest(name = "以 " + DUPLICATE_REQUEST_ID + " 为前缀的 id 不算它自己的记录：[{0}]")
@@ -334,7 +334,7 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 正向：重复 id 自己的记录必须被认出来，包括**恰好以 id 收尾**（后面什么都没有）这一种 ——
+     * 正向：重复 id 自己的记录必须被认出来，包括<b>恰好以 id 收尾</b>（后面什么都没有）这一种 ——
      * 收尾边界若写坏成"什么都不匹配"，这条会红。
      */
     @ParameterizedTest(name = DUPLICATE_REQUEST_ID + " 自己的记录必须被认出：[{0}]")
@@ -355,7 +355,7 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
     /**
      * 消费者自己打的 INFO 记录只有「重复消费、已幂等丢弃」这一条，故按 request_id 过滤即可定位它。
      *
-     * <p>要点在 {@code request_id=} 之后的**收尾边界**：栅栏事件也会打同一条 INFO，只有它的
+     * <p>要点在 {@code request_id=} 之后的<b>收尾边界</b>：栅栏事件也会打同一条 INFO，只有它的
      * request_id 不同（{@code req-mq-idempotent-fence}）。见
      * {@link #mentionsRequestId(String, String)}。
      */
@@ -371,10 +371,10 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
      * {@code theSameEventTwiceInsertsExactlyOneRow} 的方法注释）。
      *
      * <p>轮询的依据不是"睡够时间"，而是"出现即可返回"：{@code MeteringConsumer} 用的是全局 logger，
-     * appender 会捕获**任何**消费者实例打出的记录，所以"等到了"这条事实仍然只可能来自
+     * appender 会捕获<b>任何</b>消费者实例打出的记录，所以"等到了"这条事实仍然只可能来自
      * 「重复消息真的被消费过」—— <b>前提是 {@link #mentionsRequestId(String, String)} 的
      * {@code (?![\w-])} 收尾边界真的把「以重复 id 为前缀的另一个 id」排除掉了</b>。
-     * 少了这个前提，「等到了」也可能只是**栅栏自己的** INFO 行：栅栏消息同样会被消费、同样可能
+     * 少了这个前提，「等到了」也可能只是<b>栅栏自己的</b> INFO 行：栅栏消息同样会被消费、同样可能
      * （在消费端分支坏掉时）打出这条 INFO，而它的 request_id 以重复 id 为前缀。
      * 收尾边界的两个方向由 {@link #anIdThatExtendsTheDuplicateIdIsNotItsRecord} 与
      * {@link #theDuplicateIdsOwnRecordIsRecognised} 钉住。
@@ -402,7 +402,7 @@ class MeteringConsumerIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 轮询 DLQ，直到**载荷等于期望值**的消息出现再返回它（不是取收到的第一条）。
+     * 轮询 DLQ，直到<b>载荷等于期望值</b>的消息出现再返回它（不是取收到的第一条）。
      * DLQ 在基类的单例容器里，被整个 JVM 的测试类共享：别的测试类若在中间死信一条消息，
      * 「取第一条」就会变成一次假红。不是我们的消息一律丢弃（与 {@link #drainDeadLetterQueue()} 一致）。
      */

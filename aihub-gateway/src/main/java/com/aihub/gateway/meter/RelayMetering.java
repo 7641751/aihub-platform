@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * 单个请求的计量累加器：把「上游状态 / 捕获到的用量 / 结束信号」翻译成一条 {@link MeteringEvent}。
  *
  * <p><b>两个键都在这里生成一次</b>：{@code requestId}（由调用方传入，来自 {@code RequestIdFilter}）与
- * {@code createdAt}（截断到毫秒）。它们就是 {@code request_log} 幂等键的两半，因此**绝不重新生成**
+ * {@code createdAt}（截断到毫秒）。它们就是 {@code request_log} 幂等键的两半，因此<b>绝不重新生成</b>
  * —— 重投时必须是同一个值（计划「决策登记」第 1/2 条）。
  *
  * <p>{@code tenantId} 取自 {@code ApiKeyAuthFilter} 写进 exchange 的 {@link ApiKeyView}；鉴权关闭时
@@ -28,11 +28,11 @@ import java.util.concurrent.atomic.AtomicReference;
  * <p>{@code apiKeyId}（Task 11 起）同样取自 {@link ApiKeyView#apiKeyId()}：鉴权关闭、或视图里没有
  * 数值主键时保持 {@code null}（列可空，「不知道」比编一个 id 诚实，也不会把用量记到别的 key 头上）。
  *
- * <p>{@code model} 在**事件组装时**被截断到 {@code request_log.model} 的列宽（{@link RelayAttempts#MODEL_MAX_LENGTH}，
+ * <p>{@code model} 在<b>事件组装时</b>被截断到 {@code request_log.model} 的列宽（{@link RelayAttempts#MODEL_MAX_LENGTH}，
  * 决策 15）。转发给上游的请求体从不经过本类，因此仍是客户端写的那串字节。
  *
- * <p>{@code channelId} 由控制器在**凭据到手、即将发出上游请求**时通过
- * {@link #onChannelSelected(ChannelDescriptor)} 更新，因此事件里记的是**实际被调用**的那条渠道
+ * <p>{@code channelId} 由控制器在<b>凭据到手、即将发出上游请求</b>时通过
+ * {@link #onChannelSelected(ChannelDescriptor)} 更新，因此事件里记的是<b>实际被调用</b>的那条渠道
  * （最后那条被联系过的）—— 故障转移之后它不再是首选那条，而在发出请求之前就被跳过的候选
  * （密钥解不开）根本不会出现在这里。
  */
@@ -52,8 +52,8 @@ public final class RelayMetering {
     private final long tenantId;
     private final Long apiKeyId;
     /**
-     * 实际被调用（**凭据已到手、即将发出上游请求**）的渠道 id。**可变**：一次请求可能在故障转移里
-     * 走过好几条候选，事件里要的是**最后那条真的被调用**的（它产生了客户端拿到的响应），而不是
+     * 实际被调用（<b>凭据已到手、即将发出上游请求</b>）的渠道 id。<b>可变</b>：一次请求可能在故障转移里
+     * 走过好几条候选，事件里要的是<b>最后那条真的被调用</b>的（它产生了客户端拿到的响应），而不是
      * 最先被选中的那条。
      */
     private final AtomicReference<Long> channelId = new AtomicReference<>();
@@ -89,15 +89,15 @@ public final class RelayMetering {
     }
 
     /**
-     * 记录一条**即将被真的调用**的候选渠道（多渠道/故障转移，M3）。
+     * 记录一条<b>即将被真的调用</b>的候选渠道（多渠道/故障转移，M3）。
      *
-     * <p>控制器在**解密出该渠道的密钥之后、发出上游请求之前**调用它 —— 也就是这条候选不再只是
+     * <p>控制器在<b>解密出该渠道的密钥之后、发出上游请求之前</b>调用它 —— 也就是这条候选不再只是
      * 「候选名单上的一项」，而是本次请求真的会去联系的一条。因此事件里的 {@code channel_id} 是
-     * 「最后那条被联系过的渠道」：正常路径下它等于服务的那条；故障转移后它等于**备用**那条
+     * 「最后那条被联系过的渠道」：正常路径下它等于服务的那条；故障转移后它等于<b>备用</b>那条
      * （不是首选那条）；所有候选都在响应未提交时失败时它等于最后一次被联系的那条，故障因此可归因。
      *
      * <p><b>刻意不用「最后尝试」这种更强的说法</b>：密钥解不开、在发出请求之前就被跳过的候选
-     * **不算**被尝试过，也绝不会出现在这个字段里（否则「全都解不开」的请求会记下一条从未被联系过的
+     * <b>不算</b>被尝试过，也绝不会出现在这个字段里（否则「全都解不开」的请求会记下一条从未被联系过的
      * 渠道）。写进来的每一条都确实产生过一次上游调用。
      *
      * <p>遗留单渠道的哨兵 id（{@code LegacyChannel.ID}）也照样写进事件（不是 NULL）：这样
@@ -124,11 +124,11 @@ public final class RelayMetering {
     }
 
     /**
-     * 客户端断连。响应已提交之后的写失败**无法**区分「客户端走了」与「上游断了」，
+     * 客户端断连。响应已提交之后的写失败<b>无法</b>区分「客户端走了」与「上游断了」，
      * 而后者有更具体的信号（{@code WebClientRequestException}，由控制器单独标注），
-     * 因此走到这里的一律按客户端断连计 —— 设计文档 §8.1 ⑤ 要求它**不计入错误告警**。
+     * 因此走到这里的一律按客户端断连计 —— 设计文档 §8.1 ⑤ 要求它<b>不计入错误告警</b>。
      *
-     * <p>M3 起控制器在**两处**调用它（同一事实的两种收尾形状）：顶层「已提交 + 写失败」，
+     * <p>M3 起控制器在<b>两处</b>调用它（同一事实的两种收尾形状）：顶层「已提交 + 写失败」，
      * 以及转发时上游 body 的订阅被取消（Netty 在没有在飞的写时会以 {@code onComplete} 收尾，
      * 顶层信号因此是「正常完成」—— 见 {@code ChatRelayController#relay}）。
      */

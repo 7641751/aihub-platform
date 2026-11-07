@@ -11,10 +11,10 @@ import java.util.function.LongSupplier;
  * 单个请求的用量捕获：TTFT、响应字节副本、以及「解析不出 usage 时按内容估算」的兜底。
  *
  * <p><b>不改动被转发的字节</b>：{@link #onChunk} 只用 {@link DataBuffer#asByteBuffer()} 拿到一个
- * **只读视图**并复制出来 —— 视图不推进原 buffer 的读写位置，因此透传出去的仍是上游原字节。
+ * <b>只读视图</b>并复制出来 —— 视图不推进原 buffer 的读写位置，因此透传出去的仍是上游原字节。
  * 这条不变式由 {@code UsageCaptureTest.doesNotConsumeTheDataBuffer} 钉住。
  *
- * <p><b>TTFT 口径</b>：从请求开始到**响应体第一个字节**到达（含上游的 keep-alive / role 帧）。
+ * <p><b>TTFT 口径</b>：从请求开始到<b>响应体第一个字节</b>到达（含上游的 keep-alive / role 帧）。
  * 只有流式才产出 TTFT（{@link #capture()} 对非流式返回 {@code null}）：非流式没有「首字延迟」，
  * 编造一个会污染 M6 的 TTFT 数据（计划「决策登记」第 6 条）。
  * <p>{@link #ttftMs()} 本身返回原始测量值，供单元测试直接验证「首个 chunk 定 TTFT」的语义。

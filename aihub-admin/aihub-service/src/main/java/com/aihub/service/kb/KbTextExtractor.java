@@ -14,7 +14,7 @@ import java.nio.file.Path;
 import java.util.Locale;
 
 /**
- * 把原件抽成纯文本（M5 Task 4）。当前只支持 {@code md} / {@code txt}；{@code pdf} 由 **Task 7** 加进来。
+ * 把原件抽成纯文本（M5 Task 4）。当前只支持 {@code md} / {@code txt}；{@code pdf} 由 <b>Task 7</b> 加进来。
  *
  * <p><b>为什么单独一个类而不是内联在消费者里</b>：抽取是唯一与"文件格式"耦合的一步，独立出来之后
  * Task 7 只需在这里加一个分支（PDFBox），消费端的流程一行都不用动。
@@ -50,10 +50,10 @@ public class KbTextExtractor {
     }
 
     /**
-     * PDF 的**文本层**抽取（M5 Task 7，PDFBox 3.x 的 {@link Loader} + {@link PDFTextStripper}）。
+     * PDF 的<b>文本层</b>抽取（M5 Task 7，PDFBox 3.x 的 {@link Loader} + {@link PDFTextStripper}）。
      *
      * <p><b>没有文本层 ⇒ 返回空串，这是故意的</b>：交给 D14 的出口（`chunkCount == 0` ⇒
-     * `FAILED("无可提取文本")`）—— 扫描件/图片型 PDF 的 YAGNI 边界就在这里，**不做 OCR**，
+     * `FAILED("无可提取文本")`）—— 扫描件/图片型 PDF 的 YAGNI 边界就在这里，<b>不做 OCR</b>，
      * 也绝不把它当成"解析成功"。
      *
      * <p><b>解析失败一律往外抛</b>（文件损坏 / 加密 / 非 PDF）：静默返回空串会把"文件坏了"伪装成

@@ -39,14 +39,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * **配额预扣在真 Redis 上的证据** + 配额控制面写路径的**乐观锁**证据（真 MySQL）。
+ * <b>配额预扣在真 Redis 上的证据</b> + 配额控制面写路径的<b>乐观锁</b>证据（真 MySQL）。
  *
  * <p>容器（{@code redis:7-alpine} / MySQL）由 {@link AbstractIntegrationTest} 单例启动，被测的脚本与调用约定
  * 就是网关将来要跑的那一份 —— {@link QuotaScript#SCRIPT} 是共享模块里的同一个常量。
  *
  * <p><b>刻意不声明 {@code @TestPropertySource}、不 {@code @Import}</b>：本类只用 Redis 与 MySQL，不需要
- * 任何合成密钥，因此与全仓「继承 {@code AbstractIntegrationTest} 且无属性集」的类**共用同一个默认上下文**
- * —— 套件的 Spring 上下文数量**不增加**。
+ * 任何合成密钥，因此与全仓「继承 {@code AbstractIntegrationTest} 且无属性集」的类<b>共用同一个默认上下文</b>
+ * —— 套件的 Spring 上下文数量<b>不增加</b>。
  *
  * <p><b>每个用例用自己的 {@code tenantId}</b>：配额桶按 {@code (tenant, period)} 建，共用租户会让用例
  * 互相污染（CONVENTIONS §8 的容器共享纪律）。
@@ -66,7 +66,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * </ul>
  *
  * <p><b>并发用例一律用有界等待</b>（CONVENTIONS §8）：裸 {@code Future.get()} 在脚本挂死时会让用例
- * **永不返回**（Maven 超时，比红更糟），因此这里 {@code get(30, SECONDS)}，等不到就带原因变红。
+ * <b>永不返回</b>（Maven 超时，比红更糟），因此这里 {@code get(30, SECONDS)}，等不到就带原因变红。
  */
 class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
 
@@ -98,7 +98,7 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
     // ------------------------------------------------------------------ 预扣：原子性 / D15 / 解析契约
 
     /**
-     * **原子性的可证伪证据**：预算 1000、每次估 100、50 个任务并发（16 线程）⇒ 恰好放行 **10** 次。
+     * <b>原子性的可证伪证据</b>：预算 1000、每次估 100、50 个任务并发（16 线程）⇒ 恰好放行 <b>10</b> 次。
      * 预扣是「读已用 → 判定 → 写回」的读改写，Lua 在 Redis 里单线程原子执行；拆成两次客户端往返
      * 就会让多个请求读到同一个已用量、各自判定成功，于是超发（{@code allowed > 10}）。
      * 服务端桶值（第二本独立的账）也必须恰好是 1000。
@@ -133,7 +133,7 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
                 .as("服务端计数器 = 恰好 10 次 × 100").isEqualTo("1000");
     }
 
-    /** D15：{@code 0} 的限额表示**不限**（M4 上线前所有租户都没有配额行，把 {@code 0} 当零会让全员 429）。 */
+    /** D15：{@code 0} 的限额表示<b>不限</b>（M4 上线前所有租户都没有配额行，把 {@code 0} 当零会让全员 429）。 */
     @Test
     void aZeroLimitMeansUnlimitedAndDoesNotBlockAnything() {
         long tenant = 900_102L;
@@ -157,11 +157,11 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * **请求维的强制分支**（覆盖缺口 I-1）：{@code tokenLimit = 0}（token 维不限）而 {@code requestLimit = 3}
+     * <b>请求维的强制分支</b>（覆盖缺口 I-1）：{@code tokenLimit = 0}（token 维不限）而 {@code requestLimit = 3}
      * ⇒ 只考察请求维。同一独立租户连续预扣 4 次（每次估 1 token）：前 3 次放行且剩余请求数递减 2/1/0，
-     * **第 4 次必须被拒绝**。
+     * <b>第 4 次必须被拒绝</b>。
      *
-     * <p>判别力：把 Lua 的 {@code (requestUsed + 1) > requestLimit} 改成**永不成立**
+     * <p>判别力：把 Lua 的 {@code (requestUsed + 1) > requestLimit} 改成<b>永不成立</b>
      * （例如 {@code > requestLimit + 1000000}，即评审 V-7 的形状）⇒ 第 4 次也被放行、剩余请求数不再是 0，
      * 本用例精确变红。契约层的同款哨兵见 {@code QuotaContractTest#theLuaScriptEnforcesTheRequestDimensionWhenItsLimitIsPositive}。
      */
@@ -201,7 +201,7 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
     }
 
     /**
-     * 返回形状不对必须**响亮失败**（{@code IllegalStateException}），不能被当成「Redis 不可用」而静默降级
+     * 返回形状不对必须<b>响亮失败</b>（{@code IllegalStateException}），不能被当成「Redis 不可用」而静默降级
      * —— 那是「脚本写错了永远藏在 Redis 挂了后面」的入口（E.4-(a)）。
      */
     @Test
@@ -217,13 +217,13 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
     // ------------------------------------------------------------------ 控制面：乐观锁 / 上界
 
     /**
-     * **手写乐观锁的可证伪证据**（本仓库不注册 {@code MybatisPlusInterceptor}，{@code @Version} 不生效）：
-     * 两个「各自基于同一 {@code version}」的更新并发执行 ⇒ **恰好一个成功**，另一个抛 {@link BizException}
-     * （**绝不静默覆盖**）。
+     * <b>手写乐观锁的可证伪证据</b>（本仓库不注册 {@code MybatisPlusInterceptor}，{@code @Version} 不生效）：
+     * 两个「各自基于同一 {@code version}」的更新并发执行 ⇒ <b>恰好一个成功</b>，另一个抛 {@link BizException}
+     * （<b>绝不静默覆盖</b>）。
      *
-     * <p><b>为什么这样写才是确定性的</b>：每个线程在自己的事务里**先读一次**（固定 REPEATABLE READ 快照到
+     * <p><b>为什么这样写才是确定性的</b>：每个线程在自己的事务里<b>先读一次</b>（固定 REPEATABLE READ 快照到
      * {@code version=0}），再用 {@link CyclicBarrier} 保证两个线程都读完才各自发 UPDATE。MySQL 的
-     * {@code UPDATE ... WHERE version = 0} 是**加锁读**（看的是最新已提交版本，不是快照），因此后到的那个
+     * {@code UPDATE ... WHERE version = 0} 是<b>加锁读</b>（看的是最新已提交版本，不是快照），因此后到的那个
      * 一定匹配不到 {@code version=0} ⇒ 受影响行数 0。两个线程谁先拿到行锁都一样：只有一个能把
      * {@code version} 从 0 推到 1。
      */
@@ -277,15 +277,15 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
     // ------------------------------------------------------------------ 控制面：并发首建（I-3 生产缺陷）
 
     /**
-     * **并发首建的幂等性**（生产缺陷 I-3）：{@value #FIRST_CREATE_THREADS} 个线程在 {@link CyclicBarrier}
+     * <b>并发首建的幂等性</b>（生产缺陷 I-3）：{@value #FIRST_CREATE_THREADS} 个线程在 {@link CyclicBarrier}
      * 上同时首次 {@link QuotaAdminService#getOrCreate} 同一个 {@code (tenantId, period)} —— 唯一的赢家
      * insert，其余都撞 {@code uk_quota_tenant_period}（{@code DuplicateKeyException}）。修复前那些会把
-     * **读路径**上的并发交错变成 500；修复后**全部线程拿到同一行（同一 id）且不抛**。
+     * <b>读路径</b>上的并发交错变成 500；修复后<b>全部线程拿到同一行（同一 id）且不抛</b>。
      *
      * <p>判别力：把 {@code getOrCreate} 的 {@code catch (DuplicateKeyException)} 兜底去掉 ⇒ 输家线程
      * 直接抛，{@link #await(Future)} 把执行异常折成 {@code AssertionError}，本用例立刻红。
      *
-     * <p>所有线程在**事务之外**过栅栏（{@link #awaitBarrier}），因此不会有 8 个连接同时被占用等待；
+     * <p>所有线程在<b>事务之外</b>过栅栏（{@link #awaitBarrier}），因此不会有 8 个连接同时被占用等待；
      * 等待一律有界（{@code getOrCreate} 的返回用 {@link #await(Future)}）。
      */
     @Test
@@ -363,7 +363,7 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
         }
     }
 
-    /** 有界等待：等不到、抛异常、被中断都带原因变红，**绝不**裸 {@code get()}。 */
+    /** 有界等待：等不到、抛异常、被中断都带原因变红，<b>绝不</b>裸 {@code get()}。 */
     private static <T> T await(Future<T> future) {
         try {
             return future.get(WAIT_SECONDS, TimeUnit.SECONDS);
@@ -393,7 +393,7 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
 
     /**
      * 一次预扣调用（显式给出 {@code requestLimit}；{@code 0} ⇒ 请求维不限）。
-     * {@code tokenLimit = 0} 时 token 维不限，因此用它可以把请求维**单独**隔离出来考察。
+     * {@code tokenLimit = 0} 时 token 维不限，因此用它可以把请求维<b>单独</b>隔离出来考察。
      */
     private QuotaDecision reserve(long tenantId, String period, long estimatedTokens, long tokenLimit,
                                   long requestLimit) {

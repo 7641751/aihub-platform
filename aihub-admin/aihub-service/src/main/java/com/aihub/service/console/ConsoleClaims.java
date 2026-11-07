@@ -2,7 +2,7 @@ package com.aihub.service.console;
 
 /**
  * 控制台令牌的载荷（D3）：{@code sub}（= {@code sys_user.id}）、{@code tenantId}、{@code role}、
- * {@code iat}、{@code exp} —— **恰好这五个字段**，线上用的声明名与这里的组件名一一对应
+ * {@code iat}、{@code exp} —— <b>恰好这五个字段</b>，线上用的声明名与这里的组件名一一对应
  * （{@code userId} ↔ {@code sub} 是唯一一处改名，写死在 {@link ConsoleToken} 的读写里，不做任何
  * "兼容"别的拼法）。
  *
@@ -10,7 +10,7 @@ package com.aihub.service.console;
  * 同一种密钥、同一种算法，这两个声明只会被签出来而没有任何人会去比较它（"不校验的字段就等于没有"）。
  * 详见 {@link ConsoleToken} 的类注释里登记的边界。
  *
- * <p>时间字段一律是 **UTC epoch 秒**（与 {@code Instant.now().getEpochSecond()} 同一基准），
+ * <p>时间字段一律是 <b>UTC epoch 秒</b>（与 {@code Instant.now().getEpochSecond()} 同一基准），
  * 不是毫秒：令牌的生存期是小时级，秒足够，且更小的整数让线上令牌短一点。
  *
  * <p>两个角色常量是 {@code /api/**} 授权的唯一两级（D10）：{@code ADMIN} 可读写、
@@ -26,7 +26,7 @@ public record ConsoleClaims(long userId, long tenantId, String role, long issued
      * 控制台只读用户：{@code /api/**} 仅 GET/HEAD/OPTIONS。
      *
      * <p>{@code OPTIONS} 也在只读集合内，与 {@code ConsoleAuthFilter.READ_METHODS} 一致：
-     * 它是**无副作用**的（CORS 预检要用），所以放行它不等于给了只读用户任何写能力。
+     * 它是<b>无副作用</b>的（CORS 预检要用），所以放行它不等于给了只读用户任何写能力。
      * 真正要 403 的是 POST/PUT/PATCH/DELETE。
      */
     public static final String ROLE_VIEWER = "VIEWER";
