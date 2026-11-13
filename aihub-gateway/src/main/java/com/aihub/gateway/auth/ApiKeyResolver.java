@@ -22,9 +22,9 @@ import java.time.Duration;
  * <p>Redis 载荷用 {@link ApiKeyCacheCodec} 编解码，key 前缀用它的公开常量
  * {@link ApiKeyCacheCodec#CACHE_KEY_PREFIX} —— 与 admin 写入时用的是<b>同一个常量</b>，
  * 因此不存在「两边字面量写歪了、缓存永远 miss 却无人报错」的隐患。
- * <p><b>线程模型</b>：{@code StringRedisTemplate} 是<b>阻塞</b>驱动（Lettuce 同步 API + 2s
- * {@code spring.data.redis.timeout}），而本类的调用方是 {@code WebFilter}，即 Netty event loop。
- * 直接在 event loop 上调用它，意味着 Redis 不可达时每个 event loop 线程都被按住 2 秒 ——
+ * <p><b>线程模型</b>：{@code StringRedisTemplate} 是<b>阻塞</b>驱动（Lettuce 同步 API + 一个超时窗，
+ * {@code spring.data.redis.timeout} 现为 300 ms / 2026-10-06 事故时是 2 s），而调用方是 Netty event loop。
+ * 直接在 event loop 上调用它，意味着 Redis 不可达时每个 event loop 线程都被按住一整个超时窗 ——
  * 共享同一个 loop 的所有请求（{@code /healthz} 也在内）一起卡住，而且这<b>不是</b>异常，下面的
  * {@code catch (RuntimeException)} 降级路径救不了一个正在阻塞的线程。因此两次 Redis I/O 都
  * 显式调度到 {@link Schedulers#boundedElastic()}（见 {@link #readRedis} 与 {@link #writeRedis}）：

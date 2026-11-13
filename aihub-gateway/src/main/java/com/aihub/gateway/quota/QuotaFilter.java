@@ -62,7 +62,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * 不靠「应该没事」。
  *
  * <p><b>阻塞的 Redis 调用离开 event loop</b>：判定整体在 {@link #LIMITER_SCHEDULER} 上执行
- * （与 {@code RateLimitFilter} 同一纪律；网关侧 {@code spring.data.redis.timeout} 仍是 2 秒，
+ * （与 {@code RateLimitFilter} 同一纪律；网关侧 {@code spring.data.redis.timeout} 是 300 ms，
  * 占住 event loop 就是灾难）。
  */
 @Component

@@ -16,7 +16,7 @@ import java.util.List;
  *
  * <p><b>阻塞 I/O</b>：{@code StringRedisTemplate} 是 Lettuce 的<b>同步</b> API。本类只提供同步方法，
  * 调用方（过滤器路径）必须明白它的代价：Redis 不可达时每次调用会被按住
- * {@code spring.data.redis.timeout}（2 秒）。缓解手段是 {@link RateLimiter} 的<b>粘性降级</b>
+ * {@code spring.data.redis.timeout}（现为 300 ms；2026-10-06 事故时是 2 秒）。缓解手段是 {@link RateLimiter} 的<b>粘性降级</b>
  * （一旦发现不可用，接下来 1 秒内直接走本机桶，不再每次撞超时）。
  */
 public class RedisRateLimiter {

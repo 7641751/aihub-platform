@@ -43,8 +43,8 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p><b>线程模型：判定整体在 {@link #LIMITER_SCHEDULER} 上执行，绝不占 event loop。</b>
  * 这条链上一个判定要做两件<b>阻塞</b>的事：策略解析会调 {@code ConfigClient.current()}（两级缓存
  * 未命中时是同步 Redis GET，必要时还有一次同步回源），而 {@code RedisRateLimiter} 是阻塞的
- * Lua 调用。{@code spring.data.redis.timeout} 是 2 秒：Redis <b>卡住</b>（不是拒绝）时，在 event loop
- * 上做这些事会把共享同一个 loop 的所有请求一起按住 2 秒 —— {@code /healthz} 也不例外，
+ * Lua 调用。{@code spring.data.redis.timeout} 曾是 2 秒（2026-10-06 事故时的值，现为 300 ms）：Redis
+ * <b>卡住</b>（不是拒绝）时，在 event loop 上做这些事会把共享同一个 loop 的所有请求一起按住 —— {@code /healthz} 也不例外，
  * 而且这不是异常，{@code catch} 救不了一个正在阻塞的线程。这与 M2 给 {@code ApiKeyResolver} 的
  * Redis 读取所做的处置是同一件事（同一套理由：`StringRedisTemplate` 是阻塞驱动，而调用方是
  * {@code WebFilter}）。顺带它也把「{@code ConfigClient} 在冷缓存时会 {@code Mono.block()}」
