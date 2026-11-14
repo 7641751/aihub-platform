@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongSupplier;
 
 /**
  * 限流的<b>唯一入口</b>，也是「Redis 挂了怎么办」这条降级规则的唯一落点
@@ -13,9 +14,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>顺序：解析策略 → 试 Redis → Redis 说「我不可用」就试本机桶。
  * <b>绝不返回「拒绝」来表达自身故障</b>：故障只能转化为「换一种近似」，不能转化为「拒绝服务」。
  *
- * <p>降级是<b>粘性一秒</b>的（避免 Redis 挂掉时每个请求都先等一次超时窗，现 300 ms、事故时 2 s）：本机桶命中一次后，
- * 标记为降级并记录时刻，接下来 1 秒内直接走本机桶。这是性能取舍，不是正确性取舍 ——
+ * <p>降级是<b>粘性一秒</b>的（避免 Redis 挂掉时每个请求都先等一次超时窗，现 300 ms、事故时 2 s）：
+ * Redis 返回「不可用」那一刻就标记降级并记录时刻（<b>在本机桶被用到之前</b>，不是「本机桶命中一次后」），
+ * 接下来 1 秒内直接走本机桶、连试都不试 Redis。这是性能取舍，不是正确性取舍 ——
  * 恢复后最多晚 1 秒回到 Redis。
+ *
+ * <p>时钟是<b>注入</b>的（{@link LongSupplier}，与 {@link LocalRateLimiter} 同一做法）：
+ * 粘性窗口的边界是「跨过 1 秒那一刻」，只有可注入的时钟才能在不 sleep 的前提下测到它。
+ * 生产取 {@code System::currentTimeMillis}，见 {@link RateLimiterConfig}。
  */
 public class RateLimiter {
 
@@ -27,20 +33,33 @@ public class RateLimiter {
     private final LocalRateLimiter local;
     private final RateLimitResolver resolver;
     private final long degradeStickyMillis;
+    private final LongSupplier clockMillis;
 
     private final AtomicBoolean redisDegraded = new AtomicBoolean(false);
     private volatile long degradedAtMillis;
 
     public RateLimiter(RedisRateLimiter redis, LocalRateLimiter local, RateLimitResolver resolver) {
-        this(redis, local, resolver, DEFAULT_DEGRADE_STICKY_MILLIS);
+        this(redis, local, resolver, DEFAULT_DEGRADE_STICKY_MILLIS, System::currentTimeMillis);
+    }
+
+    /** 默认粘性窗口 + 可注入时钟：给「1 秒这个数本身」写边界用例用。 */
+    public RateLimiter(RedisRateLimiter redis, LocalRateLimiter local, RateLimitResolver resolver,
+                       LongSupplier clockMillis) {
+        this(redis, local, resolver, DEFAULT_DEGRADE_STICKY_MILLIS, clockMillis);
     }
 
     public RateLimiter(RedisRateLimiter redis, LocalRateLimiter local, RateLimitResolver resolver,
                        long degradeStickyMillis) {
+        this(redis, local, resolver, degradeStickyMillis, System::currentTimeMillis);
+    }
+
+    public RateLimiter(RedisRateLimiter redis, LocalRateLimiter local, RateLimitResolver resolver,
+                       long degradeStickyMillis, LongSupplier clockMillis) {
         this.redis = redis;
         this.local = local;
         this.resolver = resolver;
         this.degradeStickyMillis = degradeStickyMillis;
+        this.clockMillis = clockMillis;
     }
 
     /**
@@ -81,11 +100,11 @@ public class RateLimiter {
     }
 
     private boolean isDegradedNow() {
-        return redisDegraded.get() && System.currentTimeMillis() - degradedAtMillis < degradeStickyMillis;
+        return redisDegraded.get() && clockMillis.getAsLong() - degradedAtMillis < degradeStickyMillis;
     }
 
     private void markDegraded() {
-        degradedAtMillis = System.currentTimeMillis();
+        degradedAtMillis = clockMillis.getAsLong();
         if (redisDegraded.compareAndSet(false, true)) {
             log.error("Redis 限流不可用，已降级为本地令牌桶（单机近似，多实例下实际放行量约为「策略 × 实例数」）");
         }

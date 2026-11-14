@@ -159,6 +159,7 @@ class RateLimitFilterTest {
         assertThat(passed.get()).isNotNull();
         assertThat(limiter.calls).isZero();
         assertThat(exchange.getResponse().getStatusCode()).isNull();
+        assertNoRateLimitHeaders(exchange);
     }
 
     @Test
@@ -171,6 +172,26 @@ class RateLimitFilterTest {
 
         assertThat(passed.get()).isNotNull();
         assertThat(limiter.calls).isZero();
+        assertNoRateLimitHeaders(exchange);
+    }
+
+    /**
+     * G4：守卫直接放行时<b>一个限流响应头都不写</b>。
+     *
+     * <p>这条断言的价值不在「现在是对的」，而在于它<b>能变红</b>：把
+     * {@code writeDecisionHeaders} 提到守卫之前（或让守卫路径带一个默认的 limit），这两条用例立刻失败。
+     * 在此之前，「跳过时无响应头」这半句是没有任何用例守着的声明。
+     *
+     * <p>为什么这条规则重要：客户端拿到 {@code ratelimit-limit} 就相信「这个接口有限流保护」。
+     * 守卫路径（开关关掉 / 非 {@code /v1/**}）根本没有判定过，写一个数字出去是在报告一个不存在的判定。
+     */
+    private static void assertNoRateLimitHeaders(MockServerWebExchange exchange) {
+        assertThat(exchange.getResponse().getHeaders().getFirst(RateLimitFilter.LIMIT_HEADER))
+                .as("守卫路径没做判定，不得报告 limit").isNull();
+        assertThat(exchange.getResponse().getHeaders().getFirst(RateLimitFilter.REMAINING_HEADER))
+                .as("守卫路径没做判定，不得报告 remaining").isNull();
+        assertThat(exchange.getResponse().getHeaders().getFirst(RateLimitFilter.RETRY_AFTER_HEADER))
+                .as("守卫路径没有拒绝，不得报告 retry-after").isNull();
     }
 
     /** 鉴权关闭（没有 view）时不能「无限放行」：用 tenant=0 + anonymous 的桶仍然限流。 */

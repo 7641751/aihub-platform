@@ -125,6 +125,43 @@ class RateLimiterTest {
     }
 
     /**
+     * G2：粘性窗口的边界是「<b>跨过</b> 1 秒那一刻」，这条钉住 999 ms 还在窗口内、1000 ms 已经出窗口。
+     *
+     * <p>为什么需要它：在时钟可注入之前，本类只能用 {@code 0} 与 {@code 60_000} 两个极端绕开边界 ——
+     * 前者任何时刻都算「已过」、后者任何时刻都算「未过」。两个极端之间那一毫秒从来没被测过，
+     * 于是「窗口真的是 1 秒」这件事是靠读代码相信的，不是靠用例证明的。
+     *
+     * <p>现在时钟从构造器注入（与 {@link LocalRateLimiter} 同一做法），推进它不需要 sleep。
+     */
+    @Test
+    void theStickyWindowIsStillOpenAt999MillisAndClosedAt1000() {
+        when(redis.execute(any(RedisScript.class), anyList(), any(Object[].class)))
+                .thenThrow(new RedisConnectionFailureException("测试桩：Redis 不可用"))
+                .thenReturn(List.of(1L, 5L, 0L))
+                .thenReturn(List.of(1L, 5L, 0L));
+        // 三参构造器 ⇒ 用的是产品里的默认粘性窗口，而不是测试自己挑的一个数。
+        RateLimiter limiter = new RateLimiter(new RedisRateLimiter(redis),
+                new LocalRateLimiter(100, clock::get),
+                new RateLimitResolver(ConfigSnapshot::empty),
+                clock::get);
+
+        assertThat(limiter.acquire(7L, 42L, "abc").source())
+                .as("第一次撞上 Redis 故障 ⇒ 降级").isEqualTo(RateLimitDecision.Source.LOCAL);
+        verify(redis, times(1)).execute(any(RedisScript.class), anyList(), any(Object[].class));
+
+        // 999 ms：还在粘性窗口内 —— 不碰 Redis。
+        clock.addAndGet(999L);
+        assertThat(limiter.acquire(7L, 42L, "abc").source()).isEqualTo(RateLimitDecision.Source.LOCAL);
+        verify(redis, times(1)).execute(any(RedisScript.class), anyList(), any(Object[].class));
+
+        // 再过 1 ms（累计 1000 ms）：窗口已过 —— 必须重新试 Redis，且这次它成功了。
+        clock.addAndGet(1L);
+        assertThat(limiter.acquire(7L, 42L, "abc").source())
+                .as("跨过 1000 ms 就必须回到 Redis").isEqualTo(RateLimitDecision.Source.REDIS);
+        verify(redis, times(2)).execute(any(RedisScript.class), anyList(), any(Object[].class));
+    }
+
+    /**
      * 策略解析必须真的接进门面，并且<b>桶的维度与策略的维度是两件事</b>：key 级策略生效时，
      * 桶 key 仍是 {@code aihub:ratelimit:{tenantId}:{sha256(secret)}}（决策 8）。
      */
