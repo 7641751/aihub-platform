@@ -81,20 +81,21 @@
       <!-- 日志视图：租户 + 时间范围查询 -->
       <section id="logs-panel" class="card" hidden>
         <h2>请求日志</h2>
+        <p id="logs-timezone" class="muted">浏览器本地时间</p>
         <form id="logs-form" autocomplete="off">
           <label for="logs-tenant-id">tenantId</label>
           <input id="logs-tenant-id" placeholder="tenantId" required>
           <label for="logs-from">从</label>
-          <input id="logs-from" type="datetime-local">
+          <input id="logs-from" type="datetime-local" aria-describedby="logs-timezone">
           <label for="logs-to">到</label>
-          <input id="logs-to" type="datetime-local">
+          <input id="logs-to" type="datetime-local" aria-describedby="logs-timezone">
           <button type="submit">查询</button>
         </form>
         <table>
           <thead>
             <tr><th>requestId</th><th>状态</th><th>模型</th><th>created_at</th></tr>
           </thead>
-          <tbody id="logs-body"></tbody>
+          <tbody id="logs-body" aria-busy="false"></tbody>
         </table>
         <p id="logs-message" class="message" role="status"></p>
       </section>

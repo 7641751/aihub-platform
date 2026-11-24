@@ -98,14 +98,10 @@ class ConsoleStaticResourceTest extends AbstractIntegrationTest {
 
     @Test
     void theLogsQueryAlwaysCarriesAWellFormedFromAndTo() {
-        // 评审 B-1 的回归钉：服务端的 from/to **必填**且必须是可被 Instant.parse 解析的**带 Z 的 UTC**
-        // 字面量（缺省或解析失败 ⇒ 400），而 <input type="datetime-local"> 的值没有秒、没有时区。
+        // 用户输入浏览器本地时间，两个 API 参数统一转换为 UTC。
         String js = read("console.js");
-        assertThat(js).as("必须把 datetime-local 的值规范化成带 Z 的 UTC 字面量")
-                .contains("utcInstant(");
-        assertThat(js).as("原缺陷形状：只在输入非空时才带 from/to（空输入 ⇒ 必然 400）—— 不许回来")
-                .doesNotContain("if (byId(\"logs-from\").value)")
-                .doesNotContain("if (byId(\"logs-to\").value)");
+        assertThat(js).contains("from.toISOString()", "to.toISOString()");
+        assertThat(read("index.html")).contains("id=\"logs-timezone\"");
     }
 
     /**

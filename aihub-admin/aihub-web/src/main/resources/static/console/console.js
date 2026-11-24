@@ -17,6 +17,7 @@
   var state = { token: null, tenantId: null, role: null };
   var channelListRequest = null;
   var channelProbes = new Map();
+  var logsQuerySequence = 0;
 
   function byId(id) {
     return document.getElementById(id);
@@ -67,7 +68,7 @@
         })
         .then(function (envelope) {
           if (response.status === 401 && opts.authRedirect !== false) {
-            if (state.token === token) {
+            if (state.token === token && (!opts.isCurrent || opts.isCurrent())) {
               clearSession();
               showLoginView("登录已失效，请重新登录");
             }
@@ -162,6 +163,13 @@
     state.role = null;
     channelListRequest = null;
     channelProbes.clear();
+    logsQuerySequence++;
+    byId("logs-form").reset();
+    byId("logs-body").setAttribute("aria-busy", "false");
+    byId("logs-from").setAttribute("aria-invalid", "false");
+    byId("logs-to").setAttribute("aria-invalid", "false");
+    setText(byId("logs-body"), "");
+    setMessage(byId("logs-message"), "", false);
     byId("channel-form").reset();
     byId("key-form").reset();
     byId("plaintext-box").hidden = true;
@@ -371,34 +379,54 @@
 
   // --- 日志视图 -------------------------------------------------------------
 
-  function renderLogs(page) {
-    renderRows(byId("logs-body"), page.records || [], ["requestId", "status", "model", "createdAt"]);
-  }
-
-  // 服务端的 from/to 是**必填**且必须是可被 Instant.parse 解析的**带 Z 的 UTC** 字面量
-  // （缺省或解析失败一律 400，见 docs/CONVENTIONS.md §10 R3.1 与 Task 11 的裁定 3）。
-  // 而 <input type="datetime-local"> 的值形如 "2026-10-02T15:30"（**无秒、无时区**）：
-  // 直接透传必然 400；输入为空时原样省略也必然 400。所以在这里统一补齐秒与 Z，并在
-  // 为空时给一个「最近 24 小时」的窗口 —— 否则点一次「查询」永远查不出东西。
-  function utcInstant(value, fallbackMillis) {
-    if (!value) {
-      return new Date(fallbackMillis).toISOString().replace(/\.[0-9]{3}Z$/, "Z");
-    }
-    return (value.length === 16 ? value + ":00" : value) + "Z";
-  }
-
   function submitLogs(event) {
     event.preventDefault();
-    setMessage(byId("logs-message"), "", false);
+    var queryId = ++logsQuerySequence;
+    function isCurrent() { return queryId === logsQuerySequence; }
+
+    var body = byId("logs-body");
+    var message = byId("logs-message");
+    var fromInput = byId("logs-from");
+    var toInput = byId("logs-to");
     var tenantId = byId("logs-tenant-id").value || state.tenantId;
     var now = Date.now();
+    // datetime-local 的值按浏览器本地时间解析，API 接收 UTC 绝对时刻。
+    var from = new Date(fromInput.value || now - 24 * 60 * 60 * 1000);
+    var to = new Date(toInput.value || now);
+    setText(body, "");
+    fromInput.setAttribute("aria-invalid", "false");
+    toInput.setAttribute("aria-invalid", "false");
+    var invalidInput = Number.isNaN(to.getTime()) ? toInput : fromInput;
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) {
+      body.setAttribute("aria-busy", "false");
+      setMessage(message, from > to ? "起始时间不能晚于结束时间" : "请输入有效的本地时间", true);
+      invalidInput.setAttribute("aria-invalid", "true");
+      invalidInput.focus();
+      return;
+    }
+
+    body.setAttribute("aria-busy", "true");
+    setMessage(message, "正在查询…", false);
     var query = "tenantId=" + encodeURIComponent(tenantId)
-        + "&from=" + encodeURIComponent(utcInstant(byId("logs-from").value, now - 24 * 60 * 60 * 1000))
-        + "&to=" + encodeURIComponent(utcInstant(byId("logs-to").value, now));
-    api("/api/logs?" + query)
-      .then(renderLogs)
+        + "&from=" + encodeURIComponent(from.toISOString())
+        + "&to=" + encodeURIComponent(to.toISOString());
+    api("/api/logs?" + query, { isCurrent: isCurrent })
+      .then(function (page) {
+        if (isCurrent()) {
+          var records = page.records || [];
+          renderRows(body, records, ["requestId", "status", "model", "createdAt"]);
+          setMessage(message, records.length ? "本页 " + records.length + " 条请求" : "该时间范围内没有请求", false);
+        }
+      })
       .catch(function (error) {
-        setMessage(byId("logs-message"), describe(error), true);
+        if (isCurrent()) {
+          setMessage(message, describe(error), true);
+        }
+      })
+      .finally(function () {
+        if (isCurrent()) {
+          body.setAttribute("aria-busy", "false");
+        }
       });
   }
 
@@ -460,6 +488,8 @@
   // --- 启动 -----------------------------------------------------------------
 
   function init() {
+    var timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    setText(byId("logs-timezone"), "浏览器本地时间（" + timeZone + "）");
     byId("login-form").addEventListener("submit", submitLogin);
     byId("logout-btn").addEventListener("click", submitLogout);
     byId("tab-channels").addEventListener("click", function () { selectTab("channels"); });

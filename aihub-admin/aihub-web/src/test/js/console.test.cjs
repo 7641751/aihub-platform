@@ -12,13 +12,16 @@ const script = readFileSync(join(assets, 'console.js'), 'utf8');
 function element(tagName, hidden = false) {
   const listeners = new Map();
   const classes = new Set();
+  const attributes = new Map();
   let text = '';
   return {
-    tagName, hidden, disabled: false, children: [],
+    tagName, hidden, disabled: false, children: [], value: '',
     classList: { toggle: (name, enabled) => enabled ? classes.add(name) : classes.delete(name) },
     hasClass: (name) => classes.has(name),
     addEventListener: (name, callback) => listeners.set(name, callback),
-    setAttribute() {},
+    setAttribute: (name, value) => attributes.set(name, String(value)),
+    getAttribute: (name) => attributes.get(name),
+    focus() { this.focused = true; },
     appendChild(child) { this.children.push(child); },
     dispatch(name) { listeners.get(name)({ preventDefault() {} }); },
     click() { if (!this.disabled) this.dispatch('click'); },
@@ -34,7 +37,7 @@ function response(data, status = 200, code = 'OK', message = '') {
 
 async function openConsole(role, probe, channels = [
   { id: 42, name: 'primary', provider: 'openai', baseUrl: 'https://example.test', status: 'ACTIVE' }
-]) {
+], handleRequest = (path) => { throw new Error('Unexpected request ' + path); }) {
   const elements = new Map(Array.from(html.matchAll(/<([a-z]+) [^>]*?\bid="([^"]+)"([^>]*)>/g),
     ([, tag, id, attributes]) => [id, element(tag, /\bhidden\b/.test(attributes))]));
   let token = 'test-token';
@@ -59,7 +62,7 @@ async function openConsole(role, probe, channels = [
         case '/api/ping': return response({ role: token === 'viewer-token' ? 'VIEWER' : role, tenantId: 1 });
         case '/api/channels': return response(channels);
         case '/api/channels/42/probe': return probe();
-        default: throw new Error('Unexpected request ' + path);
+        default: return handleRequest(path, options);
       }
     }
   });
@@ -70,6 +73,116 @@ async function openConsole(role, probe, channels = [
 function nextTurn() {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+async function openLogs(respond) {
+  const page = await openConsole('VIEWER', undefined, undefined, (path) => {
+    assert.ok(path.startsWith('/api/logs?'), path);
+    return respond(new URLSearchParams(path.split('?')[1]));
+  });
+  page.byId('tab-logs').click();
+  return page;
+}
+
+for (const [zone, utc] of [['Asia/Shanghai', '08:00'], ['UTC', '16:00']]) {
+  test(`log requests convert ${zone} local time to UTC`, async () => {
+    const previous = process.env.TZ;
+    process.env.TZ = zone;
+    try {
+      let query;
+      const page = await openLogs((params) => {
+        query = params;
+        return response({ records: [] });
+      });
+      page.byId('logs-from').value = '2026-11-24T16:00';
+      page.byId('logs-to').value = '2026-11-24T16:00';
+      page.byId('logs-form').dispatch('submit');
+      await nextTurn();
+      assert.equal(query.get('from'), `2026-11-24T${utc}:00.000Z`);
+      assert.equal(query.get('to'), query.get('from'));
+      assert.match(page.byId('logs-timezone').textContent, new RegExp(zone));
+      assert.equal(page.byId('logs-message').textContent, '该时间范围内没有请求');
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  });
+}
+
+test('log results, errors and busy state belong to the latest query', async () => {
+  const requests = [];
+  const page = await openLogs(() => new Promise((resolve) => { requests.push(resolve); }));
+  const form = page.byId('logs-form');
+  const body = page.byId('logs-body');
+  const message = page.byId('logs-message');
+  const success = (requestId) => response({ records: [{ requestId, status: 'SUCCESS' }] });
+
+  form.dispatch('submit');
+  requests[0](success('previous'));
+  await nextTurn();
+  assert.match(body.textContent, /previous/);
+  form.dispatch('submit');
+  assert.equal(body.textContent, '');
+  assert.match(message.textContent, /正在查询/);
+  assert.equal(body.getAttribute('aria-busy'), 'true');
+  form.dispatch('submit');
+  requests[1](success('while pending'));
+  await nextTurn();
+  assert.equal(body.textContent, '');
+  assert.equal(body.getAttribute('aria-busy'), 'true');
+
+  form.dispatch('submit');
+  requests[3](success('new result'));
+  await nextTurn();
+  assert.equal(body.getAttribute('aria-busy'), 'false');
+  assert.match(body.textContent, /new result/);
+  assert.match(message.textContent, /1 条/);
+  requests[2](response(null, 500, 'INTERNAL_ERROR', 'old error'));
+  await nextTurn();
+  assert.match(body.textContent, /new result/);
+  assert.match(message.textContent, /1 条/);
+});
+
+test('logs default to the last 24 hours and an error keeps the filters for retry', async () => {
+  const queries = [];
+  const page = await openLogs((params) => {
+    queries.push(params);
+    return queries.length === 1 ? response(null, 500, 'INTERNAL_ERROR', 'retry') : response({ records: [] });
+  });
+  const tenant = page.byId('logs-tenant-id');
+  tenant.value = '42';
+  page.byId('logs-form').dispatch('submit');
+  await nextTurn();
+  assert.match(page.byId('logs-message').textContent, /INTERNAL_ERROR/);
+  assert.equal(tenant.value, '42');
+  assert.equal(queries[0].get('tenantId'), '42');
+  assert.equal(Date.parse(queries[0].get('to')) - Date.parse(queries[0].get('from')), 24 * 60 * 60 * 1000);
+  page.byId('logs-form').dispatch('submit');
+  await nextTurn();
+  assert.equal(page.byId('logs-message').textContent, '该时间范围内没有请求');
+});
+
+test('a reversed log range focuses the start without issuing a request', async () => {
+  const page = await openLogs(() => { throw new Error('invalid range was submitted'); });
+  page.byId('logs-from').value = '2026-11-24T18:00';
+  page.byId('logs-to').value = '2026-11-24T16:00';
+  page.byId('logs-form').dispatch('submit');
+  assert.equal(page.requests.some((request) => request.path.startsWith('/api/logs?')), false);
+  assert.equal(page.byId('logs-from').focused, true);
+  assert.match(page.byId('logs-message').textContent, /起始时间不能晚于结束时间/);
+});
+
+test('logging out invalidates an unfinished log query', async () => {
+  let finish;
+  const page = await openLogs(() => new Promise((resolve) => { finish = resolve; }));
+  page.byId('logs-form').dispatch('submit');
+  page.byId('logout-btn').click();
+  page.byId('login-form').dispatch('submit');
+  await nextTurn();
+  finish(response({ records: [{ requestId: 'previous session' }] }));
+  await nextTurn();
+  assert.equal(page.byId('logs-body').textContent, '');
+  assert.equal(page.byId('logs-message').textContent, '');
+});
 
 test('an administrator can probe one channel and see the upstream status, duration and message', async () => {
   let finishProbe;
