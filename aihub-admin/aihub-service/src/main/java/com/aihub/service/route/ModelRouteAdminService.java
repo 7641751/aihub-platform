@@ -21,12 +21,8 @@ import java.util.Map;
  * {@code tenant_id}），因此按 {@code docs/CONVENTIONS.md} §10 的 <b>R1</b>：读写都是平台级，
  * 任何 {@code ADMIN} 都有权；审计的 {@code tenant_id} 记 <b>SQL NULL</b>（不是 0、不是操作者的租户）。
  *
- * <p><b>每一次写都在同一个 {@code @Transactional} 里做三件事</b>：业务写 + 审计
- * （{@link AuditService#record} 刻意不加 {@code REQUIRES_NEW}，因此加入本方法的事务）+
- * {@link ConfigChangePublisher#publishAfterCommit(String)}（注册 after-commit 钩子，<b>提交之后</b>才
- * 抬水位并广播）。回滚时三者一起作废 —— 由 Task 8 的
- * {@code ChannelAdminIntegrationTest#rolledBackWritePublishesNothingAndDoesNotRaiseTheWatermark} 钉住
- * （本任务按计划只做正向）。
+ * <p>路由修改、审计和版本分配使用同一事务。{@link ConfigChangePublisher#publishAfterCommit(String)}
+ * 在事务末尾分配版本，提交后广播。
  *
  * <p><b>唯一键冲突必须翻译成 400</b>：{@code model_route} 上有
  * {@code uk_model_route(model_name, channel_id)}，违反时直接抛的 {@link DuplicateKeyException} 会落到

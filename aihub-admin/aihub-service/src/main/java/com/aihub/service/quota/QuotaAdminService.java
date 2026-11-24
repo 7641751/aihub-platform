@@ -154,11 +154,10 @@ public class QuotaAdminService {
         auditService.record(tenantId, actor, AuditAction.QUOTA_UPDATE, TARGET_TYPE, String.valueOf(current.id()),
                 Map.of("period", period, "tokenLimit", tokenLimit, "requestLimit", requestLimit));
 
-        // 让数据面（网关）立刻丢掉手上的旧快照：quota 现在会被组装进快照（Task 13）。
-        // 走 publishAfterCommit —— 本方法在事务里，发布必须在**提交之后**（回滚的写不许广播、不许抬水位）。
+        QuotaSummary updated = summary(find(tenantId, period));
+        // 事务末尾分配配置版本，提交后通知网关刷新配额快照。
         configChangePublisher.publishAfterCommit(INVALIDATE_REASON_QUOTA_UPDATE);
-
-        return summary(find(tenantId, period));
+        return updated;
     }
 
     // ---------------------------------------------------------------- 内部

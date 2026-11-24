@@ -19,6 +19,7 @@ import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.listener.ChannelTopic;
 import org.springframework.data.redis.listener.RedisMessageListenerContainer;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
 import java.util.List;
@@ -48,7 +49,7 @@ import static org.mockito.Mockito.when;
  * {@code RedisMessageListenerContainer} 字段，所以这里用注入的 {@link RedisConnectionFactory} 现搭一个
  * （brief 里的 {@code container.addMessageListener(...)} 是伪代码）。
  *
- * <p>四个用例都不需要额外的 Docker 容器（复用基类的单例）：成功路径与「无活动事务立即发布」路径用真
+ * <p>用例复用基类的容器。成功路径与「无外层事务」路径用真
  * Redis，两条失败路径（Redis 抛异常、reason 为空被 codec 拒绝）用替身 Redis —— 「发布失败绝不让业务写失败」
  * 是<b>异常路径</b>，不能靠真 Redis 去制造。
  */
@@ -70,6 +71,9 @@ class ConfigChangePublisherTest extends AbstractIntegrationTest {
 
     @Autowired
     private RedisConnectionFactory redisConnectionFactory;
+
+    @Autowired
+    private TransactionTemplate transactionTemplate;
 
     private RedisMessageListenerContainer listenerContainer;
 
@@ -96,23 +100,15 @@ class ConfigChangePublisherTest extends AbstractIntegrationTest {
         assertThat(configVersionMapper.current()).isGreaterThanOrEqualTo(version);
     }
 
-    /**
-     * {@code publishAfterCommit} 的<b>另一个分支</b>：没有活动事务时必须<b>立即</b>抬水位并广播，绝不静默
-     * 不发布（{@code ConfigChangePublisher} 的 javadoc 把两个分支都写成「被钉死」，而这条直到现在没有
-     * 任何用例 —— 集成测试里的写路径全部经过 {@code @Transactional} 服务，只覆盖 after-commit 那一半。
-     * Task 8 的独立评审把它登记为 N2）。
-     *
-     * <p>形状与成功路径一致：真 Redis + 一条真订阅 + 有界等待。等不到就带着原因变红（而不是断言
-     * 「某个方法被调用过」）。删掉「没有活动事务就立即发布」那一行时本用例必须变红。
-     */
+    /** 无外层事务时，代理提交版本分配事务，返回前尝试发布失效通知。 */
     @Test
-    void publishAfterCommitPublishesImmediatelyWhenNoTransactionIsActive() throws Exception {
+    void publishAfterCommitStartsItsOwnTransactionWhenCalledOutsideOne() throws Exception {
         BlockingQueue<String> received = new LinkedBlockingQueue<>();
         container().addMessageListener((m, ch) -> received.add(new String(m.getBody())),
                 new ChannelTopic(ConfigInvalidateTopology.CHANNEL));
         awaitSubscription(received);
 
-        // 本用例方法刻意**不带** @Transactional：所以这里确实没有活动的事务同步（立即发布分支）。
+        // 本用例没有外层事务，Spring 代理负责开始并提交版本分配事务。
         publisher.publishAfterCommit("channel.create");
 
         String payload = received.poll(5, TimeUnit.SECONDS);
@@ -128,15 +124,37 @@ class ConfigChangePublisherTest extends AbstractIntegrationTest {
                 .isGreaterThanOrEqualTo(message.version());
     }
 
+    @Test
+    void bothEntriesPublishTheirAllocatedVersionsOnlyAfterCommit() throws Exception {
+        BlockingQueue<String> received = new LinkedBlockingQueue<>();
+        container().addMessageListener((m, ch) -> received.add(new String(m.getBody())),
+                new ChannelTopic(ConfigInvalidateTopology.CHANNEL));
+        awaitSubscription(received);
+
+        List<ConfigInvalidateMessage> expected = transactionTemplate.execute(status -> {
+            long first = publisher.bumpAndPublish("channel.create");
+            publisher.publishAfterCommit("channel.update");
+            long second = configVersionMapper.current();
+            assertThat(second).isGreaterThan(first);
+            assertThat(received).isEmpty();
+            return List.of(new ConfigInvalidateMessage(first, "channel.create"),
+                    new ConfigInvalidateMessage(second, "channel.update"));
+        });
+
+        assertThat(new String[] {received.poll(5, TimeUnit.SECONDS), received.poll(5, TimeUnit.SECONDS)})
+                .doesNotContainNull()
+                .extracting(ConfigInvalidateCodec::decode)
+                .containsExactlyInAnyOrderElementsOf(expected);
+    }
+
     /**
      * 「发布失败绝不让业务写失败」的判据（M4 决策 4）：Redis 抛 {@link RuntimeException} 时
-     * {@code bumpAndPublish} 必须<b>正常返回</b>（业务写已经提交，把广播失败变成业务失败只会让用户
+     * {@code publish} 必须<b>正常返回</b>（业务写已经提交，把广播失败变成业务失败只会让用户
      * 以为没存上），同时失败既被计数、也留下一条 WARN（观测面是「计数器 + WARN」两件，缺一不可：
      * 只删掉 {@code log.warn} 时本用例必须变红）。
      *
      * <p>用替身而不是真 Redis：这里要制造的是「Redis 命令抛异常」这一条<b>确定的</b>路径，
-     * 真 Redis 只能靠拔网线/黑障端口去逼近它，慢且不确定。水位那一跳用替身 Mapper 返回
-     * {@code null}（空库语义），因此生效版本就是「现在」。
+     * 这里直接验证已提交版本的发布。渠道集成测试验证真实业务写遇到 Redis 失败仍提交。
      */
     @Test
     void redisFailureIsCountedAndWarnedWithoutFailingTheBusinessWrite() {
@@ -148,7 +166,7 @@ class ConfigChangePublisherTest extends AbstractIntegrationTest {
                 failingRedis, mock(ConfigVersionMapper.class), meterRegistry);
 
         List<ILoggingEvent> warnings = capturePublisherWarnings(() ->
-                assertThatCode(() -> publisherWithFailingRedis.bumpAndPublish("channel.update"))
+                assertThatCode(() -> publisherWithFailingRedis.publish(42L, "channel.update"))
                         .as("发布失败只记 WARN + 计数，绝不抛给调用方（TTL + 版本比对是兜底）")
                         .doesNotThrowAnyException());
 

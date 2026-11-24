@@ -88,6 +88,21 @@ class ConfigInvalidateContractTest {
     }
 
     @Test
+    void anOlderInvalidationCannotLowerTheWriteWatermark() {
+        when(redis.opsForValue()).thenReturn(valueOps);
+        ConfigCache cache = new ConfigCache(redis, properties);
+
+        cache.invalidateAllCaches(9L);
+        cache.invalidateAllCaches(7L);
+
+        cache.writeRedis(snapshotOfVersion(8L));
+        verify(valueOps, never()).set(eq(ConfigCache.REDIS_KEY), anyString(), any(Duration.class));
+        ConfigSnapshot latest = snapshotOfVersion(9L);
+        cache.writeRedis(latest);
+        verify(valueOps).set(ConfigCache.REDIS_KEY, ConfigSnapshotCodec.encode(latest), properties.snapshotTtl());
+    }
+
+    @Test
     void afterInvalidationTheNextReadGoesToAdminInsteadOfServingTheStaleSharedEntry() {
         // 本地为空 + Redis 里有一份旧快照 + admin 有一份新快照。
         ConfigSnapshot stale = snapshotOfVersion(4L);

@@ -41,7 +41,7 @@ import java.util.Map;
  * <p><b>每个写方法都在同一个 {@code @Transactional} 里做四件事</b>：业务写（改状态 / 删行）+
  * 审计（{@link AuditService} 刻意不加 {@code REQUIRES_NEW}，因此加入本方法的事务）+
  * {@code DEL} 共享缓存 + {@link ConfigChangePublisher#publishAfterCommit(String)}
- * （注册 after-commit 钩子，<b>提交之后</b>才抬水位并广播）。
+ * （事务内分配版本，提交后广播）。
  *
  * <p><b>{@code DEL} 在事务体内、失败只 WARN</b>：见 {@link #evictSharedCache(String)} 的完整理由。
  *

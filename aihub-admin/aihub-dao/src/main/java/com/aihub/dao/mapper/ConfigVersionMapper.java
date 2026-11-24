@@ -9,8 +9,8 @@ import org.apache.ibatis.annotations.Select;
 /**
  * 由 {@code MybatisMapperConfig} 的 {@code @MapperScan("com.aihub.dao.mapper")} 扫描。
  *
- * <p>两个注解方法读写 {@code config_version} 的<b>单行水位</b>（{@code id = 1}，由 V2 预先插入）：
- * {@link #current()} 读水位，{@link #raiseTo(long)} 只抬不降（{@code GREATEST}）。
+ * <p>读写 {@code config_version} 的单行水位（{@code id = 1}，由 V2 预先插入）。
+ * {@link #raiseTo(long)} 保证最低水位，{@link #advance(long)} 为每次业务写入分配递增版本。
  *
  * <p>{@link #raiseTo(long)} 的返回值<b>没有任何调用方依赖</b>：MySQL 的
  * {@code ON DUPLICATE KEY UPDATE} 在「更新成相同值」时返回 0，而 Connector/J 默认
@@ -25,4 +25,9 @@ public interface ConfigVersionMapper extends BaseMapper<ConfigVersionEntity> {
     @Insert("INSERT INTO config_version (id, version) VALUES (1, #{version}) "
             + "ON DUPLICATE KEY UPDATE version = GREATEST(version, #{version})")
     int raiseTo(@Param("version") long version);
+
+    /** 分配新版本。调用方在同一写事务内通过 {@link #current()} 读回分配值。 */
+    @Insert("INSERT INTO config_version (id, version) VALUES (1, #{candidate}) "
+            + "ON DUPLICATE KEY UPDATE version = GREATEST(version + 1, #{candidate})")
+    int advance(@Param("candidate") long candidate);
 }

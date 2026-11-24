@@ -15,11 +15,13 @@ import com.aihub.service.audit.AuditAction;
 import com.aihub.service.audit.AuditService;
 import com.aihub.service.channel.ChannelAdminService;
 import com.aihub.service.channel.ChannelKeyService;
+import com.aihub.service.config.ConfigChangePublisher;
 import com.aihub.service.console.ConsoleClaims;
 import com.aihub.service.console.ConsoleTokenService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -28,6 +30,8 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.listener.ChannelTopic;
@@ -39,6 +43,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.sun.net.httpserver.HttpServer;
@@ -65,6 +70,10 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 
 /**
  * Task 8 的<b>线上契约</b>：租户 / 渠道 CRUD + 加密写入 + 主密钥轮换 + 提交后广播失效。
@@ -169,7 +178,7 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
     @Autowired
     private AuditLogMapper auditLogMapper;
 
-    @Autowired
+    @MockitoSpyBean
     private ConfigVersionMapper configVersionMapper;
 
     @Autowired
@@ -178,8 +187,14 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
     @Autowired
     private ConsoleTokenService consoleTokenService;
 
-    @Autowired
+    @MockitoSpyBean
     private StringRedisTemplate redisTemplate;
+
+    @Autowired
+    private ChannelAdminService channelAdminService;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     @Autowired
     private RedisConnectionFactory redisConnectionFactory;
@@ -426,6 +441,7 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
         ConfigInvalidateMessage created = awaitMessage(received, "channel.create");
         assertThat(created).as("渠道创建必须广播 channel.create").isNotNull();
         assertThat(created.version()).as("失效消息必须带一个真实的水位版本号").isPositive();
+        assertThat(configVersionMapper.current()).isEqualTo(created.version());
 
         // 审计半边（I1）：每次写都必须在**同一个事务**里留下一条 CHANNEL 目标、tenant_id 为 SQL NULL 的
         // 审计行（tenant_id 用 isNull 查，见类注释）。按 target_id 查 = 只看这条渠道自己的行。
@@ -435,8 +451,10 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
         assertDetailCarriesNoKeyMaterial(createdAudit, PLAINTEXT, cipherAfterCreate);
 
         put("/api/channels/" + id, Map.of("weight", 7));
-        assertThat(awaitMessage(received, "channel.update"))
-                .as("渠道更新必须广播 channel.update").isNotNull();
+        ConfigInvalidateMessage updated = awaitMessage(received, "channel.update");
+        assertThat(updated).as("渠道更新必须广播 channel.update").isNotNull();
+        assertThat(updated.version()).isGreaterThan(created.version());
+        assertThat(configVersionMapper.current()).isEqualTo(updated.version());
 
         // 业务写真的落库了吗？（I3：此前「只广播不落库」也能全绿。）顺带看 CHANNEL_UPDATE 的审计行。
         ChannelEntity updatedRow = channelMapper.selectById(id);
@@ -494,7 +512,11 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
         ChannelAdminService.Write write = new ChannelAdminService.Write(failedName, "openai-compatible",
                 "http://127.0.0.1:1", PLAINTEXT, null, null, null, null, null);
 
-        assertThatThrownBy(() -> rollbackProbe.createChannelThenFail(write, ACTOR))
+        assertThatThrownBy(() -> rollbackProbe.createChannelThenFail(write, ACTOR, () -> {
+            assertThat(configVersionMapper.current()).as("配置版本必须随业务事务分配")
+                    .isGreaterThan(watermarkBefore);
+            assertThat(received).as("提交前不应收到广播").isEmpty();
+        }))
                 .isInstanceOf(IllegalStateException.class);
 
         // 用 toMillis/MILLISECONDS 而不是 toSeconds/SECONDS（修复轮复评 M-1）：toSeconds 会截断，
@@ -503,7 +525,7 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
         assertThat(received.poll(ROLLBACK_WINDOW.toMillis(), TimeUnit.MILLISECONDS))
                 .as("回滚的写**绝不许**发布失效消息（发布必须在事务提交之后）").isNull();
         assertThat(configVersionMapper.current())
-                .as("水位不许被抬高（发布路径里的 raiseTo 也不许跑）").isEqualTo(watermarkBefore);
+                .as("版本必须随业务写回滚").isEqualTo(watermarkBefore);
         assertThat(channelMapper.selectCount(null))
                 .as("渠道数必须保持不变（回滚了才没有新增）").isEqualTo(channelsBefore);
         assertThat(channelMapper.selectCount(new LambdaQueryWrapper<ChannelEntity>()
@@ -523,6 +545,42 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
                 .as("正向投递对照：同一窗口内成功写的 channel.create 必须被观测到"
                         + "（等不到说明窗口太短，而不是「回滚没有发布」）")
                 .isNotNull();
+    }
+
+    @Test
+    void versionSqlFailureRollsBackTheChannelAndAuditWithoutBroadcasting() throws Exception {
+        BlockingQueue<String> received = subscribeAndAwait();
+        long before = configVersionMapper.current();
+        String name = uniqueChannelName();
+        var write = new ChannelAdminService.Write(name, "openai-compatible", "http://127.0.0.1:1",
+                PLAINTEXT, null, null, null, null, null);
+        var failure = new DataAccessResourceFailureException("配置版本 SQL 失败");
+        doThrow(failure).when(configVersionMapper).advance(anyLong());
+
+        assertThatThrownBy(() -> channelAdminService.create(write, ACTOR)).isSameAs(failure);
+
+        assertThat(channelMapper.selectCount(new LambdaQueryWrapper<ChannelEntity>()
+                .eq(ChannelEntity::getName, name))).isZero();
+        assertThat(auditRowsForChannelName(name)).isZero();
+        assertThat(configVersionMapper.current()).isEqualTo(before);
+        assertThat(received.poll(ROLLBACK_WINDOW.toMillis(), TimeUnit.MILLISECONDS)).isNull();
+    }
+
+    @Test
+    void redisFailureLeavesTheChannelAndItsVersionCommitted() throws Exception {
+        long before = configVersionMapper.current();
+        var failures = meterRegistry.counter(ConfigChangePublisher.PUBLISH_FAILURES_METRIC);
+        double failureCount = failures.count();
+        String name = uniqueChannelName();
+        doThrow(new RedisConnectionFailureException("Redis 发布失败"))
+                .when(redisTemplate).convertAndSend(eq(ConfigInvalidateTopology.CHANNEL), anyString());
+
+        long id = createChannel(name);
+
+        assertThat(channelMapper.selectById(id).getName()).isEqualTo(name);
+        assertThat(configVersionMapper.current()).isGreaterThan(before);
+        assertThat(auditRowsForChannelName(name)).isEqualTo(1L);
+        assertThat(failures.count()).isEqualTo(failureCount + 1);
     }
 
     // ---------------------------------------------------------------- 6) 租户 CRUD
@@ -957,8 +1015,10 @@ class ChannelAdminIntegrationTest extends AbstractIntegrationTest {
         }
 
         @Transactional
-        public void createChannelThenFail(ChannelAdminService.Write write, AuditService.Actor actor) {
+        public void createChannelThenFail(ChannelAdminService.Write write, AuditService.Actor actor,
+                                          Runnable beforeRollback) {
             channelAdminService.create(write, actor);
+            beforeRollback.run();
             throw new IllegalStateException("模拟业务失败：渠道/审计必须回滚，失效消息也不许发出去");
         }
     }

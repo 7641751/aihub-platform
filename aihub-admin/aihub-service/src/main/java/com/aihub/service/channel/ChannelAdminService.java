@@ -27,10 +27,8 @@ import java.util.Map;
  * 明文不进审计（{@link #audit} 的 detail 里只有名字/提供方/版本号这类非敏感字段）、
  * 不进日志、不进任何响应 DTO（{@link View} 连 {@code apiKeyCipher} 字段都没有）。
  *
- * <p><b>每次写都在同一个事务里做三件事</b>：业务写 + 审计（{@link AuditService} 刻意不加
- * {@code REQUIRES_NEW}，因此加入本方法的事务）+ {@link ConfigChangePublisher#publishAfterCommit(String)}
- * （注册 after-commit 钩子，<b>提交之后</b>才抬水位并广播）。
- * 回滚时三者一起作废 —— 这正是 {@code ChannelAdminIntegrationTest} 的回滚用例钉住的不变量。
+ * <p>渠道修改、审计与版本分配使用同一事务。{@link ConfigChangePublisher#publishAfterCommit(String)}
+ * 在事务末尾分配版本，提交后广播。
  *
  * <p><b>{@code models_json} 只做展示性校验</b>（D14）：非法 JSON 直接 400 {@code INVALID_PARAM}，
  * 合法则<b>规范化</b>（{@code JsonNode.toString()}）后落库。它<b>不参与路由</b> —— M3 的路由只用

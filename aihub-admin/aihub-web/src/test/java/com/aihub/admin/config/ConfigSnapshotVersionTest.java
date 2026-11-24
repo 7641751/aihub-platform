@@ -1,6 +1,7 @@
 package com.aihub.admin.config;
 
 import com.aihub.admin.support.AbstractIntegrationTest;
+import com.aihub.common.config.ModelRouteDescriptor;
 import com.aihub.dao.mapper.ChannelMapper;
 import com.aihub.dao.mapper.ConfigVersionMapper;
 import com.aihub.dao.mapper.ModelRouteMapper;
@@ -12,6 +13,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -75,6 +81,9 @@ class ConfigSnapshotVersionTest extends AbstractIntegrationTest {
     @Autowired
     private ConfigVersionMapper configVersionMapper;
 
+    @Autowired
+    private TransactionTemplate transactionTemplate;
+
     /** 容器是 JVM 级共享的：别的用例类可能留下配置行，这里只清行、<b>不动水位</b>。 */
     @BeforeEach
     void cleanConfigRows() {
@@ -130,6 +139,62 @@ class ConfigSnapshotVersionTest extends AbstractIntegrationTest {
         assertThat(fresh.currentVersion())
                 .as("三张表已被清空，此刻版本的**唯一**来源就是水位那一行")
                 .isEqualTo(v);
+    }
+
+    @Test
+    void equalAndLowerCandidatesStillAllocateDistinctVersions() {
+        long before = configVersionMapper.current();
+        configVersionMapper.advance(before);
+        long first = configVersionMapper.current();
+        configVersionMapper.advance(before);
+        long second = configVersionMapper.current();
+        configVersionMapper.advance(before - 1);
+
+        assertThat(first).isEqualTo(before + 1);
+        assertThat(second).isEqualTo(first + 1);
+        assertThat(configVersionMapper.current()).isEqualTo(second + 1);
+    }
+
+    @Test
+    void concurrentConfigWritesCommitTheirOwnVersions() throws Exception {
+        var ready = new CountDownLatch(2);
+        String firstModel = PROBE_MODEL + "-first";
+        String secondModel = PROBE_MODEL + "-second";
+        long firstVersion;
+        long secondVersion;
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var first = executor.submit(() -> commitRoute(firstModel, ready));
+            var second = executor.submit(() -> commitRoute(secondModel, ready));
+            firstVersion = first.get(15, TimeUnit.SECONDS);
+            secondVersion = second.get(15, TimeUnit.SECONDS);
+        }
+
+        assertThat(firstVersion).isNotEqualTo(secondVersion);
+        long committed = Math.max(firstVersion, secondVersion);
+        assertThat(configVersionMapper.current()).isEqualTo(committed);
+        var snapshot = snapshotService.snapshot();
+        assertThat(snapshot.version()).isGreaterThanOrEqualTo(committed);
+        assertThat(snapshot.routes()).extracting(ModelRouteDescriptor::modelName)
+                .containsExactlyInAnyOrder(firstModel, secondModel);
+    }
+
+    private long commitRoute(String model, CountDownLatch ready) {
+        return transactionTemplate.execute(status -> {
+            long before = configVersionMapper.current();
+            insertRoute(model, 1L);
+            ready.countDown();
+            try {
+                if (!ready.await(10, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("并发配置事务未就绪");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("等待并发配置事务时中断", e);
+            }
+            long allocated = publisher.bumpAndPublish("route.create");
+            assertThat(allocated).isGreaterThan(before).isEqualTo(configVersionMapper.current());
+            return allocated;
+        });
     }
 
     // --- SQL 助手 -------------------------------------------------------
