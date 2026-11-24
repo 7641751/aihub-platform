@@ -28,10 +28,10 @@ M0–M6 七个里程碑全部完成并打 tag，控制面配置 → 数据面**�
 | **计量** | 每个 `/v1/**` 请求铸 `x-request-id`；`POST /v1/chat/completions` 落 `request_log` 一行（详见 §4.5）|
 | **端点** | `GET /v1/models`、`POST /v1/chat/completions` |
 
-**错误契约**：网关**实际处理**的路径一律 OpenAI 形状 `{"error":{"message","type","param","code"}}`；
+网关业务错误和路由错误使用 OpenAI 兼容格式 `{"error":{"message","type","param","code"}}`。
 `invalid_api_key`(401) · `service_unavailable`(503，**"我们判不了这把 key"，不是放行**) · `rate_limit_exceeded`(429) ·
 `insufficient_quota`(429) · `model_not_found`(404) · `upstream_unreachable`(502)。
-⚠️ **没有处理器**的路径/方法（`POST /v1/models` ⇒ 405、`GET /v1/nope` ⇒ 404）返回的是 Spring 默认错误体（已知缺口）。
+已通过鉴权的请求访问未知 `/v1/` 路径时返回 `404 route_not_found`，使用不支持的方法时返回 `405 method_not_allowed`，并保留 `Allow` 响应头。
 
 ### 1.2 控制面（`/api/**`，运营台）
 
@@ -340,14 +340,13 @@ tag `m0`–`m6` 均已打（`m6` = M6 收口点；其后另有若干文档与网
 **已知边界（摘要）**——**完整版在归档 README 的「已知边界」章节**：
 
 1. **Redis 降级**：不误拒（无 401），但请求路径上有 5–6 个串行阻塞式 Redis 触点，各付一次 `spring.data.redis.timeout`（**已从 2s 收到 300ms**，并把逐请求版本探测按"主动失效是否接上"分档 ⇒ 单请求从 **10–12s 降到 0.44–0.75s**）。残留：`ConfigClient.current()` 仍是**同步** API。
-2. **`/v1/**` 无处理器的 404/405**（`POST /v1/models` 等）返回 Spring 默认错误体，不是 OpenAI 形状。
-3. **流式中途上游断流不发 SSE `error` 帧**（直接收尾，客户端看到被截断的流）。
-4. **计量只覆盖 `POST /v1/chat/completions`**；`request_log.model` 超 128 码点会被截断（转发体逐字节不变）。
-5. **管理台只接 5 个端点**；`/actuator/metrics` 未开（计量/限流/降级的计数器不对外暴露）。
-6. **控制面不隔离租户**（平台运营台的有意设计；升级门槛见 `CONVENTIONS.md` §10）。
-7. **KB**：不做 OCR；`kb_chunk` 存了一份文本；换嵌入模型 = 重建 collection；**检索侧不在本仓库**。
-8. **真上游只有抽测量级**（2 VU × 20s、单模型、未覆盖上游错误路径）⇒ 不可当容量规划依据。
-9. **`quota.token_used` / `request_used` 是"预留但未接线"的列**（无任何生产写入方 ⇒ **生产恒为 0**）：
+2. **流式中途上游断流不发 SSE `error` 帧**（直接收尾，客户端看到被截断的流）。
+3. **计量只覆盖 `POST /v1/chat/completions`**；`request_log.model` 超 128 码点会被截断（转发体逐字节不变）。
+4. **管理台只接 5 个端点**；`/actuator/metrics` 未开（计量/限流/降级的计数器不对外暴露）。
+5. **控制面不隔离租户**（平台运营台的有意设计；升级门槛见 `CONVENTIONS.md` §10）。
+6. **KB**：不做 OCR；`kb_chunk` 存了一份文本；换嵌入模型 = 重建 collection；**检索侧不在本仓库**。
+7. **真上游只有抽测量级**（2 VU × 20s、单模型、未覆盖上游错误路径）⇒ 不可当容量规划依据。
+8. **`quota.token_used` / `request_used` 是"预留但未接线"的列**（无任何生产写入方 ⇒ **生产恒为 0**）：
    `GET /api/quotas` 的 `tokenUsed` 因此**永远不是真实用量**（实测并列：`PUT` 回 `tokenUsed:0`，
    同一时刻 `GET /api/quotas/usage` 回 `tokenUsed:73`）。**真实用量只在数据面的 Redis 桶里** ⇒
    看用量用 `GET /api/quotas/usage`（只读、桶口径），别拿 `GET /api/quotas` 的已用量做看板或计费。

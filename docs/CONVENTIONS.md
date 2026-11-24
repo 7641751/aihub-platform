@@ -43,9 +43,7 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 
 ## 4. 数据面错误契约
 
-`/v1/**` **上由网关处理**的路径，错误一律是 OpenAI 兼容体（`GatewayErrors.serialize`），**不是** admin 的 `{code,message,data}` 信封：
-
-> **已知缺口（2026-09-26 的 compose 全栈验收实测；M1/M2 起就有的形状，M3 未改动）**：`/v1/**` 下**没有处理器**的路径 / 方法**不走**这套体，返回的是 Spring 默认错误体 `{"timestamp","path","status","error","requestId"}`（仍带 `x-request-id`，因为 `RequestIdFilter` 排在最前）：实测 `POST /v1/models` → `405`、`POST /v1/embeddings` → `404`、`GET /v1/nope` → `404`。所以「`/v1/**` 一律 OpenAI 形状」这句话**只对网关实际处理到的路径成立**；今天**没有**为 404/405 注册 OpenAI 形状的处理器，补上它属未来里程碑。未改动生产代码，本轮只登记事实。
+网关使用 `GatewayErrors` 为 `/v1/` 下的业务错误和路由错误生成 OpenAI 兼容响应。
 
 ```json
 {"error":{"message":"...","type":"...","param":null,"code":"..."}}
@@ -59,6 +57,8 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 | `service_unavailable` | `503` | `api_error` | 网关**无法判定**本次 API Key 是否有效：`AdminResolution.UNAVAILABLE`（admin 不可达 / 超时 / 5xx / 响应畸形 / 内部签名失败，含 `aihub.internal.secret` 为空这种平台配置故障），或 `ApiKeyResolver` 打破了「永不返回空 Mono」的契约。消息逐字为「密钥服务暂时不可用：网关无法校验本次 API Key，请稍后重试」。**结论未知 ⇒ 绝不进缓存**（见第 5 节），控制面一恢复即自愈 | `ApiKeyAuthFilter` |
 | `rate_limit_exceeded` | `429` | `rate_limit_error` | 租户 / API Key 超过限流策略（`rate_limit_policy` 的 qps/burst）。**降级到本机令牌桶时同样回 429**（降级 ≠ 放行） | `RateLimitFilter` |
 | `model_not_found` | `404` | `invalid_request_error` | 请求的 `model` 在配置快照的 `model_route` 里没有任何可用候选（且没有遗留单渠道可回落） | `ChatRelayController` |
+| `route_not_found` | `404` | `invalid_request_error` | 通过鉴权后访问未知 `/v1/` 路径 | `GatewayRouteErrorHandler` |
+| `method_not_allowed` | `405` | `invalid_request_error` | 通过鉴权后使用路由不支持的 HTTP 方法。响应保留 `Allow` 头 | `GatewayRouteErrorHandler` |
 | `upstream_unreachable` | `502` | `api_error` | 连不上上游（`WebClientRequestException`）；上游的**业务**错误状态码不走这里 | `ChatRelayController` |
 | `insufficient_quota` | `429` | `insufficient_quota` | 周期配额用尽：`QuotaFilter` 按估算值在 Redis 上**预扣**时被 Lua 判为余额不足（`code` 与 `type` **同为** `insufficient_quota`，与限流那行的 `type=rate_limit_error` 不同）。**限流（`rate_limit_exceeded`）是"太快"，配额（`insufficient_quota`）是"这个周期的量用完了"** —— 两者都是 429，但**语义、判据、可否靠等待自动恢复都不同**：限流等一个窗口就好，配额要等下个周期（或控制面调额）。**Redis 不可用时配额**放行**（D7 fail-open），只有兜底路径（`QuotaFallback`）能在 Redis 故障期间如实拒绝超预算租户 | `QuotaFilter` |
 | ~~`internal_error`~~ | ~~`500`~~ | — | **这一行在当前实现里不可达，保留仅为说明设计意图。** `GatewayErrors.serialize` 的 catch 分支确实会吐出这个码，但 `GatewayErrors.write` 是先 `response.setStatusCode(status)`、再 `serialize(...)`，所以那条兜底体**只会以调用方原本要写出去的状态码**（`401` / `404` / `429` / `502` / `503`）出现，永远不会是 `500`。见下面「容易踩的规则」。 | `GatewayErrors` |
@@ -70,7 +70,7 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 - **`/v1/**` 目前没有全局 500 处理器**：网关自身未预期的异常落到 Spring WebFlux 的默认错误响应，形状由 `Accept` 决定（JSON 或 HTML 错误页），**不保证**是上面的 OpenAI 体。新增数据面错误码时请走 `GatewayErrors.write`，不要依赖默认处理。
 - **上表的 `internal_error` 行不可达**：`GatewayErrors.write` 先设置调用方给的状态码、再调用 `serialize`，因此 `serialize` 的 catch 分支（它才写 `internal_error`）**只会复用调用方原本的状态码**。结果是一个 `429`/`502`/`401` 状态码配一具 `{"code":"internal_error"}` 的兜底体 —— 「500 + internal_error」这个组合在代码里没有任何路径能产生。它不是待修的行为（兜底体的意义是「连错误体都编不出来时仍然给客户端一个合法 JSON」），但**不要**再把它当成一个可触发的错误码来写文档或告警规则。
 - admin 的 `{code,message,data}` 信封只属于 admin 自己的接口（含 `/internal/**` 的 401）。数据面不套用，admin 也不套用 OpenAI 形状。
-- **设计文档 §9 的「流开始前失败 → 统一错误体 `{"code","message"}`」已被取代**：`/v1/**` 上**由网关处理**的错误体是上面的 OpenAI 形状（**例外是「没有处理器」的 404/405**，见本节开头登记的已知缺口）。M1 用官方 OpenAI Python SDK 验收过这条契约，给数据面套 admin 信封会让所有 SDK 的 `error.message` 取值路径同时失效 —— 那不是「按 spec 实现」，是回归。admin 与 `/internal/**` 仍然是 `{"code","message","data"}`。
+- OpenAI SDK 从 `error.message` 读取网关错误。当前契约取代了设计文档 §9 提出的 `{"code","message"}` 格式。admin 与 `/internal/**` 使用 `{"code","message","data"}`。
 - **`429` 是限流用户唯一该看的信号**：`rate_limit_exceeded` 附带 `Retry-After`（秒）、`Retry-After-MS`（毫秒，Azure 风格）与 IETF 的 `RateLimit-Limit` / `RateLimit-Remaining` 两类头（`limit, burst` 形状，见 6.6 节）。客户端退避请读 `Retry-After`，不要自己猜窗口。这些头**由网关自己的限流判定写入，不是「只在网关拒绝时」才出现**：放行响应同样带 `RateLimit-Limit` / `RateLimit-Remaining`（`RateLimitFilter.writeDecisionHeaders` 对放行与拒绝都写这两条），只有 `Retry-After` / `Retry-After-MS` 是拒绝专有。**网关不写 `RateLimit-Reset`** —— 令牌桶是惰性补充的，没有可上报的重置时刻；`ratelimit-reset` 在网关里只是透传白名单里的一个**上游**头名。上游返回的 `Retry-After` / `x-ratelimit-*` 属于透传白名单（第 3 节），两者语义相同、来源不同。
 
 ## 5. 内部接口约定（`/internal/**`）

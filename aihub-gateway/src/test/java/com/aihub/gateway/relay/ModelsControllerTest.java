@@ -83,6 +83,30 @@ class ModelsControllerTest {
         assertThat(model.path("owned_by").asText()).isEqualTo("aihub");
     }
 
+    @Test
+    void unknownRouteHasOpenAiError() throws Exception {
+        HttpResponse<String> response = get("/v1/missing");
+
+        assertThat(response.statusCode()).isEqualTo(404);
+        assertThat(MAPPER.readTree(response.body()).at("/error/code").asText())
+                .isEqualTo("route_not_found");
+    }
+
+    @Test
+    void wrongMethodKeepsAllowHeader() throws Exception {
+        HttpRequest request = HttpRequest.newBuilder(
+                URI.create("http://127.0.0.1:" + gatewayPort + "/v1/models"))
+                .POST(HttpRequest.BodyPublishers.noBody()).build();
+        HttpResponse<String> response = HttpClient.newHttpClient()
+                .send(request, HttpResponse.BodyHandlers.ofString());
+
+        assertThat(response.statusCode()).isEqualTo(405);
+        assertThat(response.headers().allValues("Allow"))
+                .anySatisfy(value -> assertThat(value.split(",\\s*")).contains("GET"));
+        assertThat(MAPPER.readTree(response.body()).at("/error/code").asText())
+                .isEqualTo("method_not_allowed");
+    }
+
     /**
      * M3 起「平台提供哪些模型」= 配置快照的 {@code model_route} 里出现过的模型名。
      * <b>仍然并入遗留默认模型</b>：迁移期（或 admin 不可达走了兜底）时不能突然把这个端点变成空列表
