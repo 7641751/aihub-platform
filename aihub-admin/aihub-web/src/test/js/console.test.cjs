@@ -39,7 +39,13 @@ async function openConsole(role, probe, channels = [
   { id: 42, name: 'primary', provider: 'openai', baseUrl: 'https://example.test', status: 'ACTIVE' }
 ], handleRequest = (path) => { throw new Error('Unexpected request ' + path); }) {
   const elements = new Map(Array.from(html.matchAll(/<([a-z]+) [^>]*?\bid="([^"]+)"([^>]*)>/g),
-    ([, tag, id, attributes]) => [id, element(tag, /\bhidden\b/.test(attributes))]));
+    ([, tag, id, attributes]) => {
+      const node = element(tag, /\bhidden\b/.test(attributes));
+      for (const [, name, value] of attributes.matchAll(/\s([\w-]+)="([^"]*)"/g)) {
+        node.setAttribute(name, value);
+      }
+      return [id, node];
+    }));
   let token = 'test-token';
   const sessionStorage = {
     getItem: () => token,
@@ -60,7 +66,7 @@ async function openConsole(role, probe, channels = [
       switch (path) {
         case '/api/auth/login': return response({ role: 'VIEWER', token: 'viewer-token' });
         case '/api/ping': return response({ role: token === 'viewer-token' ? 'VIEWER' : role, tenantId: 1 });
-        case '/api/channels': return response(channels);
+        case '/api/channels': return options.method === 'GET' ? response(channels) : handleRequest(path, options);
         case '/api/channels/42/probe': return probe();
         default: return handleRequest(path, options);
       }
@@ -189,7 +195,6 @@ test('an administrator can probe one channel and see the upstream status, durati
   const page = await openConsole('ADMIN', () => new Promise((resolve) => { finishProbe = resolve; }));
   const row = page.byId('channels-body').children[0];
   assert.match(row.textContent, /primary/);
-  assert.equal(page.byId('channel-form').hidden, false);
   const [button, result] = row.children.at(-1).children;
   assert.ok(button, 'the channel row has a probe button');
   assert.equal(button.textContent, '探活');
@@ -217,10 +222,99 @@ test('a viewer can list channels and has no channel probe or create controls', a
   assert.equal(row.children.length, 5);
   assert.equal(page.byId('channel-form').hidden, true);
   assert.equal(page.byId('key-form').hidden, true);
+  assert.equal(page.byId('channel-form-toggle').hidden, true);
+  assert.equal(page.byId('key-form-toggle').hidden, true);
   assert.equal(page.byId('channel-actions-heading').hidden, true);
   page.byId('channel-form').dispatch('submit');
   page.byId('key-form').dispatch('submit');
   assert.ok(page.requests.every((request) => request.method === 'GET'));
+});
+
+test('channel creation starts collapsed and preserves input after a rejected submission', async () => {
+  const page = await openConsole('ADMIN', undefined, undefined, (path, options) => {
+    assert.equal(path, '/api/channels');
+    assert.equal(options.method, 'POST');
+    return response(null, 400, 'INVALID_PARAM', '请检查服务地址');
+  });
+  const form = page.byId('channel-form');
+  const toggle = page.byId('channel-form-toggle');
+  assert.equal(form.hidden, true);
+  assert.equal(toggle.hidden, false);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  toggle.click();
+  assert.equal(form.hidden, false);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  assert.equal(page.byId('channel-name').focused, true);
+  page.byId('channel-name').value = 'draft';
+  form.dispatch('submit');
+  await nextTurn();
+  assert.equal(form.hidden, false);
+  assert.equal(page.byId('channel-name').value, 'draft');
+  assert.match(page.byId('channel-form-message').textContent, /请检查服务地址/);
+  page.byId('channel-form-close').click();
+  assert.equal(form.hidden, true);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(toggle.focused, true);
+});
+
+test('a created key moves focus to the one-time display, which erases it on close', async () => {
+  const page = await openConsole('ADMIN', undefined, undefined, (path, options) => {
+    assert.equal(path, '/api/api-keys');
+    if (options.method === 'GET') return response([]);
+    assert.equal(JSON.parse(options.body).validDays, null);
+    return response({ plaintextKey: 'test-key-one-time' });
+  });
+  page.byId('tab-keys').click();
+  const form = page.byId('key-form');
+  const toggle = page.byId('key-form-toggle');
+  assert.equal(form.hidden, true);
+  toggle.click();
+  assert.equal(form.hidden, false);
+  form.dispatch('submit');
+  await nextTurn();
+  assert.equal(form.hidden, true);
+  const reveal = page.byId('plaintext-box');
+  assert.equal(reveal.hidden, false);
+  assert.equal(reveal.focused, true);
+  assert.equal(page.byId('plaintext-key').textContent, 'test-key-one-time');
+
+  page.byId('plaintext-close').click();
+  assert.equal(reveal.hidden, true);
+  assert.equal(page.byId('plaintext-key').textContent, '');
+  assert.equal(toggle.focused, true);
+});
+
+test('usage distinguishes refreshing, updated, missing and failed states', async () => {
+  const pending = [];
+  const page = await openConsole('VIEWER', undefined, undefined, (path) => {
+    assert.equal(path, '/api/quotas/usage');
+    return new Promise((resolve) => { pending.push(resolve); });
+  });
+  const refresh = page.byId('usage-refresh');
+  const message = page.byId('usage-message');
+  const usage = { period: '2026-11', source: 'redis-bucket', tokenLimit: 0, tokenRemaining: -1 };
+  page.byId('tab-usage').click();
+  assert.equal(refresh.disabled, true);
+  assert.match(message.textContent, /正在刷新/);
+  pending[0](response(usage));
+  await nextTurn();
+  assert.equal(refresh.disabled, false);
+  assert.match(page.byId('usage-meta').textContent, /UTC/);
+  assert.match(page.byId('usage-body').textContent, /不限/);
+  assert.equal(message.textContent, '用量已更新');
+
+  refresh.click();
+  pending[1](response({ ...usage, bucketMissing: true }));
+  await nextTurn();
+  assert.match(page.byId('usage-note').textContent, /本周期尚无预扣记录/);
+
+  refresh.click();
+  pending[2](response(null, 500, 'INTERNAL_ERROR', '连接失败'));
+  await nextTurn();
+  assert.equal(refresh.disabled, false);
+  assert.equal(page.byId('usage-body').textContent, '');
+  assert.equal(page.byId('usage-note').textContent, '');
+  assert.match(message.textContent, /连接失败/);
 });
 
 test('reloading the channel list keeps the in-flight probe and its result', async () => {

@@ -96,9 +96,9 @@
     byId("app-view").hidden = false;
     byId("logout-btn").hidden = false;
     var canWrite = state.role === "ADMIN";
-    byId("channel-form").hidden = !canWrite;
+    byId("channel-form-toggle").hidden = !canWrite;
     byId("channel-actions-heading").hidden = !canWrite;
-    byId("key-form").hidden = !canWrite;
+    byId("key-form-toggle").hidden = !canWrite;
     var role = state.role || "";
     var tenant = state.tenantId === null ? "" : state.tenantId;
     setText(byId("session-info"), "角色 " + role + "，租户 " + tenant);
@@ -127,6 +127,28 @@
   function setMessage(element, text, isError) {
     setText(element, text);
     element.classList.toggle("error", Boolean(isError));
+  }
+
+  function setCreateFormExpanded(id, expanded) {
+    byId(id).hidden = !expanded;
+    byId(id + "-toggle").setAttribute("aria-expanded", String(expanded));
+  }
+
+  function bindCreateForm(id, firstField) {
+    var toggle = byId(id + "-toggle");
+    toggle.addEventListener("click", function () {
+      if (state.role === "ADMIN") {
+        var expanded = byId(id).hidden;
+        setCreateFormExpanded(id, expanded);
+        if (expanded) {
+          byId(firstField).focus();
+        }
+      }
+    });
+    byId(id + "-close").addEventListener("click", function () {
+      setCreateFormExpanded(id, false);
+      toggle.focus();
+    });
   }
 
   function cell(row, value) {
@@ -170,10 +192,19 @@
     byId("logs-to").setAttribute("aria-invalid", "false");
     setText(byId("logs-body"), "");
     setMessage(byId("logs-message"), "", false);
-    byId("channel-form").reset();
-    byId("key-form").reset();
-    byId("plaintext-box").hidden = true;
-    setText(byId("plaintext-key"), "");
+    ["channel", "key"].forEach(function (name) {
+      byId(name + "-form").reset();
+      setCreateFormExpanded(name + "-form", false);
+      byId(name + "-submit").disabled = false;
+      setMessage(byId(name + "-form-message"), "", false);
+    });
+    closePlaintext(false);
+    setText(byId("keys-body"), "");
+    byId("usage-refresh").disabled = false;
+    setText(byId("usage-body"), "");
+    setText(byId("usage-meta"), "");
+    setMessage(byId("usage-note"), "", false);
+    setMessage(byId("usage-message"), "", false);
     window.sessionStorage.removeItem(TOKEN_KEY);
   }
 
@@ -302,11 +333,14 @@
 
   function submitChannel(event) {
     event.preventDefault();
-    if (state.role !== "ADMIN") {
+    var submit = byId("channel-submit");
+    if (state.role !== "ADMIN" || submit.disabled) {
       return;
     }
     var token = state.token;
-    setMessage(byId("channels-message"), "", false);
+    var message = byId("channel-form-message");
+    submit.disabled = true;
+    setMessage(message, "正在保存…", false);
     var models = byId("channel-models").value;
     api("/api/channels", {
       method: "POST",
@@ -322,12 +356,22 @@
       .then(function () {
         if (state.token === token) {
           byId("channel-form").reset();
+          setMessage(message, "", false);
+          setCreateFormExpanded("channel-form", false);
+          if (!byId("channels-panel").hidden) {
+            byId("channel-form-toggle").focus();
+          }
           loadChannels();
         }
       })
       .catch(function (error) {
         if (state.token === token) {
-          setMessage(byId("channels-message"), describe(error), true);
+          setMessage(message, describe(error), true);
+        }
+      })
+      .finally(function () {
+        if (state.token === token) {
+          submit.disabled = false;
         }
       });
   }
@@ -339,21 +383,41 @@
   }
 
   function loadKeys() {
+    var token = state.token;
     setMessage(byId("keys-message"), "", false);
     api("/api/api-keys")
-      .then(renderKeys)
+      .then(function (list) {
+        if (state.token === token) {
+          renderKeys(list);
+        }
+      })
       .catch(function (error) {
-        setMessage(byId("keys-message"), describe(error), true);
+        if (state.token === token) {
+          setMessage(byId("keys-message"), describe(error), true);
+        }
       });
+  }
+
+  function closePlaintext(restoreFocus) {
+    byId("plaintext-box").hidden = true;
+    setText(byId("plaintext-key"), "");
+    var toggle = byId("key-form-toggle");
+    toggle.disabled = false;
+    if (restoreFocus) {
+      toggle.focus();
+    }
   }
 
   function submitKey(event) {
     event.preventDefault();
-    if (state.role !== "ADMIN") {
+    var submit = byId("key-submit");
+    if (state.role !== "ADMIN" || submit.disabled || !byId("plaintext-box").hidden) {
       return;
     }
     var token = state.token;
-    setMessage(byId("keys-message"), "", false);
+    var message = byId("key-form-message");
+    submit.disabled = true;
+    setMessage(message, "正在创建…", false);
     var rawValidDays = byId("key-valid-days").value;
     var validDays = rawValidDays ? parseInt(rawValidDays, 10) : null;
     api("/api/api-keys", {
@@ -365,14 +429,26 @@
           return;
         }
         byId("key-form").reset();
+        setMessage(message, "", false);
+        setCreateFormExpanded("key-form", false);
+        byId("key-form-toggle").disabled = true;
         // 明文只展示这一次：写入 DOM 用 textContent，绝不进 sessionStorage / URL。
-        byId("plaintext-box").hidden = false;
+        var reveal = byId("plaintext-box");
+        reveal.hidden = false;
         setText(byId("plaintext-key"), created.plaintextKey);
+        if (!byId("keys-panel").hidden) {
+          reveal.focus();
+        }
         loadKeys();
       })
       .catch(function (error) {
         if (state.token === token) {
-          setMessage(byId("keys-message"), describe(error), true);
+          setMessage(message, describe(error), true);
+        }
+      })
+      .finally(function () {
+        if (state.token === token) {
+          submit.disabled = false;
         }
       });
   }
@@ -450,7 +526,7 @@
   }
 
   function renderUsage(view) {
-    setText(byId("usage-meta"), "周期 " + view.period + " · 数据源 " + view.source
+    setText(byId("usage-meta"), "周期 " + view.period + "（UTC） · 数据源 " + view.source
       + (view.estimate ? "（预扣估算，不是账单口径）" : ""));
     var body = byId("usage-body");
     setText(body, "");
@@ -470,18 +546,33 @@
   }
 
   function loadUsage() {
-    setMessage(byId("usage-message"), "", false);
+    var refresh = byId("usage-refresh");
+    if (refresh.disabled) {
+      return;
+    }
+    var token = state.token;
+    var message = byId("usage-message");
+    setMessage(message, "正在刷新用量…", false);
     setMessage(byId("usage-note"), "", false);
-    byId("usage-refresh").disabled = true;
+    refresh.disabled = true;
     api("/api/quotas/usage")
       .then(function (view) {
-        renderUsage(view);
-        byId("usage-refresh").disabled = false;
-      }, function (error) {
-        setText(byId("usage-body"), "");
-        setText(byId("usage-meta"), "");
-        setMessage(byId("usage-message"), describe(error), true);
-        byId("usage-refresh").disabled = false;
+        if (state.token === token) {
+          renderUsage(view);
+          setMessage(message, view.bucketMissing ? "" : "用量已更新", false);
+        }
+      })
+      .catch(function (error) {
+        if (state.token === token) {
+          setText(byId("usage-body"), "");
+          setText(byId("usage-meta"), "");
+          setMessage(message, describe(error), true);
+        }
+      })
+      .finally(function () {
+        if (state.token === token) {
+          refresh.disabled = false;
+        }
       });
   }
 
@@ -498,6 +589,9 @@
     byId("tab-usage").addEventListener("click", function () { selectTab("usage"); });
     byId("channel-form").addEventListener("submit", submitChannel);
     byId("key-form").addEventListener("submit", submitKey);
+    bindCreateForm("channel-form", "channel-name");
+    bindCreateForm("key-form", "key-name");
+    byId("plaintext-close").addEventListener("click", function () { closePlaintext(true); });
     byId("logs-form").addEventListener("submit", submitLogs);
     byId("usage-refresh").addEventListener("click", loadUsage);
 

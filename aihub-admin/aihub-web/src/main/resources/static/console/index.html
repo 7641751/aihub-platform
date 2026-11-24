@@ -38,14 +38,21 @@
 
       <!-- 渠道视图：列表、新建与探活 -->
       <section id="channels-panel" class="card">
-        <h2>渠道</h2>
-        <form id="channel-form" autocomplete="off" hidden>
-          <input id="channel-name" placeholder="名称" required>
-          <input id="channel-provider" placeholder="provider" required>
-          <input id="channel-base-url" placeholder="baseUrl" required>
-          <input id="channel-api-key" placeholder="apiKey" type="password" required>
-          <input id="channel-models" placeholder="modelsJson（可选）">
-          <button type="submit">新建渠道</button>
+        <div class="panel-heading">
+          <h2>渠道</h2>
+          <button id="channel-form-toggle" type="button" aria-expanded="false" aria-controls="channel-form" hidden>新建渠道</button>
+        </div>
+        <form id="channel-form" class="filter-form" autocomplete="off" hidden>
+          <div class="field"><label for="channel-name">名称</label><input id="channel-name" required></div>
+          <div class="field"><label for="channel-provider">服务商</label><input id="channel-provider" required></div>
+          <div class="field"><label for="channel-base-url">服务地址</label><input id="channel-base-url" required></div>
+          <div class="field"><label for="channel-api-key">密钥</label><input id="channel-api-key" type="password" required></div>
+          <div class="field"><label for="channel-models">模型配置（可选，JSON）</label><input id="channel-models"></div>
+          <div class="form-actions">
+            <button id="channel-submit" type="submit">保存渠道</button>
+            <button id="channel-form-close" type="button">关闭表单</button>
+          </div>
+          <p id="channel-form-message" class="message form-message" role="status"></p>
         </form>
         <table>
           <thead>
@@ -59,15 +66,27 @@
 
       <!-- Key 视图：列表 + 新建并一次性展示明文 -->
       <section id="keys-panel" class="card" hidden>
-        <h2>API Key</h2>
-        <form id="key-form" autocomplete="off" hidden>
-          <input id="key-name" placeholder="名称" required>
-          <input id="key-valid-days" placeholder="有效天数（可选，留空=不过期）" type="number" min="1">
-          <button type="submit">新建 Key</button>
+        <div class="panel-heading">
+          <h2>API Key</h2>
+          <button id="key-form-toggle" type="button" aria-expanded="false" aria-controls="key-form" hidden>新建 Key</button>
+        </div>
+        <form id="key-form" class="filter-form" autocomplete="off" hidden>
+          <div class="field"><label for="key-name">名称</label><input id="key-name" required></div>
+          <div class="field">
+            <label for="key-valid-days">有效天数</label>
+            <input id="key-valid-days" type="number" min="1" aria-describedby="key-valid-days-hint">
+            <small id="key-valid-days-hint" class="field-hint">留空表示不过期</small>
+          </div>
+          <div class="form-actions">
+            <button id="key-submit" type="submit">创建 Key</button>
+            <button id="key-form-close" type="button">关闭表单</button>
+          </div>
+          <p id="key-form-message" class="message form-message" role="status"></p>
         </form>
-        <div id="plaintext-box" class="plaintext" hidden>
-          <p>明文只显示这一次，请立即复制保存，关闭后无法再次获取。</p>
+        <div id="plaintext-box" class="plaintext" tabindex="-1" role="group" aria-labelledby="plaintext-title" hidden>
+          <p id="plaintext-title">明文只显示这一次，请立即复制保存，关闭后无法再次获取。</p>
           <code id="plaintext-key"></code>
+          <button id="plaintext-close" type="button">关闭明文</button>
         </div>
         <table>
           <thead>
@@ -81,15 +100,19 @@
       <!-- 日志视图：租户 + 时间范围查询 -->
       <section id="logs-panel" class="card" hidden>
         <h2>请求日志</h2>
-        <p id="logs-timezone" class="muted">浏览器本地时间</p>
-        <form id="logs-form" autocomplete="off">
-          <label for="logs-tenant-id">tenantId</label>
-          <input id="logs-tenant-id" placeholder="tenantId" required>
-          <label for="logs-from">从</label>
-          <input id="logs-from" type="datetime-local" aria-describedby="logs-timezone">
-          <label for="logs-to">到</label>
-          <input id="logs-to" type="datetime-local" aria-describedby="logs-timezone">
-          <button type="submit">查询</button>
+        <p id="logs-timezone" class="field-hint">浏览器本地时间</p>
+        <form id="logs-form" class="filter-form" autocomplete="off">
+          <div class="field"><label for="logs-tenant-id">租户 ID</label><input id="logs-tenant-id" required></div>
+          <div class="field">
+            <label for="logs-from">起始时间</label>
+            <input id="logs-from" type="datetime-local" aria-describedby="logs-timezone">
+          </div>
+          <div class="field">
+            <label for="logs-to">结束时间</label>
+            <input id="logs-to" type="datetime-local" aria-describedby="logs-timezone">
+          </div>
+          <div class="form-actions"><button id="logs-submit" type="submit">查询</button></div>
+          <p id="logs-message" class="message form-message" role="status"></p>
         </form>
         <table>
           <thead>
@@ -97,12 +120,14 @@
           </thead>
           <tbody id="logs-body" aria-busy="false"></tbody>
         </table>
-        <p id="logs-message" class="message" role="status"></p>
       </section>
 
       <!-- 用量视图：只读、无参（= 当前 UTC 周期；租户由服务端从令牌取，R3.2） -->
       <section id="usage-panel" class="card" hidden>
-        <h2>用量（本周期）</h2>
+        <div class="panel-heading">
+          <h2>用量（本周期）</h2>
+          <button id="usage-refresh" type="button">刷新</button>
+        </div>
         <p id="usage-meta" class="muted"></p>
         <table>
           <thead>
@@ -112,7 +137,6 @@
         </table>
         <p id="usage-note" class="message" role="status"></p>
         <p id="usage-message" class="message" role="status"></p>
-        <button id="usage-refresh" type="button">刷新</button>
       </section>
     </div>
   </main>
