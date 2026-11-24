@@ -79,8 +79,7 @@ public class KbFileStore {
      * 边读边算 sha256 + 字节数，落成同目录的临时文件。
      *
      * <p><b>只读一遍流</b>：{@link DigestInputStream} 包住输入流，摘要与落盘共用同一次 IO。
-     * 调用方<b>必须</b>在之后调用 {@link #promote}（成功）或 {@link #discard}（失败/重复），
-     * 否则临时文件会留在目录里。
+     * 暂存失败时由本方法清理临时文件。成功返回后，调用方负责调用 {@link #promote} 或 {@link #discard}。
      */
     public StagedFile stage(long tenantId, InputStream in) {
         Path dir = dirFor(tenantId);
@@ -107,6 +106,9 @@ public class KbFileStore {
             deleteQuietly(temp);
             // SHA-256 是 JDK 必备算法，走到这里说明运行环境损坏 —— 不是业务错误。
             throw new IllegalStateException("JVM 缺少 SHA-256", e);
+        } catch (RuntimeException failure) {
+            deleteQuietly(temp);
+            throw failure;
         }
     }
 
