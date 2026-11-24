@@ -3,6 +3,7 @@ package com.aihub.admin.kb;
 import com.aihub.service.kb.KbChunker;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -61,6 +62,26 @@ class KbChunkerTest {
     }
 
     @Test
+    void windowBoundaryKeepsSurrogatePairsTogether() {
+        List<String> chunks = KbChunker.chunk("A😀B", 2, 0);
+
+        assertThat(chunks).containsExactly("A😀", "B");
+        assertThat(chunks).allSatisfy(chunk ->
+                assertThat(StandardCharsets.UTF_8.newEncoder().canEncode(chunk)).isTrue());
+    }
+
+    @Test
+    void overlappingWindowsUseCodePointsAndReconstructOriginalText() {
+        String text = "A😀𠮷BC😀D";
+        List<String> chunks = KbChunker.chunk(text, 4, 2);
+
+        assertThat(chunks).containsExactly("A😀𠮷B", "𠮷BC😀", "C😀D");
+        assertThat(chunks).allSatisfy(chunk ->
+                assertThat(StandardCharsets.UTF_8.newEncoder().canEncode(chunk)).isTrue());
+        assertThat(reconstruct(chunks, 2)).isEqualTo(text);
+    }
+
+    @Test
     void anOverlapNotSmallerThanTheWindowIsRejected() {
         assertThatThrownBy(() -> KbChunker.chunk("abc", 100, 100))
                 .as("重叠必须小于窗口，否则死循环").isInstanceOf(IllegalArgumentException.class);
@@ -71,7 +92,7 @@ class KbChunkerTest {
     }
 
     /**
-     * 还原：{@code chunks[0] + chunks[1].substring(overlap) + chunks[2].substring(overlap) + …}
+     * 还原：保留首段，其余各段去掉前 {@code overlap} 个 Unicode 码点后拼接。
      * —— 只有当"每段（除末段）长 {@code size}、步长 {@code size-overlap}、末段覆盖到文末"三条同时成立时
      * 才等于原文本。
      */
@@ -79,7 +100,7 @@ class KbChunkerTest {
         StringBuilder out = new StringBuilder();
         for (int i = 0; i < chunks.size(); i++) {
             String chunk = chunks.get(i);
-            out.append(i == 0 ? chunk : chunk.substring(overlap));
+            out.append(i == 0 ? chunk : chunk.substring(chunk.offsetByCodePoints(0, overlap)));
         }
         return out.toString();
     }

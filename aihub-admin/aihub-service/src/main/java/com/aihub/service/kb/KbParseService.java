@@ -8,6 +8,7 @@ import com.aihub.dao.mapper.KbDocumentMapper;
 import com.aihub.mq.kb.KbEmbedBatch;
 import com.aihub.mq.kb.KbParseSink;
 import com.aihub.mq.kb.KbTopology;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -24,7 +25,7 @@ import java.util.List;
 /**
  * 解析阶段的实现（M5 Task 4）：实现 {@link KbParseSink}，被 {@code KbParseConsumer} 调用。
  *
- * <p>流水线（<b>一个事务</b>）：条件迁移 {@code PENDING|PARSING → PARSING} → 读 {@code kb_document} →
+ * <p>流水线（<b>一个事务</b>）：条件迁移 {@code PENDING|PARSING|FAILED → PARSING} → 读 {@code kb_document} →
  * 定位原件 → 抽取文本 → 切分 → 逐段 upsert {@code kb_chunk}（{@code vector_id = "{docId}:{seq}"}，D15）
  * → {@code chunk_count=N} + {@code EMBEDDING} → 注册 after-commit 钩子发 N 条 {@code kb.embed}
  * （{@code ceil(N/batchSize)} 条）。
@@ -33,8 +34,8 @@ import java.util.List;
  * {@code (docId, seq)} 去读 {@code kb_chunk}；若在事务里就发，它可能读到"还没提交的段"，
  * 于是要么空跑要么死信。after-commit 钩子保证"段已落库"先于"消息可见"。
  *
- * <p><b>条件迁移（裁定 #4）</b>：受影响行数为 0 ⇒ 别人已推进 / 它已是 {@code READY|FAILED} ⇒
- * ack 后直接返回，<b>不写 chunk、不发消息</b>（因此重放一条已完成的 parse 不会把行打回 {@code PARSING}）。
+ * <p>条件迁移仅接受待解析、解析中和失败的文档。重试 {@code FAILED} 文档时，先清理上次遗留的分段和向量，
+ * 再按当前窗口重新切分。
  *
  * <p><b>D14</b>：切出来 0 段（空 / 全空白文档、未来的无文本层 PDF）⇒ 置 {@code FAILED("无可提取文本")}，
  * 不发 embed。<b>绝不静默 {@code READY}</b> —— 那会让检索侧永远查不到却显示成功。
@@ -56,6 +57,7 @@ public class KbParseService implements KbParseSink {
     private final KbTextExtractor textExtractor;
     private final KbDocumentPublisher publisher;
     private final KbDocumentService kbDocumentService;
+    private final KbDocumentCleanup cleanup;
     private final int sizeChars;
     private final int overlapChars;
     private final int batchSize;
@@ -66,6 +68,7 @@ public class KbParseService implements KbParseSink {
                           KbTextExtractor textExtractor,
                           KbDocumentPublisher publisher,
                           KbDocumentService kbDocumentService,
+                          KbDocumentCleanup cleanup,
                           @Value("${aihub.kb.chunk.size-chars:800}") int sizeChars,
                           @Value("${aihub.kb.chunk.overlap-chars:100}") int overlapChars,
                           @Value("${aihub.kb.embed.batch-size:10}") int batchSize) {
@@ -75,6 +78,7 @@ public class KbParseService implements KbParseSink {
         this.textExtractor = textExtractor;
         this.publisher = publisher;
         this.kbDocumentService = kbDocumentService;
+        this.cleanup = cleanup;
         this.sizeChars = sizeChars;
         this.overlapChars = overlapChars;
         this.batchSize = batchSize;
@@ -83,19 +87,12 @@ public class KbParseService implements KbParseSink {
     @Override
     @Transactional
     public void parse(long docId) {
-        // 条件迁移（裁定 #4）：只有 PENDING/PARSING 才推进。affected == 0 ⇒ 抢跑或已终态 ⇒ ack 丢弃。
-        int advanced = kbDocumentMapper.update(null, new LambdaUpdateWrapper<KbDocumentEntity>()
-                .eq(KbDocumentEntity::getId, docId)
-                // FAILED **也**在可重入集合里：它曾经是"只能看、不能重试"的终态 ——
-                // 消费端的带条件迁移只认 PENDING/PARSING，于是重放的解析消息被 ack 丢弃，
-                // 而 `FAILED` 恰恰是最需要重试的那一档（上游修好后重传同一份内容即重跑）。
-                .in(KbDocumentEntity::getStatus, KbStatus.PENDING, KbStatus.PARSING, KbStatus.FAILED)
-                .set(KbDocumentEntity::getStatus, KbStatus.PARSING)
-                // 重入时清掉上一次的错误信息：否则行已 READY、运维看到的却还是过期报错。
-                .set(KbDocumentEntity::getErrorMsg, null));
-        if (advanced == 0) {
-            log.info("解析跳过：doc {} 不在 PENDING/PARSING（别人已推进 / 已 READY/FAILED），ack 丢弃", docId);
-            return;
+        if (!moveToParsing(docId, KbStatus.PENDING, KbStatus.PARSING)) {
+            if (!moveToParsing(docId, KbStatus.FAILED)) {
+                log.info("解析跳过：doc {} 不存在或已进入嵌入阶段，ack 丢弃", docId);
+                return;
+            }
+            cleanFailedRetry(docId);
         }
 
         KbDocumentEntity doc = kbDocumentMapper.selectById(docId);
@@ -141,6 +138,24 @@ public class KbParseService implements KbParseSink {
         }
         log.info("解析完成：doc {} 切出 {} 段，将发 {} 条 kb.embed（batchSize={}）",
                 docId, chunkCount, (chunkCount + batchSize - 1) / batchSize, batchSize);
+    }
+
+    private boolean moveToParsing(long docId, String... currentStatuses) {
+        return kbDocumentMapper.update(null, new LambdaUpdateWrapper<KbDocumentEntity>()
+                .eq(KbDocumentEntity::getId, docId)
+                .in(KbDocumentEntity::getStatus, List.of(currentStatuses))
+                .set(KbDocumentEntity::getStatus, KbStatus.PARSING)
+                .set(KbDocumentEntity::getErrorMsg, null)) > 0;
+    }
+
+    private void cleanFailedRetry(long docId) {
+        if (!kbChunkMapper.exists(new LambdaQueryWrapper<KbChunkEntity>().eq(KbChunkEntity::getDocId, docId))) {
+            return;
+        }
+        KbDocumentCleanup.Result result = cleanup.cleanup(docId);
+        if (!result.clean()) {
+            throw new IllegalStateException("文档 " + docId + " 重试前清理未完成：" + result.detail());
+        }
     }
 
     /**

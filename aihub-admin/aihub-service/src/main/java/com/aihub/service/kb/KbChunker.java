@@ -6,13 +6,14 @@ import java.util.List;
 /**
  * 把一份文本切成<b>定长、带重叠、无缝隙</b>的分段（M5 Task 4，纯函数）。
  *
- * <p><b>几何</b>：窗口 {@code sizeChars}、相邻重叠 {@code overlapChars} ⇒ 步长
- * {@code step = sizeChars - overlapChars}。第 i 段是闭开区间 {@code [i*step, min(i*step + sizeChars, len))}。
+ * <p><b>几何</b>：窗口 {@code sizeChars}、相邻重叠 {@code overlapChars} 和文本长度均按 Unicode 码点计数。
+ * 步长为 {@code step = sizeChars - overlapChars}。第 i 段对应码点区间
+ * {@code [i*step, min(i*step + sizeChars, len))}。
  * 末段一旦覆盖到文末就停止 —— 否则像 {@code len == sizeChars} 这种情形会多吐一段只含重叠区的尾巴。
  *
  * <p><b>不变量（都被用例钉住）</b>：
  * <ol>
- *   <li><b>无缝隙</b>：把每段（除首段）去掉前 {@code overlapChars} 个字符再拼接，逐字还原原文（不丢任何字符）；</li>
+ *   <li><b>无缝隙</b>：把每段（除首段）去掉前 {@code overlapChars} 个码点再拼接，逐字还原原文；</li>
  *   <li><b>每段 ≤ {@code sizeChars}</b>；</li>
  *   <li><b>空 / 全空白 ⇒ 空列表</b>（{@code D14}：{@code chunkCount == 0} 是 {@code FAILED("无可提取文本")} 的出口）。</li>
  * </ol>
@@ -31,8 +32,8 @@ public final class KbChunker {
 
     /**
      * @param text        待切分文本；{@code null} / 空 / 全空白 ⇒ 空列表
-     * @param sizeChars   窗口大小（字符数），必须为正
-     * @param overlapChars 相邻段的重叠字符数，必须 {@code >= 0} 且 {@code < sizeChars}
+     * @param sizeChars   窗口大小（Unicode 码点数），必须为正
+     * @param overlapChars 相邻段的重叠码点数，必须 {@code >= 0} 且 {@code < sizeChars}
      * @return 顺序排列的分段；任何一段都不会是空串
      */
     public static List<String> chunk(String text, int sizeChars, int overlapChars) {
@@ -50,16 +51,17 @@ public final class KbChunker {
             return List.of();
         }
 
-        int length = text.length();
+        int remainingCodePoints = text.codePointCount(0, text.length());
         int step = sizeChars - overlapChars;
+        int start = 0;
         List<String> chunks = new ArrayList<>();
-        for (int start = 0; start < length; start += step) {
-            int end = Math.min(start + sizeChars, length);
+        while (remainingCodePoints > sizeChars) {
+            int end = text.offsetByCodePoints(start, sizeChars);
             chunks.add(text.substring(start, end));
-            if (end == length) {
-                break;   // 末段已覆盖到文末：不再吐"只含重叠区"的多余段
-            }
+            start = text.offsetByCodePoints(start, step);
+            remainingCodePoints -= step;
         }
+        chunks.add(text.substring(start));
         return chunks;
     }
 }

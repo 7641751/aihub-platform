@@ -49,12 +49,13 @@ M0–M6 七个里程碑全部完成并打 tag，控制面配置 → 数据面**�
 
 > **租户模型（`docs/CONVENTIONS.md` §10）**：控制面是**平台运营台**，不是租户自助台 ——
 > 「**读按租户、写不限租户**」是**有意的不对称**；出现第一个非平台方账号 / 对非可信网络暴露 / 引入租户自助之前，必须先落地租户隔离。
-> **已知缺口**：管理台只接了 **6 个端点**（登录 / ping / 渠道 / Key / 日志 / **用量**），其余 20+ 个端点只有 API、没有界面。
+
+管理台的渠道表向 `ADMIN` 和 `VIEWER` 开放。`ADMIN` 可以对单个渠道发起探活，并在当前会话查看最近一次结果，包括可达性、耗时、诊断信息和上游有响应时的 HTTP 状态。`VIEWER` 使用只读视图。
 
 ### 1.3 知识库（写入侧）
 
 `POST /api/kb/documents`（multipart）→ 算 sha256 + **原子落盘** → `kb_document(PENDING)` → 提交后发 MQ →
-**解析**（`md`/`txt`/`pdf`，PDF 抽文本层）→ **切分**（默认 800 字符窗口 / 100 重叠，无缝隙）→ 写 `kb_chunk` →
+**解析**（`md`/`txt`/`pdf`，PDF 抽文本层）→ **切分**（默认窗口 800、重叠 100，按 Unicode 码点计数）→ 写 `kb_chunk` →
 分批**嵌入**（OpenAI 兼容 `/v1/embeddings`）→ 写 **Chroma** → 全部打满 `embedded_at` ⇒ **`READY`**。
 任一阶段重试耗尽 ⇒ **清 Chroma → 删 `kb_chunk` → `FAILED` + 审计**，消息进 `aihub.kb.dlq`（**全成或全清**）。
 
@@ -293,6 +294,7 @@ mvn -B clean test
 **核心链路行覆盖率 91.07%**（鉴权 89.22% / 限流 96.84% / 配额 89.97% / 路由 98.26% / 计量 92.80% / 流水线 86.04%；全仓 `com.aihub.*` 92.48%）。
 
 只跑网关（**不需要 Docker**）：`mvn -B clean test -pl aihub-gateway -am`
+运营台交互回归使用 `node --test aihub-admin/aihub-web/src/test/js/console.test.cjs`。
 只跑某一类：`mvn -B clean test -pl aihub-gateway -am "-Dtest=A,B"` ← **用逗号**（`A+B` 会被当成一个类名而**静默跳过**且照样 `BUILD SUCCESS`）；**单独构建一个模块必须带 `-am`**（否则会撞 `.m2repo` 里的空 jar，报假的 "package does not exist"）。
 
 > **验收方法**（每个里程碑都这么做）：真实 **compose 全栈**上跑，**每条判据配反证**（例：关掉主动失效订阅 ⇒ 同样的配置变更 150 秒仍不可见；关掉 `cleanup` ⇒ Chroma 应留残留）。原始记录在 `.superpowers/sdd/`（git-ignored）。
@@ -342,7 +344,7 @@ tag `m0`–`m6` 均已打（`m6` = M6 收口点；其后另有若干文档与网
 1. **Redis 降级**：不误拒（无 401），但请求路径上有 5–6 个串行阻塞式 Redis 触点，各付一次 `spring.data.redis.timeout`（**已从 2s 收到 300ms**，并把逐请求版本探测按"主动失效是否接上"分档 ⇒ 单请求从 **10–12s 降到 0.44–0.75s**）。残留：`ConfigClient.current()` 仍是**同步** API。
 2. **流式中途上游断流不发 SSE `error` 帧**（直接收尾，客户端看到被截断的流）。
 3. **计量只覆盖 `POST /v1/chat/completions`**；`request_log.model` 超 128 码点会被截断（转发体逐字节不变）。
-4. **管理台只接 5 个端点**；`/actuator/metrics` 未开（计量/限流/降级的计数器不对外暴露）。
+4. **部分控制面操作需直接调用 API**。`/actuator/metrics` 未开（计量/限流/降级的计数器不对外暴露）。
 5. **控制面不隔离租户**（平台运营台的有意设计；升级门槛见 `CONVENTIONS.md` §10）。
 6. **KB**：不做 OCR；`kb_chunk` 存了一份文本；换嵌入模型 = 重建 collection；**检索侧不在本仓库**。
 7. **真上游只有抽测量级**（2 VU × 20s、单模型、未覆盖上游错误路径）⇒ 不可当容量规划依据。

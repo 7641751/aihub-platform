@@ -2,9 +2,12 @@ package com.aihub.admin.kb;
 
 import com.aihub.admin.kb.support.FakeEmbeddingUpstream;
 import com.aihub.admin.kb.support.KbIntegrationTestBase;
+import com.aihub.common.kb.KbStatus;
 import com.aihub.dao.entity.AuditLogEntity;
+import com.aihub.dao.entity.KbChunkEntity;
 import com.aihub.dao.entity.KbDocumentEntity;
 import com.aihub.dao.mapper.AuditLogMapper;
+import com.aihub.mq.kb.KbParseSink;
 import com.aihub.mq.kb.KbTopology;
 import com.aihub.service.audit.AuditService;
 import com.aihub.service.kb.KbDocumentCleanup;
@@ -22,7 +25,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.test.context.TestPropertySource;
 
+import java.io.ByteArrayInputStream;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -75,6 +82,9 @@ class KbFailureIntegrationTest extends KbIntegrationTestBase {
 
     @Autowired
     private KbFileStore fileStore;
+
+    @Autowired
+    private KbParseSink parseSink;
 
     @Autowired
     private AuditService auditService;
@@ -189,6 +199,52 @@ class KbFailureIntegrationTest extends KbIntegrationTestBase {
         assertThat(chunkRowsFor(id2)).as("清理未完成时**坐标必须保留**（可重入）").isEqualTo(CHUNKS);
         assertThat(errorMsgOf(id2)).as("清理失败必须如实登记，绝不假装干净").contains("清理未完成");
         assertThat(auditRowsFor(id2, "KB_DOCUMENT_FAILED")).as("失败必须留审计").isEqualTo(1);
+    }
+
+    @Test
+    void retryingAFailedDocumentReplacesItsLegacyChunksAndVectors() throws Exception {
+        FakeEmbeddingUpstream.respondWithDeterministicVectors(8);
+        String text = "😀".repeat(401);
+        // 旧窗口按 UTF-16 下标切出两段。新版按 Unicode 码点计数，只需一段。
+        List<String> legacyChunks = List.of(text.substring(0, 800), text.substring(700));
+        KbFileStore.StagedFile file = fileStore.stage(TENANT, new ByteArrayInputStream(text.getBytes(UTF_8)));
+        fileStore.promote(file);
+
+        KbDocumentEntity doc = new KbDocumentEntity();
+        doc.setTenantId(TENANT);
+        doc.setFilename("legacy.txt");
+        doc.setSizeBytes(file.sizeBytes());
+        doc.setSha256(file.sha256());
+        doc.setStatus(KbStatus.FAILED);
+        doc.setChunkCount(legacyChunks.size());
+        doc.setErrorMsg("向量库清理未完成");
+        kbDocumentMapper.insert(doc);
+        long id = doc.getId();
+
+        List<KbVectorStoreClient.VectorRecord> legacyVectors = new ArrayList<>();
+        for (int seq = 0; seq < legacyChunks.size(); seq++) {
+            String vectorId = id + ":" + seq;
+            KbChunkEntity chunk = new KbChunkEntity();
+            chunk.setDocId(id);
+            chunk.setSeq(seq);
+            chunk.setText(legacyChunks.get(seq));
+            chunk.setVectorId(vectorId);
+            kbChunkMapper.insert(chunk);
+            legacyVectors.add(new KbVectorStoreClient.VectorRecord(vectorId, new float[]{1, 0, 0, 0, 0, 0, 0, 0},
+                    Map.of("doc_id", id, "tenant_id", TENANT, "seq", seq)));
+        }
+        vectorStore.upsert(legacyVectors);
+
+        parseSink.parse(id);
+
+        awaitUntil(Duration.ofSeconds(20), () -> embeddedCountFor(id) == 1, id);
+        assertThat(kbChunkMapper.selectList(new LambdaQueryWrapper<KbChunkEntity>()
+                .eq(KbChunkEntity::getDocId, id))).singleElement().satisfies(chunk -> {
+                    assertThat(chunk.getSeq()).isZero();
+                    assertThat(chunk.getText()).isEqualTo(text);
+                });
+        awaitUntil(Duration.ofSeconds(20), () -> KbStatus.READY.equals(statusOf(id)), id);
+        assertThat(vectorStore.idsForDoc(id)).containsExactly(id + ":0");
     }
 
     // ---------------------------------------------------------------- 助手

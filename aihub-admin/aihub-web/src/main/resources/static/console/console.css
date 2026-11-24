@@ -122,6 +122,18 @@ th {
   color: #b91c1c;
 }
 
+#channels-body td {
+  overflow-wrap: anywhere;
+}
+
+.probe-result {
+  min-height: 0;
+}
+
+.probe-result:not(:empty) {
+  margin-top: 6px;
+}
+
 .plaintext {
   margin-top: 12px;
   padding: 12px;

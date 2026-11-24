@@ -15,6 +15,8 @@
 
   // 页面状态：token 落 sessionStorage，其余只在内存里（刷新后靠 /api/ping 重建）。
   var state = { token: null, tenantId: null, role: null };
+  var channelListRequest = null;
+  var channelProbes = new Map();
 
   function byId(id) {
     return document.getElementById(id);
@@ -52,8 +54,9 @@
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(opts.body);
     }
-    if (state.token) {
-      headers.Authorization = "Bearer " + state.token;
+    var token = state.token;
+    if (token) {
+      headers.Authorization = "Bearer " + token;
     }
 
     return fetch(path, init).then(function (response) {
@@ -64,8 +67,10 @@
         })
         .then(function (envelope) {
           if (response.status === 401 && opts.authRedirect !== false) {
-            clearSession();
-            showLoginView("登录已失效，请重新登录");
+            if (state.token === token) {
+              clearSession();
+              showLoginView("登录已失效，请重新登录");
+            }
             throw ApiError("UNAUTHORIZED", envelope.message);
           }
           if (response.ok && envelope.code === "OK") {
@@ -89,6 +94,10 @@
     byId("login-view").hidden = true;
     byId("app-view").hidden = false;
     byId("logout-btn").hidden = false;
+    var canWrite = state.role === "ADMIN";
+    byId("channel-form").hidden = !canWrite;
+    byId("channel-actions-heading").hidden = !canWrite;
+    byId("key-form").hidden = !canWrite;
     var role = state.role || "";
     var tenant = state.tenantId === null ? "" : state.tenantId;
     setText(byId("session-info"), "角色 " + role + "，租户 " + tenant);
@@ -126,13 +135,16 @@
     return td;
   }
 
-  function renderRows(tbody, records, columns) {
+  function renderRows(tbody, records, columns, appendAction) {
     setText(tbody, "");
     records.forEach(function (record) {
       var row = document.createElement("tr");
       columns.forEach(function (column) {
         cell(row, record[column]);
       });
+      if (appendAction) {
+        appendAction(row, record);
+      }
       tbody.appendChild(row);
     });
   }
@@ -148,6 +160,12 @@
     state.token = null;
     state.tenantId = null;
     state.role = null;
+    channelListRequest = null;
+    channelProbes.clear();
+    byId("channel-form").reset();
+    byId("key-form").reset();
+    byId("plaintext-box").hidden = true;
+    setText(byId("plaintext-key"), "");
     window.sessionStorage.removeItem(TOKEN_KEY);
   }
 
@@ -192,20 +210,94 @@
   // --- 渠道视图 -------------------------------------------------------------
 
   function renderChannels(list) {
-    renderRows(byId("channels-body"), list, ["id", "name", "provider", "baseUrl", "status"]);
+    var appendAction = state.role === "ADMIN" ? addChannelProbe : null;
+    renderRows(byId("channels-body"), list, ["id", "name", "provider", "baseUrl", "status"], appendAction);
+  }
+
+  function addChannelProbe(row, channel) {
+    var action = cell(row, "");
+    var button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("aria-label", "探活 " + channel.name);
+    setText(button, "探活");
+    var result = document.createElement("div");
+    result.className = "message probe-result";
+    result.setAttribute("role", "status");
+    var probe = channelProbes.get(channel.id);
+    if (!probe) {
+      probe = { pending: false, message: "", isError: false };
+      channelProbes.set(channel.id, probe);
+    }
+    probe.button = button;
+    probe.result = result;
+    renderProbe(probe);
+    button.addEventListener("click", function () {
+      probeChannel(channel.id, probe);
+    });
+    action.appendChild(button);
+    action.appendChild(result);
+  }
+
+  function renderProbe(probe) {
+    probe.button.disabled = probe.pending;
+    setMessage(probe.result, probe.message, probe.isError);
+  }
+
+  function setProbeState(probe, pending, message, isError) {
+    probe.pending = pending;
+    probe.message = message;
+    probe.isError = isError;
+    renderProbe(probe);
+  }
+
+  function probeChannel(id, probe) {
+    if (state.role !== "ADMIN" || channelProbes.get(id) !== probe || probe.pending) {
+      return;
+    }
+    setProbeState(probe, true, "探活中…", false);
+    api("/api/channels/" + encodeURIComponent(id) + "/probe", { method: "POST" })
+      .then(function (result) {
+        var details = [result.reachable ? "可达" : "不可达"];
+        if (result.httpStatus != null) {
+          details.push("HTTP " + result.httpStatus);
+        }
+        details.push(result.latencyMs + " ms");
+        if (result.message) {
+          details.push(result.message);
+        }
+        setProbeState(probe, false, details.join(" · "), !result.reachable);
+      })
+      .catch(function (error) {
+        setProbeState(probe, false, describe(error), true);
+      });
   }
 
   function loadChannels() {
-    setMessage(byId("channels-message"), "", false);
-    api("/api/channels")
-      .then(renderChannels)
+    var message = byId("channels-message");
+    setText(byId("channels-body"), "");
+    setMessage(message, "正在加载渠道…", false);
+    var request = api("/api/channels");
+    channelListRequest = request;
+    request
+      .then(function (list) {
+        if (channelListRequest === request) {
+          renderChannels(list);
+          setMessage(message, list.length ? "" : "暂无渠道", false);
+        }
+      })
       .catch(function (error) {
-        setMessage(byId("channels-message"), describe(error), true);
+        if (channelListRequest === request) {
+          setMessage(message, describe(error), true);
+        }
       });
   }
 
   function submitChannel(event) {
     event.preventDefault();
+    if (state.role !== "ADMIN") {
+      return;
+    }
+    var token = state.token;
     setMessage(byId("channels-message"), "", false);
     var models = byId("channel-models").value;
     api("/api/channels", {
@@ -220,11 +312,15 @@
       }
     })
       .then(function () {
-        byId("channel-form").reset();
-        loadChannels();
+        if (state.token === token) {
+          byId("channel-form").reset();
+          loadChannels();
+        }
       })
       .catch(function (error) {
-        setMessage(byId("channels-message"), describe(error), true);
+        if (state.token === token) {
+          setMessage(byId("channels-message"), describe(error), true);
+        }
       });
   }
 
@@ -245,6 +341,10 @@
 
   function submitKey(event) {
     event.preventDefault();
+    if (state.role !== "ADMIN") {
+      return;
+    }
+    var token = state.token;
     setMessage(byId("keys-message"), "", false);
     var rawValidDays = byId("key-valid-days").value;
     var validDays = rawValidDays ? parseInt(rawValidDays, 10) : null;
@@ -253,6 +353,9 @@
       body: { tenantId: state.tenantId, name: byId("key-name").value, validDays: validDays }
     })
       .then(function (created) {
+        if (state.token !== token) {
+          return;
+        }
         byId("key-form").reset();
         // 明文只展示这一次：写入 DOM 用 textContent，绝不进 sessionStorage / URL。
         byId("plaintext-box").hidden = false;
@@ -260,7 +363,9 @@
         loadKeys();
       })
       .catch(function (error) {
-        setMessage(byId("keys-message"), describe(error), true);
+        if (state.token === token) {
+          setMessage(byId("keys-message"), describe(error), true);
+        }
       });
   }
 

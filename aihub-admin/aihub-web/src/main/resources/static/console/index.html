@@ -36,10 +36,10 @@
         <span id="session-info" class="muted"></span>
       </nav>
 
-      <!-- 渠道视图：列表 + 新建 -->
+      <!-- 渠道视图：列表、新建与探活 -->
       <section id="channels-panel" class="card">
         <h2>渠道</h2>
-        <form id="channel-form" autocomplete="off">
+        <form id="channel-form" autocomplete="off" hidden>
           <input id="channel-name" placeholder="名称" required>
           <input id="channel-provider" placeholder="provider" required>
           <input id="channel-base-url" placeholder="baseUrl" required>
@@ -49,7 +49,8 @@
         </form>
         <table>
           <thead>
-            <tr><th>ID</th><th>名称</th><th>provider</th><th>baseUrl</th><th>状态</th></tr>
+            <tr><th>ID</th><th>名称</th><th>provider</th><th>baseUrl</th><th>状态</th>
+              <th id="channel-actions-heading" scope="col" hidden>操作</th></tr>
           </thead>
           <tbody id="channels-body"></tbody>
         </table>
@@ -59,7 +60,7 @@
       <!-- Key 视图：列表 + 新建并一次性展示明文 -->
       <section id="keys-panel" class="card" hidden>
         <h2>API Key</h2>
-        <form id="key-form" autocomplete="off">
+        <form id="key-form" autocomplete="off" hidden>
           <input id="key-name" placeholder="名称" required>
           <input id="key-valid-days" placeholder="有效天数（可选，留空=不过期）" type="number" min="1">
           <button type="submit">新建 Key</button>

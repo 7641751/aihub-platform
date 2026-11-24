@@ -343,6 +343,10 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 `api-key` 非空才加 `Authorization: Bearer …`，空值 = 一个头都不加）、`aihub.kb.chroma.base-url`/`collection`/`timeout-seconds`
 （**默认值即生产值**；测试**不许**覆盖它们 —— 覆盖会 fork 出第 8 个 Spring 上下文，见 §8）。
 
+分段大小与重叠长度均按 Unicode 码点计数。每段最多包含 `size-chars` 个码点，相邻两段恰好重叠 `overlap-chars` 个码点。有可提取文本时，去掉后续段的重叠前缀后拼接，可还原原文。
+
+重试仍有遗留分段的 `FAILED` 文档时，先确认 Chroma 已清除对应向量，再删除旧分段并按当前窗口切分。
+
 ## 7. 数据库约定
 
 - 字符集 `utf8mb4`，时间字段 `datetime(3)` 且按 UTC 存储。
