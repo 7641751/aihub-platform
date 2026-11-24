@@ -4,9 +4,14 @@ import com.aihub.dao.entity.KbDocumentEntity;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
 
 /** 由 {@code MybatisMapperConfig} 的 {@code @MapperScan("com.aihub.dao.mapper")} 扫描。 */
 public interface KbDocumentMapper extends BaseMapper<KbDocumentEntity> {
+
+    /** 在终态处置事务中锁定文档，避免就绪迁移与清理决策交错。 */
+    @Select("SELECT status FROM kb_document WHERE id = #{id} FOR UPDATE")
+    String lockStatus(@Param("id") long docId);
 
     /**
      * 幂等「插或忽略」：命中 {@code uk_kb_document_tenant_sha} 时什么都不改，也不抛唯一键异常。

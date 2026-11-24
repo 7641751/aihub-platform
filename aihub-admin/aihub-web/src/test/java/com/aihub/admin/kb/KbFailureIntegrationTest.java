@@ -76,7 +76,7 @@ class KbFailureIntegrationTest extends KbIntegrationTestBase {
     @Autowired
     private AmqpAdmin amqpAdmin;
 
-    /** 生产服务（含 Task 6 新增的终态处置）：第三条用例用它做手工装配的对照。 */
+    /** 通过生产服务的事务代理调用终态处置。 */
     @Autowired
     private KbDocumentService kbDocumentService;
 
@@ -151,6 +151,24 @@ class KbFailureIntegrationTest extends KbIntegrationTestBase {
         assertThat(dlqDepth()).as("0 段不是消费失败，不该进 DLQ").isZero();
     }
 
+    @Test
+    void lateFailurePreservesReadyDocument() throws Exception {
+        FakeEmbeddingUpstream.respondWithDeterministicVectors(8);
+        long id = uploadId(TENANT, "late.md", markdownOf(17_000, "迟到"));
+        awaitUntil(Duration.ofSeconds(90), () -> KbStatus.READY.equals(statusOf(id)), id);
+        var vectors = vectorStore.countByDocId(id);
+        var chunks = chunkRowsFor(id);
+        assertThat(vectors).isPositive();
+        assertThat(chunks).isPositive();
+
+        kbDocumentService.onTerminalFailure(id, "embed", new IllegalStateException("late"));
+
+        assertThat(statusOf(id)).isEqualTo(KbStatus.READY);
+        assertThat(vectorStore.countByDocId(id)).isEqualTo(vectors);
+        assertThat(chunkRowsFor(id)).isEqualTo(chunks);
+        assertThat(auditRowsFor(id, "KB_DOCUMENT_FAILED")).isZero();
+    }
+
     // ---------------------------------------------------------------- 3) 清理幂等 + 如实登记
 
     @Test
@@ -199,6 +217,13 @@ class KbFailureIntegrationTest extends KbIntegrationTestBase {
         assertThat(chunkRowsFor(id2)).as("清理未完成时**坐标必须保留**（可重入）").isEqualTo(CHUNKS);
         assertThat(errorMsgOf(id2)).as("清理失败必须如实登记，绝不假装干净").contains("清理未完成");
         assertThat(auditRowsFor(id2, "KB_DOCUMENT_FAILED")).as("失败必须留审计").isEqualTo(1);
+
+        kbDocumentService.onTerminalFailure(id2, "embed", new IllegalStateException("重放死信"));
+
+        assertThat(statusOf(id2)).isEqualTo(KbStatus.FAILED);
+        assertThat(vectorStore.countByDocId(id2)).isZero();
+        assertThat(chunkRowsFor(id2)).isZero();
+        assertThat(auditRowsFor(id2, "KB_DOCUMENT_FAILED")).isEqualTo(1);
     }
 
     @Test

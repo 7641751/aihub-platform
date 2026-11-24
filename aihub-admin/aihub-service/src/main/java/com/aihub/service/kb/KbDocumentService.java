@@ -198,14 +198,11 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
     // ---------------------------------------------------------------- 失败终态（M5 Task 6，D7/D8/D13）
 
     /**
-     * 消息重试耗尽时的终态处置（D7）：<b>清理 → 置 FAILED → 审计</b>，且这一切发生在
-     * {@code KbMessageRecoverer} 把消息拒绝进 DLQ <b>之前</b>（恢复器调完本方法才抛
-     * {@code AmqpRejectAndDontRequeueException}）⇒ "死信"与"失败终态"永远同时发生。
+     * 消息重试耗尽时先锁定并检查文档状态。缺失或已就绪的文档跳过清理，失败文档仍可重入清理。
+     * {@code KbMessageRecoverer} 随后拒绝消息并交给 DLQ。
      *
      * <p>{@code @Transactional}：让"删 {@code kb_chunk}（清理的第二步）+ 置 FAILED + 审计"落在<b>一个</b>事务里。
-     * 清理的第一、二步之间隔一次 Chroma 网络调用，把整个清理都放进事务会占住连接 —— 但<b>失败路径</b>不以
-     * 吞吐为目标，这里选"原子"而不是"连接占用"（与 {@code KbEmbedService} 的取舍相反，理由不同：
-     * 那边是<b>热路径</b>、每条消息都会走）。
+     * Chroma 删除和回查期间仍持有文档行锁，同一文档的状态更新等待终态处置完成。
      *
      * @param docId {@code kb_document.id}
      * @param stage 失败阶段（{@code "parse"} / {@code "embed"}），进 {@code error_msg} 便于定位是哪一段
@@ -214,6 +211,12 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
     @Override
     @Transactional
     public void onTerminalFailure(long docId, String stage, Throwable cause) {
+        String status = kbDocumentMapper.lockStatus(docId);
+        if (status == null || KbStatus.READY.equals(status)) {
+            log.info("跳过文档终态清理 docId={} status={}", docId, status);
+            return;
+        }
+
         KbDocumentCleanup.Result result = cleanup.cleanup(docId);
         String reason = buildFailureReason(stage, cause, result);
         boolean marked = markFailed(docId, reason);
@@ -221,7 +224,7 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
             log.warn("文档 {} 进入终态 FAILED（stage={}，清理{}）：{}",
                     docId, stage, result.clean() ? "干净" : "未完成", reason);
         } else {
-            log.info("文档 {} 无需再置 FAILED（已是终态 / 行不存在），ack 丢弃", docId);
+            log.info("文档 {} 无需再置 FAILED，清理{}", docId, result.clean() ? "干净" : "未完成");
         }
     }
 
