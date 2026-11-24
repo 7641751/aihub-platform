@@ -93,6 +93,14 @@ public class KbDocumentCleanup {
         }
         String message = cause.getMessage();
         String text = cause.getClass().getSimpleName() + (message == null || message.isBlank() ? "" : ": " + message);
-        return text.length() > 160 ? text.substring(0, 160) + "…" : text;
+        int maxChars = 160;
+        if (text.length() <= maxChars) {
+            return text;
+        }
+        int end = maxChars - 1;
+        if (Character.isSurrogatePair(text.charAt(end - 1), text.charAt(end))) {
+            end--;
+        }
+        return text.substring(0, end) + "…";
     }
 }

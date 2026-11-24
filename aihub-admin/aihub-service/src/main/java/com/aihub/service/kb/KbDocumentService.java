@@ -52,10 +52,7 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
     /** 终态失败是<b>系统</b>产生的（D13）：{@code actor_type=SYSTEM}，actor id 标明是 kb 流水线。 */
     private static final AuditService.Actor SYSTEM_ACTOR = new AuditService.Actor("SYSTEM", "kb-pipeline");
 
-    /**
-     * {@code error_msg} 列是 {@code VARCHAR(1024)}；本类派生的原因<b>有界</b>（远小于列宽，
-     * 留足余量给"清理未完成"等后缀），免得一条超长异常把列写爆（严格模式下是硬失败）。
-     */
+    /** 单条失败原因的 UTF-16 长度上限，包含清理说明和省略号。 */
     private static final int MAX_ERROR_MSG_CHARS = 512;
 
     /** 资源列表的缺省/上界（Task 2 的接口契约）。 */
@@ -262,12 +259,10 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
 
     /** 有界地派生失败原因：能看出<b>哪一段</b>失败（stage）+ 异常类名 + 摘要；清理未完成时如实追加。 */
     private static String buildFailureReason(String stage, Throwable cause, KbDocumentCleanup.Result cleanup) {
-        StringBuilder reason = new StringBuilder();
-        reason.append(stage).append(" 阶段失败：").append(summarize(cause));
-        if (cleanup != null && !cleanup.clean()) {
-            reason.append("；清理未完成：").append(cleanup.detail());
-        }
-        return truncate(reason.toString(), MAX_ERROR_MSG_CHARS);
+        String suffix = cleanup != null && !cleanup.clean()
+                ? truncate("；清理未完成：" + cleanup.detail(), MAX_ERROR_MSG_CHARS / 2) : "";
+        String primary = stage + " 阶段失败：" + summarize(cause);
+        return truncate(primary, MAX_ERROR_MSG_CHARS - suffix.length()) + suffix;
     }
 
     /**
@@ -301,7 +296,14 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
     }
 
     private static String truncate(String text, int maxChars) {
-        return text.length() <= maxChars ? text : text.substring(0, maxChars) + "…";
+        if (text.length() <= maxChars) {
+            return text;
+        }
+        int end = maxChars - 1;
+        if (end > 0 && Character.isSurrogatePair(text.charAt(end - 1), text.charAt(end))) {
+            end--;
+        }
+        return text.substring(0, end) + "…";
     }
 
     /**

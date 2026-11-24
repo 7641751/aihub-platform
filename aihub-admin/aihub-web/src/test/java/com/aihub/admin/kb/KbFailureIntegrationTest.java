@@ -204,18 +204,24 @@ class KbFailureIntegrationTest extends KbIntegrationTestBase {
         KbVectorStoreClient faultyVectorStore = new KbVectorStoreClient(chromaBaseUrl, chromaCollection, 30) {
             @Override
             public void deleteByDocId(long docId) {
-                throw new IllegalStateException("注入的 Chroma 删除失败");
+                throw new IllegalStateException("注入的 Chroma 删除失败：" + "😀".repeat(300));
             }
         };
         KbDocumentCleanup faultyCleanup = new KbDocumentCleanup(faultyVectorStore, kbChunkMapper);
         // 手工装配：用**会失败**的清理替身驱动终态处置，其余依赖用真 bean（真 DB / 真审计）。
         KbDocumentService serviceWithFaultyCleanup =
                 new KbDocumentService(kbDocumentMapper, fileStore, auditService, publisher, faultyCleanup);
-        serviceWithFaultyCleanup.onTerminalFailure(id2, "embed", new IllegalStateException("embeddings 上游返回 500"));
+        serviceWithFaultyCleanup.onTerminalFailure(id2, "embed",
+                new IllegalStateException("上游异常：" + "😀".repeat(300)));
 
         assertThat(statusOf(id2)).as("失败终态照常置位").isEqualTo("FAILED");
         assertThat(chunkRowsFor(id2)).as("清理未完成时**坐标必须保留**（可重入）").isEqualTo(CHUNKS);
-        assertThat(errorMsgOf(id2)).as("清理失败必须如实登记，绝不假装干净").contains("清理未完成");
+        String reason = errorMsgOf(id2);
+        assertThat(reason).startsWith("embed")
+                .contains("😀…；清理未完成：", "向量库删除失败")
+                .endsWith("😀…")
+                .doesNotContain("?", "\uFFFD");
+        assertThat(reason.length()).isLessThanOrEqualTo(512);
         assertThat(auditRowsFor(id2, "KB_DOCUMENT_FAILED")).as("失败必须留审计").isEqualTo(1);
 
         kbDocumentService.onTerminalFailure(id2, "embed", new IllegalStateException("重放死信"));
