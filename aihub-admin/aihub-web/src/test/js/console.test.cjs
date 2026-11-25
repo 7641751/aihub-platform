@@ -37,7 +37,8 @@ function response(data, status = 200, code = 'OK', message = '') {
 
 async function openConsole(role, probe, channels = [
   { id: 42, name: 'primary', provider: 'openai', baseUrl: 'https://example.test', status: 'ACTIVE' }
-], handleRequest = (path) => { throw new Error('Unexpected request ' + path); }) {
+], handleRequest = (path) => { throw new Error('Unexpected request ' + path); }, restorePing,
+  login = { role: 'VIEWER', token: 'viewer-token' }) {
   const elements = new Map(Array.from(html.matchAll(/<([a-z]+) [^>]*?\bid="([^"]+)"([^>]*)>/g),
     ([, tag, id, attributes]) => {
       const node = element(tag, /\bhidden\b/.test(attributes));
@@ -64,8 +65,10 @@ async function openConsole(role, probe, channels = [
     async fetch(path, options) {
       requests.push({ path, ...options });
       switch (path) {
-        case '/api/auth/login': return response({ role: 'VIEWER', token: 'viewer-token' });
-        case '/api/ping': return response({ role: token === 'viewer-token' ? 'VIEWER' : role, tenantId: 1 });
+        case '/api/auth/login': return response(login);
+        case '/api/ping':
+          if (token === 'test-token' && restorePing) return restorePing();
+          return response({ role: token === 'viewer-token' ? 'VIEWER' : role, tenantId: 1 });
         case '/api/channels': return options.method === 'GET' ? response(channels) : handleRequest(path, options);
         case '/api/channels/42/probe': return probe();
         default: return handleRequest(path, options);
@@ -177,6 +180,23 @@ test('a reversed log range focuses the start without issuing a request', async (
   assert.match(page.byId('logs-message').textContent, /起始时间不能晚于结束时间/);
 });
 
+test('a nonexistent local time in a DST gap is rejected', async () => {
+  const previous = process.env.TZ;
+  process.env.TZ = 'America/New_York';
+  try {
+    const page = await openLogs(() => response({ records: [] }));
+    page.byId('logs-from').value = '2026-03-08T02:30';
+    page.byId('logs-to').value = '2026-03-08T04:00';
+    page.byId('logs-form').dispatch('submit');
+    assert.equal(page.requests.some((request) => request.path.startsWith('/api/logs?')), false);
+    assert.equal(page.byId('logs-from').focused, true);
+    assert.match(page.byId('logs-message').textContent, /有效的本地时间/);
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
+});
+
 test('logging out invalidates an unfinished log query', async () => {
   let finish;
   const page = await openLogs(() => new Promise((resolve) => { finish = resolve; }));
@@ -284,6 +304,26 @@ test('a created key moves focus to the one-time display, which erases it on clos
   assert.equal(toggle.focused, true);
 });
 
+test('an initial key list cannot replace the list refreshed after creation', async () => {
+  let finishInitialList;
+  const page = await openConsole('ADMIN', undefined, undefined, (path, options) => {
+    assert.equal(path, '/api/api-keys');
+    if (options.method === 'POST') return response({ plaintextKey: 'test-key-one-time' });
+    if (finishInitialList) return response([{ id: 1, name: 'new-key' }]);
+    return new Promise((resolve) => { finishInitialList = resolve; });
+  });
+  page.byId('tab-keys').click();
+  page.byId('key-form-toggle').click();
+  page.byId('key-form').dispatch('submit');
+  await nextTurn();
+  const body = page.byId('keys-body');
+  assert.match(body.textContent, /new-key/);
+  finishInitialList(response([{ id: 2, name: 'old-key' }]));
+  await nextTurn();
+  assert.match(body.textContent, /new-key/);
+  assert.doesNotMatch(body.textContent, /old-key/);
+});
+
 test('usage distinguishes refreshing, updated, missing and failed states', async () => {
   const pending = [];
   const page = await openConsole('VIEWER', undefined, undefined, (path) => {
@@ -294,11 +334,13 @@ test('usage distinguishes refreshing, updated, missing and failed states', async
   const message = page.byId('usage-message');
   const usage = { period: '2026-11', source: 'redis-bucket', tokenLimit: 0, tokenRemaining: -1 };
   page.byId('tab-usage').click();
-  assert.equal(refresh.disabled, true);
+  assert.equal(refresh.getAttribute('aria-disabled'), 'true');
+  refresh.click();
+  assert.equal(pending.length, 1);
   assert.match(message.textContent, /正在刷新/);
   pending[0](response(usage));
   await nextTurn();
-  assert.equal(refresh.disabled, false);
+  assert.equal(refresh.getAttribute('aria-disabled'), 'false');
   assert.match(page.byId('usage-meta').textContent, /UTC/);
   assert.match(page.byId('usage-body').textContent, /不限/);
   assert.equal(message.textContent, '用量已更新');
@@ -311,7 +353,7 @@ test('usage distinguishes refreshing, updated, missing and failed states', async
   refresh.click();
   pending[2](response(null, 500, 'INTERNAL_ERROR', '连接失败'));
   await nextTurn();
-  assert.equal(refresh.disabled, false);
+  assert.equal(refresh.getAttribute('aria-disabled'), 'false');
   assert.equal(page.byId('usage-body').textContent, '');
   assert.equal(page.byId('usage-note').textContent, '');
   assert.match(message.textContent, /连接失败/);
@@ -366,6 +408,67 @@ test('an empty channel list has an explicit empty state', async () => {
   const page = await openConsole('VIEWER', undefined, []);
   assert.equal(page.byId('channels-body').children.length, 0);
   assert.equal(page.byId('channels-message').textContent, '暂无渠道');
+});
+
+test('the selected navigation button stays in sync with its panel', async () => {
+  const { byId } = await openConsole('VIEWER');
+  assert.equal(byId('tab-channels').getAttribute('aria-pressed'), 'true');
+  byId('tab-logs').click();
+
+  for (const tab of ['channels', 'keys', 'logs', 'usage']) {
+    const selected = tab === 'logs';
+    assert.equal(byId('tab-' + tab).getAttribute('aria-controls'), tab + '-panel');
+    assert.equal(byId('tab-' + tab).getAttribute('aria-pressed'), String(selected));
+    assert.equal(byId('tab-' + tab).hasClass('active'), selected);
+    assert.equal(byId(tab + '-panel').hidden, !selected);
+  }
+});
+
+test('a second login cannot overlap authentication and overwrite the current role', async () => {
+  const page = await openConsole('ADMIN');
+  page.byId('logout-btn').click();
+  const form = page.byId('login-form');
+  form.dispatch('submit');
+  form.dispatch('submit');
+  await nextTurn();
+  assert.equal(page.requests.filter((request) => request.path === '/api/auth/login').length, 1);
+  assert.match(page.byId('session-info').textContent, /VIEWER/);
+  assert.equal(page.byId('channel-form-toggle').hidden, true);
+});
+
+test('a delayed restored administrator session cannot overwrite a new viewer login', async () => {
+  let finishRestore;
+  const page = await openConsole('ADMIN', undefined, undefined, undefined,
+    () => new Promise((resolve) => { finishRestore = resolve; }));
+  page.byId('login-form').dispatch('submit');
+  await nextTurn();
+  finishRestore(response({ role: 'ADMIN', tenantId: 2 }));
+  await nextTurn();
+
+  assert.match(page.byId('session-info').textContent, /VIEWER/);
+  assert.equal(page.byId('channel-form-toggle').hidden, true);
+});
+
+test('reusing a token after logout does not reveal a key created by the previous session', async () => {
+  let finishCreation;
+  const page = await openConsole('ADMIN', undefined, undefined, (path, options) => {
+    assert.equal(path, '/api/api-keys');
+    if (options.method === 'GET') return response([]);
+    return new Promise((resolve) => { finishCreation = resolve; });
+  }, undefined, { role: 'ADMIN', token: 'test-token' });
+  page.byId('tab-keys').click();
+  page.byId('key-form-toggle').click();
+  page.byId('key-form').dispatch('submit');
+  page.byId('logout-btn').click();
+  page.byId('login-form').dispatch('submit');
+  await nextTurn();
+  page.byId('tab-keys').click();
+  finishCreation(response({ plaintextKey: 'previous-session-key' }));
+  await nextTurn();
+
+  assert.match(page.byId('session-info').textContent, /ADMIN/);
+  assert.equal(page.byId('plaintext-box').hidden, true);
+  assert.equal(page.byId('plaintext-key').textContent, '');
 });
 
 test('a probe from a previous session cannot sign out the current viewer', async () => {

@@ -17,29 +17,33 @@
     <section id="login-view" class="card">
       <h2>登录</h2>
       <form id="login-form" autocomplete="off">
-        <label for="username">用户名</label>
-        <input id="username" name="username" type="text" autocomplete="username" required>
-        <label for="password">口令</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required>
-        <button type="submit">登录</button>
+        <div class="field">
+          <label for="username">用户名</label>
+          <input id="username" name="username" type="text" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label for="password">口令</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+        </div>
+        <div class="form-actions"><button id="login-submit" type="submit" aria-disabled="false">登录</button></div>
       </form>
       <p id="login-error" class="message error" role="alert"></p>
     </section>
 
     <!-- 应用视图 -->
     <div id="app-view" hidden>
-      <nav class="tabs">
-        <button id="tab-channels" type="button">渠道</button>
-        <button id="tab-keys" type="button">API Key</button>
-        <button id="tab-logs" type="button">请求日志</button>
-        <button id="tab-usage" type="button">用量</button>
+      <nav class="tabs" aria-label="运营台页面">
+        <button id="tab-channels" type="button" aria-controls="channels-panel" aria-pressed="true">渠道</button>
+        <button id="tab-keys" type="button" aria-controls="keys-panel" aria-pressed="false">API Key</button>
+        <button id="tab-logs" type="button" aria-controls="logs-panel" aria-pressed="false">请求日志</button>
+        <button id="tab-usage" type="button" aria-controls="usage-panel" aria-pressed="false">用量</button>
         <span id="session-info" class="muted"></span>
       </nav>
 
       <!-- 渠道视图：列表、新建与探活 -->
       <section id="channels-panel" class="card">
         <div class="panel-heading">
-          <h2>渠道</h2>
+          <h2 id="channels-heading">渠道</h2>
           <button id="channel-form-toggle" type="button" aria-expanded="false" aria-controls="channel-form" hidden>新建渠道</button>
         </div>
         <form id="channel-form" class="filter-form" autocomplete="off" hidden>
@@ -54,20 +58,22 @@
           </div>
           <p id="channel-form-message" class="message form-message" role="status"></p>
         </form>
-        <table>
-          <thead>
-            <tr><th>ID</th><th>名称</th><th>provider</th><th>baseUrl</th><th>状态</th>
-              <th id="channel-actions-heading" scope="col" hidden>操作</th></tr>
-          </thead>
-          <tbody id="channels-body"></tbody>
-        </table>
+        <div id="channels-table-scroll" class="table-scroll" tabindex="0" role="region" aria-labelledby="channels-heading">
+          <table>
+            <thead>
+              <tr><th scope="col">ID</th><th scope="col">名称</th><th scope="col">服务商</th><th scope="col">服务地址</th><th scope="col">状态</th>
+                <th id="channel-actions-heading" scope="col" hidden>操作</th></tr>
+            </thead>
+            <tbody id="channels-body"></tbody>
+          </table>
+        </div>
         <p id="channels-message" class="message" role="status"></p>
       </section>
 
       <!-- Key 视图：列表 + 新建并一次性展示明文 -->
       <section id="keys-panel" class="card" hidden>
         <div class="panel-heading">
-          <h2>API Key</h2>
+          <h2 id="keys-heading">API Key</h2>
           <button id="key-form-toggle" type="button" aria-expanded="false" aria-controls="key-form" hidden>新建 Key</button>
         </div>
         <form id="key-form" class="filter-form" autocomplete="off" hidden>
@@ -88,18 +94,20 @@
           <code id="plaintext-key"></code>
           <button id="plaintext-close" type="button">关闭明文</button>
         </div>
-        <table>
-          <thead>
-            <tr><th>ID</th><th>名称</th><th>状态</th><th>到期</th></tr>
-          </thead>
-          <tbody id="keys-body"></tbody>
-        </table>
+        <div id="keys-table-scroll" class="table-scroll" tabindex="0" role="region" aria-labelledby="keys-heading">
+          <table>
+            <thead>
+              <tr><th scope="col">ID</th><th scope="col">名称</th><th scope="col">状态</th><th scope="col">到期</th></tr>
+            </thead>
+            <tbody id="keys-body"></tbody>
+          </table>
+        </div>
         <p id="keys-message" class="message" role="status"></p>
       </section>
 
       <!-- 日志视图：租户 + 时间范围查询 -->
       <section id="logs-panel" class="card" hidden>
-        <h2>请求日志</h2>
+        <h2 id="logs-heading">请求日志</h2>
         <p id="logs-timezone" class="field-hint">浏览器本地时间</p>
         <form id="logs-form" class="filter-form" autocomplete="off">
           <div class="field"><label for="logs-tenant-id">租户 ID</label><input id="logs-tenant-id" required></div>
@@ -114,27 +122,31 @@
           <div class="form-actions"><button id="logs-submit" type="submit">查询</button></div>
           <p id="logs-message" class="message form-message" role="status"></p>
         </form>
-        <table>
-          <thead>
-            <tr><th>requestId</th><th>状态</th><th>模型</th><th>created_at</th></tr>
-          </thead>
-          <tbody id="logs-body" aria-busy="false"></tbody>
-        </table>
+        <div id="logs-table-scroll" class="table-scroll" tabindex="0" role="region" aria-labelledby="logs-heading">
+          <table>
+            <thead>
+              <tr><th scope="col">requestId</th><th scope="col">状态</th><th scope="col">模型</th><th scope="col">创建时间</th></tr>
+            </thead>
+            <tbody id="logs-body" aria-busy="false"></tbody>
+          </table>
+        </div>
       </section>
 
       <!-- 用量视图：只读、无参（= 当前 UTC 周期；租户由服务端从令牌取，R3.2） -->
       <section id="usage-panel" class="card" hidden>
         <div class="panel-heading">
-          <h2>用量（本周期）</h2>
-          <button id="usage-refresh" type="button">刷新</button>
+          <h2 id="usage-heading">用量（本周期）</h2>
+          <button id="usage-refresh" type="button" aria-disabled="false">刷新</button>
         </div>
         <p id="usage-meta" class="muted"></p>
-        <table>
-          <thead>
-            <tr><th>维度</th><th>上限</th><th>已用</th><th>剩余</th></tr>
-          </thead>
-          <tbody id="usage-body"></tbody>
-        </table>
+        <div id="usage-table-scroll" class="table-scroll" tabindex="0" role="region" aria-labelledby="usage-heading">
+          <table>
+            <thead>
+              <tr><th scope="col">维度</th><th scope="col">上限</th><th scope="col">已用</th><th scope="col">剩余</th></tr>
+            </thead>
+            <tbody id="usage-body"></tbody>
+          </table>
+        </div>
         <p id="usage-note" class="message" role="status"></p>
         <p id="usage-message" class="message" role="status"></p>
       </section>

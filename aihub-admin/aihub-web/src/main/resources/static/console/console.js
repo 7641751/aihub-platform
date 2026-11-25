@@ -15,7 +15,10 @@
 
   // 页面状态：token 落 sessionStorage，其余只在内存里（刷新后靠 /api/ping 重建）。
   var state = { token: null, tenantId: null, role: null };
+  // 令牌可能在短时间内重复签发，本地会话序号仍会变化。
+  var sessionSequence = 0;
   var channelListRequest = null;
+  var keyListRequest = null;
   var channelProbes = new Map();
   var logsQuerySequence = 0;
 
@@ -55,6 +58,7 @@
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(opts.body);
     }
+    var session = sessionSequence;
     var token = state.token;
     if (token) {
       headers.Authorization = "Bearer " + token;
@@ -68,7 +72,7 @@
         })
         .then(function (envelope) {
           if (response.status === 401 && opts.authRedirect !== false) {
-            if (state.token === token && (!opts.isCurrent || opts.isCurrent())) {
+            if (session === sessionSequence && (!opts.isCurrent || opts.isCurrent())) {
               clearSession();
               showLoginView("登录已失效，请重新登录");
             }
@@ -89,6 +93,7 @@
     byId("app-view").hidden = true;
     byId("logout-btn").hidden = true;
     setMessage(byId("login-error"), message || "", Boolean(message));
+    byId("username").focus();
   }
 
   function showAppView() {
@@ -106,8 +111,11 @@
 
   function selectTab(name) {
     ["channels", "keys", "logs", "usage"].forEach(function (tab) {
-      byId("tab-" + tab).classList.toggle("active", tab === name);
-      byId(tab + "-panel").hidden = tab !== name;
+      var button = byId("tab-" + tab);
+      var selected = tab === name;
+      button.classList.toggle("active", selected);
+      button.setAttribute("aria-pressed", String(selected));
+      byId(tab + "-panel").hidden = !selected;
     });
     if (name === "channels") {
       loadChannels();
@@ -180,10 +188,12 @@
   }
 
   function clearSession() {
+    sessionSequence++;
     state.token = null;
     state.tenantId = null;
     state.role = null;
     channelListRequest = null;
+    keyListRequest = null;
     channelProbes.clear();
     logsQuerySequence++;
     byId("logs-form").reset();
@@ -200,7 +210,7 @@
     });
     closePlaintext(false);
     setText(byId("keys-body"), "");
-    byId("usage-refresh").disabled = false;
+    byId("usage-refresh").setAttribute("aria-disabled", "false");
     setText(byId("usage-body"), "");
     setText(byId("usage-meta"), "");
     setMessage(byId("usage-note"), "", false);
@@ -214,13 +224,20 @@
     byId("logs-tenant-id").value = ping.tenantId;
     showAppView();
     selectTab("channels");
+    byId("tab-channels").focus();
   }
 
   // --- 登录 / 退出 ----------------------------------------------------------
 
   function submitLogin(event) {
     event.preventDefault();
-    setMessage(byId("login-error"), "", false);
+    var submit = byId("login-submit");
+    if (submit.getAttribute("aria-disabled") === "true") {
+      return;
+    }
+    clearSession();
+    submit.setAttribute("aria-disabled", "true");
+    setMessage(byId("login-error"), "正在登录…", false);
     api("/api/auth/login", {
       method: "POST",
       authRedirect: false,
@@ -228,7 +245,6 @@
     })
       .then(function (login) {
         saveToken(login.token);
-        state.role = login.role;
         // LoginResponse 不含 tenantId ⇒ 必须再探一次，否则日志视图必然 400。
         return api("/api/ping");
       })
@@ -238,6 +254,9 @@
       })
       .catch(function (error) {
         setMessage(byId("login-error"), describe(error), true);
+      })
+      .finally(function () {
+        submit.setAttribute("aria-disabled", "false");
       });
   }
 
@@ -337,7 +356,7 @@
     if (state.role !== "ADMIN" || submit.disabled) {
       return;
     }
-    var token = state.token;
+    var session = sessionSequence;
     var message = byId("channel-form-message");
     submit.disabled = true;
     setMessage(message, "正在保存…", false);
@@ -354,7 +373,7 @@
       }
     })
       .then(function () {
-        if (state.token === token) {
+        if (session === sessionSequence) {
           byId("channel-form").reset();
           setMessage(message, "", false);
           setCreateFormExpanded("channel-form", false);
@@ -365,12 +384,12 @@
         }
       })
       .catch(function (error) {
-        if (state.token === token) {
+        if (session === sessionSequence) {
           setMessage(message, describe(error), true);
         }
       })
       .finally(function () {
-        if (state.token === token) {
+        if (session === sessionSequence) {
           submit.disabled = false;
         }
       });
@@ -383,16 +402,18 @@
   }
 
   function loadKeys() {
-    var token = state.token;
     setMessage(byId("keys-message"), "", false);
-    api("/api/api-keys")
+    function isCurrent() { return keyListRequest === request; }
+    var request = api("/api/api-keys", { isCurrent: isCurrent });
+    keyListRequest = request;
+    request
       .then(function (list) {
-        if (state.token === token) {
+        if (isCurrent()) {
           renderKeys(list);
         }
       })
       .catch(function (error) {
-        if (state.token === token) {
+        if (isCurrent()) {
           setMessage(byId("keys-message"), describe(error), true);
         }
       });
@@ -414,7 +435,7 @@
     if (state.role !== "ADMIN" || submit.disabled || !byId("plaintext-box").hidden) {
       return;
     }
-    var token = state.token;
+    var session = sessionSequence;
     var message = byId("key-form-message");
     submit.disabled = true;
     setMessage(message, "正在创建…", false);
@@ -425,7 +446,7 @@
       body: { tenantId: state.tenantId, name: byId("key-name").value, validDays: validDays }
     })
       .then(function (created) {
-        if (state.token !== token) {
+        if (session !== sessionSequence) {
           return;
         }
         byId("key-form").reset();
@@ -442,18 +463,30 @@
         loadKeys();
       })
       .catch(function (error) {
-        if (state.token === token) {
+        if (session === sessionSequence) {
           setMessage(message, describe(error), true);
         }
       })
       .finally(function () {
-        if (state.token === token) {
+        if (session === sessionSequence) {
           submit.disabled = false;
         }
       });
   }
 
   // --- 日志视图 -------------------------------------------------------------
+
+  function parseLocalTime(value, fallbackMillis) {
+    var date = new Date(value || fallbackMillis);
+    if (value && !Number.isNaN(date.getTime())) {
+      // 转回墙上时间，拒绝被浏览器悄悄移到下一小时的夏令时空档。
+      var local = new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString();
+      if (!local.startsWith(value)) {
+        return new Date(NaN);
+      }
+    }
+    return date;
+  }
 
   function submitLogs(event) {
     event.preventDefault();
@@ -467,8 +500,8 @@
     var tenantId = byId("logs-tenant-id").value || state.tenantId;
     var now = Date.now();
     // datetime-local 的值按浏览器本地时间解析，API 接收 UTC 绝对时刻。
-    var from = new Date(fromInput.value || now - 24 * 60 * 60 * 1000);
-    var to = new Date(toInput.value || now);
+    var from = parseLocalTime(fromInput.value, now - 24 * 60 * 60 * 1000);
+    var to = parseLocalTime(toInput.value, now);
     setText(body, "");
     fromInput.setAttribute("aria-invalid", "false");
     toInput.setAttribute("aria-invalid", "false");
@@ -547,31 +580,31 @@
 
   function loadUsage() {
     var refresh = byId("usage-refresh");
-    if (refresh.disabled) {
+    if (refresh.getAttribute("aria-disabled") === "true") {
       return;
     }
-    var token = state.token;
+    var session = sessionSequence;
     var message = byId("usage-message");
     setMessage(message, "正在刷新用量…", false);
     setMessage(byId("usage-note"), "", false);
-    refresh.disabled = true;
+    refresh.setAttribute("aria-disabled", "true");
     api("/api/quotas/usage")
       .then(function (view) {
-        if (state.token === token) {
+        if (session === sessionSequence) {
           renderUsage(view);
           setMessage(message, view.bucketMissing ? "" : "用量已更新", false);
         }
       })
       .catch(function (error) {
-        if (state.token === token) {
+        if (session === sessionSequence) {
           setText(byId("usage-body"), "");
           setText(byId("usage-meta"), "");
           setMessage(message, describe(error), true);
         }
       })
       .finally(function () {
-        if (state.token === token) {
-          refresh.disabled = false;
+        if (session === sessionSequence) {
+          refresh.setAttribute("aria-disabled", "false");
         }
       });
   }
@@ -597,9 +630,14 @@
 
     var existing = window.sessionStorage.getItem(TOKEN_KEY);
     if (existing) {
+      var session = sessionSequence;
       state.token = existing;
       api("/api/ping")
-        .then(enterApp)
+        .then(function (ping) {
+          if (session === sessionSequence) {
+            enterApp(ping);
+          }
+        })
         .catch(function () { /* 401 已在 api 里回登录视图，这里不再重复提示 */ });
     } else {
       showLoginView("");
