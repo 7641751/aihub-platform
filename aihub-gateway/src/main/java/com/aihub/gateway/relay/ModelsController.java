@@ -6,6 +6,7 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.List;
 import java.util.Map;
@@ -20,10 +21,8 @@ import java.util.TreeSet;
  * <b>仍然并入遗留默认模型</b>：迁移期（或 admin 不可达走了兜底）时不能突然把这个端点变成空列表
  * —— 那会让所有客户端以为平台没有任何模型。
  *
- * <p>与 {@code ChatRelayController} 一样，这里读的是 {@link ConfigClient#current()} 手上的<b>缓存快照</b>
- * （最差回落到兜底快照）；{@code current()} <b>永不抛异常</b>，因此上游或控制面抖动不会把这个端点
- * 变成故障（它与上游其实完全无关）。但<b>冷缓存（或缓存过期）时它会同步回源一次</b>——最长 5 s，
- * 见 {@link ConfigClient} 登记的阻塞面：说这里「一次都不回源」是不成立的。
+ * <p>配置快照可能从 Redis 或控制面回源。模型列表在弹性线程池读取快照，
+ * 然后以配置快照中的模型与遗留默认模型生成响应。
  * 鉴权由 {@code ApiKeyAuthFilter} 统一加在 {@code /v1/**} 前面，本类不重复实现
  * （限流、计量、路由同理，分别属于 M2/M3）。
  */
@@ -48,14 +47,16 @@ public class ModelsController {
      */
     @GetMapping("/v1/models")
     public Mono<Map<String, Object>> listModels() {
-        Set<String> models = new TreeSet<>(configClient.current().modelNames());
-        String defaultModel = properties.defaultModel();
-        if (StringUtils.hasText(defaultModel)) {
-            models.add(defaultModel);
-        }
-        List<Map<String, Object>> data = models.stream()
-                .map(id -> Map.<String, Object>of("id", id, "object", "model", "owned_by", "aihub"))
-                .toList();
-        return Mono.just(Map.of("object", "list", "data", data));
+        return Mono.fromCallable(() -> {
+            Set<String> models = new TreeSet<>(configClient.current().modelNames());
+            String defaultModel = properties.defaultModel();
+            if (StringUtils.hasText(defaultModel)) {
+                models.add(defaultModel);
+            }
+            List<Map<String, Object>> data = models.stream()
+                    .map(id -> Map.<String, Object>of("id", id, "object", "model", "owned_by", "aihub"))
+                    .toList();
+            return Map.<String, Object>of("object", "list", "data", data);
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 }
