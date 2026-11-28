@@ -5,7 +5,6 @@ import com.aihub.common.config.ConfigSnapshot;
 import com.aihub.common.crypto.AesGcmChannelCipher;
 import com.aihub.common.crypto.ChannelKeyRegistry;
 import com.aihub.common.meter.MeteringEvent;
-import com.aihub.common.quota.QuotaKeys;
 import com.aihub.gateway.config.ConfigClient;
 import com.aihub.gateway.config.LegacyChannel;
 import com.aihub.gateway.meter.MeteringProperties;
@@ -22,8 +21,6 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.data.redis.core.HashOperations;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 import org.springframework.mock.web.server.MockServerWebExchange;
@@ -35,7 +32,6 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.timeout;
@@ -51,9 +47,8 @@ import static org.mockito.Mockito.when;
  *   <li><b>控制器在请求终点校正</b>：提前终止（{@code model_not_found}）与正常收尾都必须调用校正器。</li>
  * </ol>
  *
- * <p><b>网关测试不依赖 Docker</b>（CONVENTIONS §8 item 3）：与 Redis 交互只以 Mockito mock 钉
- * <b>调用约定</b>（键布局 + 增量符号）；「桶里的最终值等于真实用量」由 admin 侧真 Redis 用例负责
- * （同键布局，见 {@code QuotaPreDeductionIntegrationTest} 所在模块）。
+ * <p>Redis 调用约定由 {@link RedisQuotaAdjustmentTest} 覆盖，实际桶更新由 admin 侧的
+ * {@code QuotaPreDeductionIntegrationTest} 验证。
  */
 class QuotaCorrectionTest {
 
@@ -175,25 +170,6 @@ class QuotaCorrectionTest {
 
         assertThat(limiter.adjustments).isEmpty();
         assertThat(meters.find(QuotaCorrector.MISSING_METRIC).counter()).isNull();
-    }
-
-    // --- 差额的符号与大小（mock Redis，不依赖 Docker） ------------------------------------
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void adjustSendsTheSignedDeltaToRedisWithThePinnedKeyLayout() {
-        StringRedisTemplate redis = mock(StringRedisTemplate.class);
-        HashOperations<String, Object, Object> hash = mock(HashOperations.class);
-        when(redis.opsForHash()).thenReturn(hash);
-        RedisQuotaLimiter worker = new RedisQuotaLimiter(redis);
-        String key = QuotaKeys.bucketKey(TENANT, PERIOD);
-
-        worker.adjust(TENANT, PERIOD, 100L, 3L);
-        verify(hash).increment(key, QuotaKeys.FIELD_TOKENS, -97L);   // 真实 < 估算 → 退回
-
-        clearInvocations(hash);
-        worker.adjust(TENANT, PERIOD, 3L, 100L);
-        verify(hash).increment(key, QuotaKeys.FIELD_TOKENS, 97L);    // 真实 > 估算 → 补扣
     }
 
     // --- 控制器请求终点校正 ----------------------------------------------------------------

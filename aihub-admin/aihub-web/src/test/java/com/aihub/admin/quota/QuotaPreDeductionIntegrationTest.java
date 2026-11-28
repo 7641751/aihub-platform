@@ -22,6 +22,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.Callable;
@@ -39,7 +40,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * <b>配额预扣在真 Redis 上的证据</b> + 配额控制面写路径的<b>乐观锁</b>证据（真 MySQL）。
+ * 在 Redis 上验证配额预扣和校正，在 MySQL 上验证配额控制面的乐观锁。
  *
  * <p>容器（{@code redis:7-alpine} / MySQL）由 {@link AbstractIntegrationTest} 单例启动，被测的脚本与调用约定
  * 就是网关将来要跑的那一份 —— {@link QuotaScript#SCRIPT} 是共享模块里的同一个常量。
@@ -73,6 +74,7 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
     /** 与网关调用约定逐字一致：同一个脚本常量、同一个 {@code List.class} 结果类型。 */
     @SuppressWarnings("rawtypes")
     private static final RedisScript<List> SCRIPT = RedisScript.of(QuotaScript.SCRIPT, List.class);
+    private static final RedisScript<Long> ADJUST_SCRIPT = RedisScript.of(QuotaScript.ADJUST_SCRIPT, Long.class);
 
     /** 控制面写路径的操作者（操作用例里的一处合成 actor，不涉及任何真实账号）。 */
     private static final AuditService.Actor ACTOR = new AuditService.Actor("USER", "1");
@@ -131,6 +133,60 @@ class QuotaPreDeductionIntegrationTest extends AbstractIntegrationTest {
 
         assertThat(redis.opsForHash().get(QuotaKeys.bucketKey(tenant, period), QuotaKeys.FIELD_TOKENS))
                 .as("服务端计数器 = 恰好 10 次 × 100").isEqualTo("1000");
+    }
+
+    @Test
+    void adjustmentChangesTokensAndKeepsTheAbsoluteExpiry() {
+        long tenant = 900_119L;
+        String period = QuotaPeriod.of(Instant.now().toEpochMilli());
+        String key = QuotaKeys.bucketKey(tenant, period);
+        RedisScript<Long> expiry = RedisScript.of("return redis.call('PEXPIRETIME', KEYS[1])", Long.class);
+        try {
+            redis.delete(key);
+            assertThat(reserve(tenant, period, 100L, 1_000L).allowed()).isTrue();
+            Long before = redis.execute(expiry, List.of(key));
+            assertThat(before).isPositive();
+
+            assertThat(executeAdjustment(tenant, period, -65L)).isEqualTo(1L);
+            assertThat(redis.opsForHash().get(key, QuotaKeys.FIELD_TOKENS)).isEqualTo("35");
+            assertThat(executeAdjustment(tenant, period, 15L)).isEqualTo(1L);
+            assertThat(redis.opsForHash().get(key, QuotaKeys.FIELD_TOKENS)).isEqualTo("50");
+            assertThat(redis.opsForHash().get(key, QuotaKeys.FIELD_REQUESTS)).isEqualTo("1");
+            assertThat(redis.execute(expiry, List.of(key))).isEqualTo(before);
+        } finally {
+            redis.delete(key);
+        }
+    }
+
+    @Test
+    void adjustmentLeavesExpiredAndIncompleteBucketsAlone() {
+        long tenant = 900_120L;
+        String period = QuotaPeriod.of(Instant.now().toEpochMilli());
+        String key = QuotaKeys.bucketKey(tenant, period);
+        try {
+            redis.delete(key);
+            assertThat(reserve(tenant, period, 100L, 1_000L).allowed()).isTrue();
+            assertThat(redis.expireAt(key, Instant.EPOCH)).isTrue();
+            assertThat(executeAdjustment(tenant, period, -65L)).isZero();
+            assertThat(redis.hasKey(key)).isFalse();
+
+            redis.opsForHash().put(key, QuotaKeys.FIELD_TOKENS, "100");
+            assertThat(executeAdjustment(tenant, period, -65L)).isZero();
+            assertThat(redis.opsForHash().entries(key)).containsExactlyEntriesOf(
+                    Map.of(QuotaKeys.FIELD_TOKENS, "100"));
+
+            redis.delete(key);
+            redis.opsForHash().put(key, QuotaKeys.FIELD_REQUESTS, "1");
+            assertThat(executeAdjustment(tenant, period, -65L)).isZero();
+            assertThat(redis.opsForHash().entries(key)).containsExactlyEntriesOf(
+                    Map.of(QuotaKeys.FIELD_REQUESTS, "1"));
+        } finally {
+            redis.delete(key);
+        }
+    }
+
+    private Long executeAdjustment(long tenant, String period, long delta) {
+        return redis.execute(ADJUST_SCRIPT, QuotaScript.keys(tenant, period), QuotaScript.adjustArgs(delta).toArray());
     }
 
     /** D15：{@code 0} 的限额表示<b>不限</b>（M4 上线前所有租户都没有配额行，把 {@code 0} 当零会让全员 429）。 */

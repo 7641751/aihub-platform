@@ -36,6 +36,8 @@ public class RedisQuotaLimiter implements QuotaLimiter {
 
     @SuppressWarnings("rawtypes")
     private static final RedisScript<List> SCRIPT = RedisScript.of(QuotaScript.SCRIPT, List.class);
+    private static final RedisScript<Long> ADJUST_SCRIPT =
+            RedisScript.of(QuotaScript.ADJUST_SCRIPT, Long.class);
 
     private final StringRedisTemplate redis;
 
@@ -62,9 +64,11 @@ public class RedisQuotaLimiter implements QuotaLimiter {
 
     @Override
     public void adjust(long tenantId, String period, long estimatedTokens, long actualTokens) {
-        // 差额：正 = 真实比估算多（补扣），负 = 真实比估算少（退回）。
-        // HINCRBY 单字段原子；这是「预扣 + 校正」两段式收敛到真实用量的那一步。
         long delta = actualTokens - estimatedTokens;
-        redis.opsForHash().increment(QuotaKeys.bucketKey(tenantId, period), QuotaKeys.FIELD_TOKENS, delta);
+        Long applied = redis.execute(ADJUST_SCRIPT, QuotaScript.keys(tenantId, period),
+                QuotaScript.adjustArgs(delta).toArray());
+        if (!Long.valueOf(1L).equals(applied)) {
+            throw new IllegalStateException("配额桶缺失、字段不完整或校正脚本没有返回成功");
+        }
     }
 }

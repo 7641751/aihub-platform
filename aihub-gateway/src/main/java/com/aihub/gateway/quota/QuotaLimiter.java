@@ -38,13 +38,13 @@ public interface QuotaLimiter {
     QuotaDecision reserve(QuotaDescriptor limits, long estimatedTokens);
 
     /**
-     * 拿到真实用量后的实际校正：把「估算 − 真实」的差额补回桶（正 = 补扣、负 = 退回）。
+     * 按原周期校正已用 token。正差额补扣，负差额退回。调用方消费预扣关联后提交一次。
      *
-     * <p><b>非幂等</b>：每个请求只允许调用一次。重复调用会<b>双重扣账</b>（这正是
-     * {@link QuotaReservationRegistry} 消费即移除的原因）。
-     *
-     * <p>校正发生在<b>响应回写之后</b>，因此它的失败绝不允许影响客户端：调用方捕获异常、只记日志
-     * 与计数（02:00 的对账是兜底）。
+     * @param tenantId 原预扣的租户
+     * @param period 原预扣的 UTC 周期
+     * @param estimatedTokens 原预扣量
+     * @param actualTokens 计量事件中的总量
+     * @throws IllegalStateException 配额桶缺失、字段不完整或未收到成功确认
      */
     void adjust(long tenantId, String period, long estimatedTokens, long actualTokens);
 }

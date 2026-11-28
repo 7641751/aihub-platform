@@ -3,7 +3,7 @@ package com.aihub.common.quota;
 import java.util.List;
 
 /**
- * 配额预扣的 <b>Lua 脚本 + 键布局 + ARGV 顺序 + RETURN 语义</b>，放在共享模块里 —— 与
+ * 配额预扣与校正的 <b>Lua 脚本 + 键布局 + ARGV 顺序 + RETURN 语义</b>，放在共享模块里 —— 与
  * {@link com.aihub.common.ratelimit.RateLimitScript} 完全同一纪律：
  * <ol>
  *   <li>它是<b>跨模块契约</b>：gateway 跑这段脚本，而 admin 侧的集成测试（需要 Docker，因此不能放在 gateway
@@ -18,7 +18,7 @@ import java.util.List;
  * 「50 个任务 × 16 线程、预算 1000、每次估 100、恰好放行 10 次」在真 Redis 上证明这一点。
  *
  * <p><b>配额是周期预算，不是速率</b>：所以脚本里<b>没有</b>令牌桶那样的「按时间补充」逻辑 —— 已用量只在
- * 周期内单调累加，整个桶在「下个周期开始 + 1 天」后由 {@code PEXPIRE} 自然回收（决策 D13）。
+ * 预扣时累加并按真实用量校正，整个桶在「下个周期开始 + 1 天」后由 {@code PEXPIRE} 自然回收（决策 D13）。
  *
  * <p><b>{@code 0} 的限额表示不限</b>（决策 D15，见 {@link #SCRIPT} 的注释）：两个维度都非 0 才逐维判定。
  */
@@ -79,6 +79,16 @@ public final class QuotaScript {
             return {1, remainingTokens, remainingRequests}
             """;
 
+    /** 原子校正现有桶。返回 1 表示已校正，0 表示桶缺失或字段不完整。 */
+    public static final String ADJUST_SCRIPT = """
+            if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0
+                or redis.call('HEXISTS', KEYS[1], ARGV[2]) == 0 then
+              return 0
+            end
+            redis.call('HINCRBY', KEYS[1], ARGV[1], ARGV[3])
+            return 1
+            """;
+
     private QuotaScript() {
     }
 
@@ -112,6 +122,11 @@ public final class QuotaScript {
     public static List<String> args(long estimatedTokens, long tokenLimit, long requestLimit, long ttlMillis) {
         return List.of(String.valueOf(estimatedTokens), String.valueOf(tokenLimit),
                 String.valueOf(requestLimit), String.valueOf(ttlMillis));
+    }
+
+    /** 校正脚本的 ARGV，依次为用量字段、请求数字段和有符号差额。 */
+    public static List<String> adjustArgs(long delta) {
+        return List.of(QuotaKeys.FIELD_TOKENS, QuotaKeys.FIELD_REQUESTS, Long.toString(delta));
     }
 
     /**
