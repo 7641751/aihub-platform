@@ -278,9 +278,14 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
    （`QuotaScript`：一次往返内 `HMGET` → 判定 → `HSET` 写回 → `PEXPIRE`）。余额不足 ⇒ 数据面
    **429 `insufficient_quota`**（见 §4 的表；`code` 与 `type` **同为** `insufficient_quota`，与限流的
    `type=rate_limit_error` 不同）。**估算值只是估算**，所以预扣量与真实用量必然有偏差，靠第 2 段校正。
-2. **校正（数据面，gateway `QuotaCorrector`）**：拿到上游真实 `usage` 后把差额**还回去**。
-   ⚠️ **`adjust` 是非幂等的**：重复调用会重复加减 —— 它只能靠「一次请求一次校正」与下面第 3 段的对账兜底，
-   **不要**把它当成可重放的补偿事务。
+2. **校正（数据面，gateway `QuotaCorrector`）**。消费原预扣关联后，将校正提交到每个网关实例的专用线程池。
+   初始容量为 4 个工作线程和 256 条等待任务。Lua 在确认原周期桶的 `tok` 和 `req` 都存在后，
+   只把真实用量减去预扣量的差额加到 `tok`，沿用该桶的绝对到期时间。
+
+   后续预扣可能暂时读取校正前的用量。执行器拒绝计入 `aihub.quota.correction_rejected`，
+   调度与 Redis 写入失败均计入 `aihub.quota.correction_failed`。拒绝会保留该次预扣值，
+   写入结果未知时按对账审计核实。差额为非幂等操作，应用每个请求只提交一次。正常关闭时，网关在
+   停止 Redis 连接前最多等待 3 秒处理已接收的校正。退出时尚未执行的校正会留在预扣状态，由每日对账报告差异。
 3. **对账（控制面，admin 02:00 UTC `QuotaReconciliationJob`）**：按 `request_log` **幂等重算** `billing_daily`，
    并**只报告**偏差（偏差超过 `toleranceRatio` 才计一次 Micrometer 计数 + 一条审计）。
    ⚠️ **对账绝不改账（D12）**：它**不写** `quota.token_used` / `quota.request_used`；偏差如何处置是**人的决定**。

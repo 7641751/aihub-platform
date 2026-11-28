@@ -44,7 +44,7 @@ import static org.mockito.Mockito.when;
  *   <li><b>算术与关联存储</b>（纯单元）：真实用量取自 {@code MeteringEvent.totalTokens()}；estimate
  *       取自 {@link QuotaReservationRegistry}（过滤器写入、这里<b>消费即移除</b>）；缺失条目只计数不崩；
  *       {@code adjust} 每请求<b>恰一次</b>；失败只计数不抛。</li>
- *   <li><b>控制器在请求终点校正</b>：提前终止（{@code model_not_found}）与正常收尾都必须调用校正器。</li>
+ *   <li><b>聊天收尾</b>：未知模型终止和正常响应结束都把计量事件交给校正器一次。</li>
  * </ol>
  *
  * <p>Redis 调用约定由 {@link RedisQuotaAdjustmentTest} 覆盖，实际桶更新由 admin 侧的
@@ -79,7 +79,7 @@ class QuotaCorrectionTest {
         registry = new QuotaReservationRegistry(properties);
         limiter = new RecordingLimiter();
         meters = new SimpleMeterRegistry();
-        corrector = new QuotaCorrector(registry, limiter, properties, meters);
+        corrector = new QuotaCorrector(registry, limiter, properties, meters, Runnable::run);
     }
 
     // --- 算术与关联存储 ----------------------------------------------------------------
@@ -98,10 +98,9 @@ class QuotaCorrectionTest {
     void theActualTokensComeFromTotalTokensNotTheSumOfParts() {
         registry.write("req-1", reservation(false));
 
-        // prompt=4 / completion=5 / total=9：与两分量之和恰好一致，但**取的是 total**。
-        corrector.correct(event("req-1", 4, 5, 9));
+        corrector.correct(event("req-1", 4, 5, 11));
 
-        assertThat(limiter.adjustments.get(0).actual()).isEqualTo(9L);
+        assertThat(limiter.adjustments.get(0).actual()).isEqualTo(11L);
     }
 
     @Test
@@ -160,24 +159,38 @@ class QuotaCorrectionTest {
         assertThat(meters.counter(QuotaCorrector.FAILED_METRIC).count()).isEqualTo(1.0);
     }
 
-    /** 校正器退出时配额关闭：<b>不</b>消费、<b>不</b>计缺失（否则关掉配额会把 MISSING 顶到失真）。 */
+    @Test
+    void aSchedulingFailureConsumesTheReservationAndCountsAsFailed() {
+        QuotaConfigProperties properties = new QuotaConfigProperties(true, 65536, Duration.ofMinutes(2), 1_000);
+        QuotaCorrector unableToSchedule = new QuotaCorrector(registry, limiter, properties, meters, task -> {
+            throw new IllegalStateException("executor unavailable");
+        });
+        registry.write("req-1", reservation(false));
+
+        unableToSchedule.correct(event("req-1", 1, 2, 3));
+
+        assertThat(registry.consume("req-1")).isNull();
+        assertThat(limiter.adjustments).isEmpty();
+        assertThat(meters.counter(QuotaCorrector.FAILED_METRIC).count()).isEqualTo(1.0);
+        assertThat(meters.find(QuotaCorrector.REJECTED_METRIC).counter()).isNull();
+    }
+
     @Test
     void whenQuotaIsDisabledTheCorrectorDoesNothing() {
         QuotaConfigProperties disabled = new QuotaConfigProperties(false, 65536, Duration.ofMinutes(2), 1_000);
-        QuotaCorrector off = new QuotaCorrector(registry, limiter, disabled, meters);
+        QuotaCorrector off = new QuotaCorrector(registry, limiter, disabled, meters, Runnable::run);
+        registry.write("req-1", reservation(false));
 
         off.correct(event("req-1", 1, 2, 3));
 
+        assertThat(registry.consume("req-1")).isEqualTo(reservation(false));
         assertThat(limiter.adjustments).isEmpty();
         assertThat(meters.find(QuotaCorrector.MISSING_METRIC).counter()).isNull();
     }
 
     // --- 控制器请求终点校正 ----------------------------------------------------------------
 
-    /**
-     * <b>提前终止路径</b>：没有候选渠道 → 404 {@code model_not_found}，由 {@code doFinally} 统一收尾。
-     * {@code QuotaFilter} 此时已经预扣，因此这条路径<b>必须</b>校正，否则每个这种请求永久吃掉一份估算配额。
-     */
+    /** 请求因未知模型终止时，把事件交给校正器。 */
     @Test
     void theEarlyTerminationModelNotFoundPathAlsoCorrectsTheReservation() {
         QuotaCorrector recorder = mock(QuotaCorrector.class);

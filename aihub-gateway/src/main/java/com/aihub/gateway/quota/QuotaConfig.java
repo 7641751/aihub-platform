@@ -3,11 +3,18 @@ package com.aihub.gateway.quota;
 import com.aihub.gateway.admin.AdminClient;
 import com.aihub.gateway.config.ConfigClient;
 import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+
+import java.util.concurrent.Executor;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 配额链的装配点（与 {@code RateLimiterConfig} 同一纪律）：<b>没有这个类，整条配额链在生产里就是
@@ -51,11 +58,45 @@ public class QuotaConfig {
         return new QuotaReservationRegistry(properties);
     }
 
-    /** 收尾侧的校正钩子（{@code ChatRelayController} 的终端发布点调用它）。 */
+    /** 配额校正使用单独的工作线程和定长队列。 */
+    @Bean(name = "quotaCorrectionExecutor", defaultCandidate = false)
+    public ThreadPoolTaskExecutor quotaCorrectionExecutor(ConfigurableApplicationContext context) {
+        var executor = new ThreadPoolTaskExecutor() {
+            @Override
+            public void stop(Runnable callback) {
+                if (!context.isClosed()) {
+                    super.stop(callback);
+                    return;
+                }
+                // 执行器的停止阶段在 Web 停止接收请求之后、Lettuce 停止之前。
+                try {
+                    initiateShutdown();
+                    getThreadPoolExecutor().awaitTermination(3, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    try {
+                        shutdown();
+                    } finally {
+                        callback.run();
+                    }
+                }
+            }
+        };
+        executor.setCorePoolSize(4);
+        executor.setMaxPoolSize(4);
+        executor.setQueueCapacity(256);
+        executor.setThreadNamePrefix("quota-correction-");
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        return executor;
+    }
+
+    /** 收尾侧通过专用执行器提交配额校正。 */
     @Bean
     public QuotaCorrector quotaCorrector(QuotaReservationRegistry reservations, QuotaLimiter limiter,
-                                         QuotaConfigProperties properties, MeterRegistry registry) {
-        return new QuotaCorrector(reservations, limiter, properties, registry);
+                                         QuotaConfigProperties properties, MeterRegistry registry,
+                                         @Qualifier("quotaCorrectionExecutor") Executor correctionExecutor) {
+        return new QuotaCorrector(reservations, limiter, properties, registry, correctionExecutor);
     }
 
     /**

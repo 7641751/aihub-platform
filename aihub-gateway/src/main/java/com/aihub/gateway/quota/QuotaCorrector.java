@@ -5,81 +5,81 @@ import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
+
 /**
- * 收尾侧的配额校正钩子：{@code ChatRelayController} 在<b>每个终端发布点</b>、{@code meteringPublisher.publish(event)}
- * <b>之后</b>调用 {@link #correct(MeteringEvent)}。
+ * 消费请求的预扣关联并在后台校正。实际用量取自 {@link MeteringEvent#totalTokens()}，
+ * 租户、周期和估算量取自 {@link QuotaReservationRegistry}。
  *
- * <p><b>为什么用事件而不是「控制器拿到 usage 后校正」</b>：控制器自己<b>看不到</b> {@code usage}
- * —— {@code UsageCapture} 是 {@code RelayMetering} 的内部物，usage 只在 {@code metering.toEvent(signal)}
- * 被物化，而那一句在 {@code doFinally} 里。因此校正点<b>只能</b>是「事件已经组装出来之后」。
- *
- * <p><b>真实用量取自 {@link MeteringEvent#totalTokens()}</b>（实测分量名），不是
- * {@code promptTokens()+completionTokens()} 自己加 —— 上游给什么就用什么，两个口径必须同源。
- *
- * <p><b>estimate 从哪来（13b 裁定 2）</b>：{@link MeteringEvent} 里<b>没有</b>预扣时的估算值，
- * 因此靠 {@link QuotaReservationRegistry} 建立的 {@code requestId → (tenantId, period, estimate)}
- * 关联（过滤器写入、这里<b>消费并移除</b>）。
- *
- * <p><b>三条约束</b>：
- * <ol>
- *   <li><b>不参与响应链路</b>：校正发生在响应回写之后，任何失败只记日志 + 计数（
- *       {@link #FAILED_METRIC}），绝不抛到请求路径上；02:00 的对账是兜底。</li>
- *   <li><b>绝不改写已提交的响应</b>（本类不碰 exchange / response）。</li>
- *   <li><b>{@code adjust} 非幂等 ⇒ 每请求只调一次</b>：条目「消费即移除」保证了这一点；
- *       缺失条目（过期 / 从未写入 / 已被消费）⇒ 只计数（{@link #MISSING_METRIC}）+ 跳过，绝不回调。</li>
- * </ol>
+ * <p>调度失败和 Redis 写入失败计入 {@link #FAILED_METRIC}。应用按请求最多提交一次校正。
  */
 public class QuotaCorrector {
 
     private static final Logger log = LoggerFactory.getLogger(QuotaCorrector.class);
 
-    /** 终端收尾时找不到预扣关联的次数（过期 / 从未写入 / 已被消费）——<b>异常信号</b>，不是正常路径。 */
+    /** 收尾时找不到预扣关联的次数。 */
     public static final String MISSING_METRIC = "aihub.quota.correction_missing";
 
-    /** 校正动作本身失败的次数（Redis 写失败等）。对账是兜底，因此只计数不拒绝。 */
+    /** 调度失败及 Redis 校正失败的总次数。 */
     public static final String FAILED_METRIC = "aihub.quota.correction_failed";
+
+    /** 执行器拒绝接收任务的次数，已计入总失败指标。 */
+    public static final String REJECTED_METRIC = "aihub.quota.correction_rejected";
 
     private final QuotaReservationRegistry reservations;
     private final QuotaLimiter limiter;
     private final QuotaConfigProperties properties;
     private final MeterRegistry registry;
+    private final Executor correctionExecutor;
 
     public QuotaCorrector(QuotaReservationRegistry reservations, QuotaLimiter limiter,
-                          QuotaConfigProperties properties, MeterRegistry registry) {
+                          QuotaConfigProperties properties, MeterRegistry registry,
+                          Executor correctionExecutor) {
         this.reservations = reservations;
         this.limiter = limiter;
         this.properties = properties;
         this.registry = registry;
+        this.correctionExecutor = correctionExecutor;
     }
 
-    /**
-     * 用真实用量校正本次请求的预扣。<b>幂等性由调用方保证</b>（每请求恰一次）；本方法自身
-     * 对重复调用<b>不安全</b>（{@code adjust} 非幂等），但它消费即移除，因此第二次调用只会看到「缺失」。
-     */
+    /** 消费预扣关联并提交一次后台校正。 */
     public void correct(MeteringEvent event) {
         if (!properties.enabled()) {
-            // 配额关闭时过滤器从不写关联条目：若不在此短路，每个请求都会把 MISSING 顶到失真。
             return;
         }
-        QuotaReservationRegistry.QuotaReservation reservation = reservations.consume(event.requestId());
+        String requestId = event.requestId();
+        var reservation = reservations.consume(requestId);
         if (reservation == null) {
             count(MISSING_METRIC);
-            log.debug("配额校正：找不到 requestId={} 的预扣关联（过期 / 从未预扣 / 已被消费），跳过",
-                    event.requestId());
+            log.debug("配额校正缺少预扣关联 requestId={}", requestId);
             return;
         }
         if (reservation.degraded()) {
-            // 本条请求**没有发生预扣**（不限 / Redis 降级 / 形状异常 / 自身故障）：校正会把从未
-            // 压掉的额度补进桶里，因此跳过。条目已被消费掉，重复调用不会二次动作。
             return;
         }
+
+        long actualTokens = event.totalTokens();
         try {
-            limiter.adjust(reservation.tenantId(), reservation.period(),
-                    reservation.estimatedTokens(), event.totalTokens());
+            correctionExecutor.execute(() -> adjust(requestId, reservation, actualTokens));
         } catch (RuntimeException e) {
             count(FAILED_METRIC);
-            log.warn("配额校正失败（响应已回写，只记日志；02:00 的对账是兜底）requestId={}: {}",
-                    event.requestId(), e.toString());
+            if (e instanceof RejectedExecutionException) {
+                count(REJECTED_METRIC);
+            } else {
+                log.warn("配额校正调度失败 requestId={}: {}", requestId, e.toString());
+            }
+        }
+    }
+
+    private void adjust(String requestId, QuotaReservationRegistry.QuotaReservation reservation,
+                        long actualTokens) {
+        try {
+            limiter.adjust(reservation.tenantId(), reservation.period(),
+                    reservation.estimatedTokens(), actualTokens);
+        } catch (RuntimeException e) {
+            count(FAILED_METRIC);
+            log.warn("配额校正写入失败 requestId={}: {}", requestId, e.toString());
         }
     }
 
