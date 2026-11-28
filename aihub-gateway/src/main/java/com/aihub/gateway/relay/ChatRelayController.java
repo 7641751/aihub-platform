@@ -13,7 +13,6 @@ import com.aihub.gateway.meter.RelayRequestBody;
 import com.aihub.gateway.quota.QuotaCorrector;
 import com.aihub.gateway.route.ChannelCircuitBreaker;
 import com.aihub.gateway.route.RouteResolver;
-import com.aihub.gateway.route.RouteSelectionException;
 import com.aihub.gateway.trace.RequestIdFilter;
 import com.aihub.gateway.upstream.UpstreamClientFactory;
 import org.slf4j.Logger;
@@ -32,6 +31,7 @@ import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.SignalType;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.List;
 import java.util.Locale;
@@ -135,15 +135,9 @@ public class ChatRelayController {
     }
 
     /**
-     * <b>终端收尾的唯一出口</b>：先发布计量事件（既有行为一字不变），再用<b>同一个事件</b>里的真实用量
-     * 校正本请求的配额预扣（{@link QuotaCorrector#correct}）。
+     * 请求结束时发布计量，并用同一事件校正配额。
      *
-     * <p><b>两个终端发布点必须都走这里（13b 裁定 1）</b>：本类有两个
-     * {@code meteringPublisher.publish} 终点 —— 「一个候选都没有」的<b>提前终止</b>（404
-     * {@code model_not_found}，在 {@code doFinally} 之前就 return）与正常收尾的 {@code doFinally}
-     * （正常 / 取消 / 异常）。{@code QuotaFilter}（order {@code +175}）<b>在路由之前</b>已经预扣，
-     * 因此只改 {@code doFinally} 会让每个 {@code model_not_found} 请求<b>永久吃掉一份估算配额</b>（静默漏）。
-     * 收尾时的 {@code doFinally}（{@code relay} 内、上游 body 上）只记客户端断连、<b>不发布</b>，故不涉及。
+     * @param event 由完整请求链的终点生成的计量事件
      */
     private void publishAndCorrect(MeteringEvent event) {
         meteringPublisher.publish(event);
@@ -171,22 +165,19 @@ public class ChatRelayController {
         RelayMetering metering = RelayMetering.start(exchange, requestId, prepared.model(),
                 prepared.streaming(), meteringProperties.maxCaptureBytes());
 
-        List<ChannelDescriptor> candidates;
-        try {
-            candidates = candidateList(prepared.model());
-        } catch (RouteSelectionException e) {
-            // 「一个候选都没有」与「候选全都不可用」在这里无法区分（RouteResolver 刻意如此），
-            // 两者对客户端都是同一件事：我们不提供这个模型。响应体必须是 /v1 的 OpenAI 形状
-            // （客户端 SDK 只认 error.message），绝不是 admin 的 {code,message,data} 信封。
-            metering.onUnexpectedError();
-            // 提前终止也必须校正：QuotaFilter 已在路由之前预扣，这条路径不经过 doFinally（裁定 1）。
-            publishAndCorrect(metering.toEvent(SignalType.ON_COMPLETE));
-            log.debug("模型没有可用渠道: {}", e.model());
-            return GatewayErrors.write(response, HttpStatus.NOT_FOUND,
-                    "invalid_request_error", "model_not_found", "不提供该模型: " + e.model());
-        }
-
-        return attempt(candidates, 0, prepared, response, metering)
+        return Mono.fromCallable(() -> candidateList(prepared.model()))
+                // 保留 Callable 的取消检查，避免调度优化在取消后传播迟到的异常。
+                .hide()
+                .subscribeOn(Schedulers.boundedElastic())
+                .flatMap(candidates -> {
+                    if (candidates.isEmpty()) {
+                        metering.onUnexpectedError();
+                        log.debug("模型没有可用渠道: {}", prepared.model());
+                        return GatewayErrors.write(response, HttpStatus.NOT_FOUND,
+                                "invalid_request_error", "model_not_found", "不提供该模型: " + prepared.model());
+                    }
+                    return attempt(candidates, 0, prepared, response, metering);
+                })
                 // 上游失败的分类**按原因链**（G14）：响应头已到之后（状态 200）发生的读超时是
                 // WebClientResponseException 而不是 WebClientRequestException，按类型判会把它
                 // 当成客户端断连（甚至成功）。
@@ -219,16 +210,14 @@ public class ChatRelayController {
                             ex.getClass().getName(), ex.getMessage());
                     return response.setComplete();
                 })
-                // 收尾即计量 + 校正：CANCEL 表示订阅被取消（客户端断连的另一种表现）；此处**不阻塞**。
-                // 先 publish、再 correct（同一个事件里的真实用量），见 publishAndCorrect（裁定 1）。
+                // 候选查询和响应转发共用同一终点。CANCEL 表示订阅被取消。
                 .doFinally(signal -> publishAndCorrect(metering.toEvent(signal)));
     }
 
     /**
      * 候选列表：路由结果经「密钥可服务」过滤 + {@link ChannelDescriptor#usable()} 过滤，并截断到
      * {@link RelayAttempts#MAX_ATTEMPTS}；为空时回落到「遗留单渠道」（<b>只在快照里真的有遗留渠道、
-     * 且交回来的确实就是那个哨兵、且它确实可用时才回落</b>）；再为空 → 抛 {@link RouteSelectionException}
-     * 由调用方翻成 404。
+     * 且交回来的确实就是那个哨兵、且它确实可用时才回落</b>）。空列表由调用方翻成 404。
      *
      * <p>{@code usable()} 那道门不能省（G15）：{@code RouteResolver} 自己也过滤，但中继不该依赖调用方
      * 已经过滤过 —— 遗留兜底这条路径的候选就是在这里造出来的，而把一条 base-url 为空 / 超时非正的
@@ -262,7 +251,7 @@ public class ChatRelayController {
         if (hasLegacy && LegacyChannel.isLegacy(legacy.id()) && legacy.usable()) {
             return List.of(legacy);
         }
-        throw new RouteSelectionException(model);
+        return List.of();
     }
 
     /**
