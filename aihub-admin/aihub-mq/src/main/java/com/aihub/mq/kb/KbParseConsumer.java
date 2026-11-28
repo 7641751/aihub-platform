@@ -43,14 +43,16 @@ public class KbParseConsumer {
     public void onMessage(Message message) {
         String payload = new String(message.getBody(), StandardCharsets.UTF_8);
         long docId;
+        long generation;
         try {
             docId = KbMessageCodec.decodeParse(payload);
+            generation = KbMessageCodec.decodeGeneration(message.getMessageProperties());
         } catch (IllegalArgumentException e) {
             log.error("解析消息载荷无法解码，转死信队列（{}）：{}",
                     KbTopology.DEAD_LETTER_QUEUE, e.getMessage());
             throw e;   // 不许吞：静默 ACK = 永久丢数据
         }
 
-        sink.parse(docId);
+        sink.parse(docId, generation);
     }
 }

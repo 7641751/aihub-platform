@@ -15,14 +15,14 @@ public interface KbEmbedSink {
      * 调 embeddings → <b>按 {@code vector_id} upsert 进 Chroma</b> → 给这些段打 {@code embedded_at} →
      * 若该 doc 的段<b>全部</b>已打满，则条件迁移 {@code EMBEDDING → READY}。
      *
-     * <p><b>幂等 / 抢跑语义</b>：段不存在（已被清理）或文档不在 {@code EMBEDDING}（已是 {@code READY}/{@code FAILED}）
-     * ⇒ 什么都不做直接返回（消息照常 ACK）。同一批重放 ⇒ Chroma 按 id 覆盖、{@code embedded_at} 不重复写 ⇒ 收敛。
+     * <p>仅处理当前代次的 {@code EMBEDDING} 文档。同一批重放时仅处理尚未完成的分段。
      *
      * <p><b>异常一律往外抛</b>（不是 log + return）：静默 ACK 等于永久丢数据。抛出后交给容器的重试策略
      * （3 次指数退避）→ {@code RejectAndDontRequeueRecoverer} → DLQ；<b>终态 {@code FAILED} + 清理</b>由
      * Task 6 的 {@code MessageRecoverer} 写（D7：进 DLQ 与置 FAILED 必须是同一处）。
      *
      * @param batch 一批段的坐标（{@code embed:{docId}:{seqFrom}:{seqTo}}）
+     * @param generation 消息所属的入库代次
      */
-    void embed(KbEmbedBatch batch);
+    void embed(KbEmbedBatch batch, long generation);
 }

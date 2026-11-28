@@ -45,6 +45,8 @@ public final class KbTopology {
 
     /** 线格式的内容类型（与 {@code MeteringTopology} 同款）。 */
     public static final String MESSAGE_CONTENT_TYPE = "text/plain;charset=UTF-8";
+    /** AMQP 整数头；历史消息缺少该头时属于代次 0。 */
+    public static final String GENERATION_HEADER = "x-aihub-kb-generation";
 
     private KbTopology() {
     }

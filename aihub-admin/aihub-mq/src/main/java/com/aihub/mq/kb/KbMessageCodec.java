@@ -1,5 +1,7 @@
 package com.aihub.mq.kb;
 
+import org.springframework.amqp.core.MessageProperties;
+
 /**
  * kb 消息的线格式：<b>文本分隔符、无 JSON</b>（与 {@code MeteringEventCodec} 同风格）。
  *
@@ -34,6 +36,22 @@ public final class KbMessageCodec {
     /** 编码一条嵌入消息：{@code embed:{docId}:{seqFrom}:{seqTo}}。 */
     public static String embed(long docId, int seqFrom, int seqTo) {
         return EMBED_PREFIX + docId + DELIMITER + seqFrom + DELIMITER + seqTo;
+    }
+
+    /** 读取消息代次。未带头的历史消息属于代次 0。 */
+    static long decodeGeneration(MessageProperties properties) {
+        if (!properties.getHeaders().containsKey(KbTopology.GENERATION_HEADER)) {
+            return 0L;
+        }
+        Object header = properties.getHeader(KbTopology.GENERATION_HEADER);
+        if (header instanceof Long || header instanceof Integer
+                || header instanceof Short || header instanceof Byte) {
+            long generation = ((Number) header).longValue();
+            if (generation >= 0) {
+                return generation;
+            }
+        }
+        throw new IllegalArgumentException("非法的消息代次头：" + KbTopology.GENERATION_HEADER);
     }
 
     /**

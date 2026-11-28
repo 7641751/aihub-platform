@@ -41,14 +41,16 @@ public class KbEmbedConsumer {
     public void onMessage(Message message) {
         String payload = new String(message.getBody(), StandardCharsets.UTF_8);
         KbEmbedBatch batch;
+        long generation;
         try {
             batch = KbMessageCodec.decodeEmbed(payload);
+            generation = KbMessageCodec.decodeGeneration(message.getMessageProperties());
         } catch (IllegalArgumentException e) {
             log.error("嵌入消息载荷无法解码，转死信队列（{}）：{}",
                     KbTopology.DEAD_LETTER_QUEUE, e.getMessage());
             throw e;   // 不许吞：静默 ACK = 永久丢数据
         }
 
-        sink.embed(batch);
+        sink.embed(batch, generation);
     }
 }

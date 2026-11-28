@@ -4,7 +4,12 @@ import com.aihub.admin.kb.support.FakeEmbeddingUpstream;
 import com.aihub.admin.kb.support.KbIntegrationTestBase;
 import com.aihub.dao.entity.KbChunkEntity;
 import com.aihub.dao.entity.KbDocumentEntity;
+import com.aihub.mq.kb.KbEmbedConsumer;
+import com.aihub.mq.kb.KbTopology;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -14,6 +19,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.stream.IntStream;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -43,6 +49,9 @@ class KbEmbedIntegrationTest extends KbIntegrationTestBase {
 
     /** 17000 字符 ⇒ 在 size=800 / overlap=100（步长 700）下恰好 25 段（与 Task 4 的算法同一份）。 */
     private static final int CHUNKS = 25;
+
+    @Autowired
+    private KbEmbedConsumer embedConsumer;
 
     @BeforeEach
     @AfterEach
@@ -94,18 +103,30 @@ class KbEmbedIntegrationTest extends KbIntegrationTestBase {
         assertThat(embeddedCountFor(id)).as("重放后仍然全打满").isEqualTo(CHUNKS);
     }
 
-    /**
-     * {@code FAILED} 必须<b>可以重试</b>（实测缺陷：消费端的带条件迁移只认 {@code PENDING/PARSING}，
-     * 于是 {@code FAILED} 行的解析消息被 ack 丢弃 ⇒ 它曾是"只能看、不能重试"的终态）。
-     *
-     * <p>这里的现场等价于"embed 阶段重试耗尽后的行"：行是 {@code FAILED}、带着 {@code error_msg}。
-     * 重放 {@code parse:{id}}（= 重复上传同一份内容时发出的那条消息）之后，流水线必须能从零重跑
-     * 到 {@code READY}，并且把上一次的错误信息清掉。
-     */
     @Test
-    void aFailedDocumentIsReDrivenByAReplayedParseMessage() throws Exception {
+    void aCompletedBatchSkipsTheUpstreamAndFinalizesAnEmbeddingDocument() throws Exception {
         FakeEmbeddingUpstream.respondWithDeterministicVectors(8);
-        long id = uploadId(TENANT, "retry-after-failure.md", markdownOf(17_000, "重试"));
+        long id = uploadId(TENANT, "replay-complete.md", markdownOf(17_000, "已完成"));
+        awaitUntil(Duration.ofSeconds(90), () -> "READY".equals(statusOf(id)), id);
+        int callsBeforeReplay = FakeEmbeddingUpstream.calls();
+        kbDocumentMapper.update(null, new LambdaUpdateWrapper<KbDocumentEntity>()
+                .eq(KbDocumentEntity::getId, id)
+                .set(KbDocumentEntity::getIngestGeneration, 0)
+                .set(KbDocumentEntity::getStatus, "EMBEDDING"));
+
+        embedConsumer.onMessage(new Message(("embed:" + id + ":0:9").getBytes(UTF_8), new MessageProperties()));
+
+        assertThat(FakeEmbeddingUpstream.calls()).isEqualTo(callsBeforeReplay);
+        assertThat(statusOf(id)).isEqualTo("READY");
+        assertThat(vectorStore.countByDocId(id)).isEqualTo(CHUNKS);
+    }
+
+    /** 重传失败文档时，上传事务分配新代次并重新驱动整条流水线。 */
+    @Test
+    void reuploadingAFailedDocumentStartsANewGeneration() throws Exception {
+        FakeEmbeddingUpstream.respondWithDeterministicVectors(8);
+        byte[] content = markdownOf(17_000, "重试");
+        long id = uploadId(TENANT, "retry-after-failure.md", content);
         awaitUntil(Duration.ofSeconds(90), () -> "READY".equals(statusOf(id)), id);
 
         kbDocumentMapper.update(null, new LambdaUpdateWrapper<KbDocumentEntity>()
@@ -114,13 +135,33 @@ class KbEmbedIntegrationTest extends KbIntegrationTestBase {
                 .set(KbDocumentEntity::getErrorMsg, "模拟：embed 阶段重试耗尽"));
         assertThat(statusOf(id)).as("前置：行必须真的处于 FAILED").isEqualTo("FAILED");
 
-        publishParse(id);
+        assertThat(uploadId(TENANT, "retry-after-failure.md", content)).isEqualTo(id);
 
         awaitUntil(Duration.ofSeconds(90), () -> "READY".equals(statusOf(id)), id);
-        assertThat(statusOf(id)).as("FAILED 行必须能被重放的解析消息重新驱动到 READY").isEqualTo("READY");
+        assertThat(kbDocumentMapper.selectById(id).getIngestGeneration()).isEqualTo(2);
         assertThat(chunkRowsFor(id)).as("重跑后分段数必须回到满").isEqualTo(CHUNKS);
         assertThat(kbDocumentMapper.selectById(id).getErrorMsg())
                 .as("重试时上一次的错误信息必须被清掉，否则运维看到的是过期报错").isNull();
+    }
+
+    @Test
+    void aPreviousGenerationBatchCannotEmbedPendingChunksInTheCurrentGeneration() throws Exception {
+        FakeEmbeddingUpstream.respondWithDeterministicVectors(8);
+        long id = uploadId(TENANT, "stale-embed.md", markdownOf(17_000, "旧批次"));
+        awaitUntil(Duration.ofSeconds(90), () -> "READY".equals(statusOf(id)), id);
+        cleanEmbeddedAtForLastBatch(id);
+        kbDocumentMapper.update(null, new LambdaUpdateWrapper<KbDocumentEntity>()
+                .eq(KbDocumentEntity::getId, id).set(KbDocumentEntity::getIngestGeneration, 2));
+        var properties = new MessageProperties();
+        properties.setHeader(KbTopology.GENERATION_HEADER, 1L);
+        int callsBefore = FakeEmbeddingUpstream.calls();
+
+        embedConsumer.onMessage(new Message(("embed:" + id + ":20:24").getBytes(UTF_8), properties));
+
+        assertThat(FakeEmbeddingUpstream.calls()).isEqualTo(callsBefore);
+        assertThat(statusOf(id)).isEqualTo("EMBEDDING");
+        assertThat(embeddedCountFor(id)).isEqualTo(CHUNKS - LAST_BATCH_SIZE);
+        assertThat(vectorStore.countByDocId(id)).isEqualTo(CHUNKS);
     }
 
     @Test

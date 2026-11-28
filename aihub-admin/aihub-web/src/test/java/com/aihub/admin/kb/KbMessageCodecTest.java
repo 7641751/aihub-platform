@@ -2,14 +2,23 @@ package com.aihub.admin.kb;
 
 import com.aihub.mq.kb.KbEmbedBatch;
 import com.aihub.mq.kb.KbMessageCodec;
+import com.aihub.mq.kb.KbMessageRecoverer;
+import com.aihub.mq.kb.KbParseConsumer;
+import com.aihub.mq.kb.KbParseSink;
 import com.aihub.mq.kb.KbTopology;
 import com.aihub.mq.kb.KbTopologyConfig;
 import org.junit.jupiter.api.Test;
+import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.amqp.core.Binding;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.Queue;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
  * M5 Task 3 的<b>零上下文单测</b>：kb 消息的线格式（固定向量）、分批纯函数、拓扑声明（死信）。
@@ -22,6 +31,22 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 因此<b>不占 Spring 上下文预算</b>（套件里 {@code Tomcat started on port} 必须保持 7）。
  */
 class KbMessageCodecTest {
+
+    @Test
+    void malformedGenerationIsRejectedWithoutCallingTerminalCleanup() {
+        var sink = mock(KbParseSink.class);
+        var terminal = mock(KbMessageRecoverer.TerminalFailureHandler.class);
+        var properties = new MessageProperties();
+        properties.setConsumerQueue(KbTopology.PARSE_QUEUE);
+        properties.setHeader("x-aihub-kb-generation", -1L);
+        var message = new Message("parse:7".getBytes(UTF_8), properties);
+
+        assertThatThrownBy(() -> new KbParseConsumer(sink).onMessage(message))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new KbMessageRecoverer(terminal).recover(message, new IllegalStateException()))
+                .isInstanceOf(AmqpRejectAndDontRequeueException.class);
+        verifyNoInteractions(sink, terminal);
+    }
 
     // ---------------------------------------------------------------- 1) 线格式固定向量
 

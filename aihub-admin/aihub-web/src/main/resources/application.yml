@@ -36,6 +36,10 @@ spring:
     username: ${SPRING_RABBITMQ_USERNAME:aihub}
     password: ${SPRING_RABBITMQ_PASSWORD:aihub}
     connection-timeout: 5s
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
     listener:
       simple:
         # 重试 3 次（指数退避）后 reject；配合业务队列的 x-dead-letter-* 进入 DLQ。

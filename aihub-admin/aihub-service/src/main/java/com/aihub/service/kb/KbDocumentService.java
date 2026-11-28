@@ -3,9 +3,15 @@ package com.aihub.service.kb;
 import com.aihub.common.api.ErrorCode;
 import com.aihub.common.exception.BizException;
 import com.aihub.common.kb.KbStatus;
+import com.aihub.dao.entity.KbChunkEntity;
 import com.aihub.dao.entity.KbDocumentEntity;
+import com.aihub.dao.mapper.KbChunkMapper;
 import com.aihub.dao.mapper.KbDocumentMapper;
+import com.aihub.dao.mapper.KbOutboxMapper;
+import com.aihub.mq.kb.KbEmbedBatch;
+import com.aihub.mq.kb.KbMessageCodec;
 import com.aihub.mq.kb.KbMessageRecoverer;
+import com.aihub.mq.kb.KbTopology;
 import com.aihub.service.audit.AuditAction;
 import com.aihub.service.audit.AuditService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -24,22 +30,8 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 文档入库的<b>同步半段</b>（M5 Task 2）：校验 → 边读边算 sha256 + 原子落盘 → 建 {@code kb_document(PENDING)} 行 → 审计。
- *
- * <p><b>异步半段不在本类</b>：本类只在<b>建行之后</b>注册一个 after-commit 钩子，由
- * {@link KbDocumentPublisher} 在<b>事务提交之后</b>把 {@code parse:{docId}} 投到 {@code kb.parse}
- * （Task 3）。发布失败不升级成业务失败（见 {@code KbDocumentPublisher} 的登记）。
- *
- * <p><b>幂等是唯一键给的</b>：{@code uk_kb_document_tenant_sha(tenant_id, sha256)} ⇒ 同租户同内容永远只有一行。
- * 重复上传是<b>用户的正常动作</b>（点了两次、换个文件名再传一次），所以按 M4 Task 12 的定稿处理：
- * {@code INSERT ... ON DUPLICATE KEY UPDATE id = id} + 读回，<b>不抛异常、不 catch {@code DuplicateKeyException}}</b>。
- *
- * <p><b>「中断上传不留脏数据」在这里的实现</b>：先落<b>临时</b>文件、建行、再原子改名。任何一步抛异常 ⇒
- * 事务回滚（行没了）+ 临时文件被丢掉（文件没了）。⇒ 绝不出现"有行没文件"或"有文件没行"的中间态。
- *
- * <p><b>审计</b>：成功路径写一条 {@code KB_DOCUMENT_UPLOAD}（{@code actor_type=USER}），
- * detail 只放<b>非敏感</b>字段（文件名、字节数、摘要、是否重复）—— 绝不记原件内容（D13）。
- * 重复上传<b>也写审计</b>（"有人又传了一次同一个文件"是有运维价值的事实）。
+ * 上传事务提交文档、审计和解析任务；派发器从发件箱投递已提交的任务。
+ * 同一租户的相同内容共用原件和文档行。重传失败文档时，在行锁内启动新一代入库。
  */
 @Service
 public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHandler {
@@ -65,16 +57,18 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
     private final KbDocumentMapper kbDocumentMapper;
     private final KbFileStore fileStore;
     private final AuditService auditService;
-    private final KbDocumentPublisher publisher;
+    private final KbOutboxMapper outboxMapper;
+    private final KbChunkMapper kbChunkMapper;
     private final KbDocumentCleanup cleanup;
 
     public KbDocumentService(KbDocumentMapper kbDocumentMapper, KbFileStore fileStore,
-                             AuditService auditService, KbDocumentPublisher publisher,
-                             KbDocumentCleanup cleanup) {
+                             AuditService auditService, KbOutboxMapper outboxMapper,
+                             KbChunkMapper kbChunkMapper, KbDocumentCleanup cleanup) {
         this.kbDocumentMapper = kbDocumentMapper;
         this.fileStore = fileStore;
         this.auditService = auditService;
-        this.publisher = publisher;
+        this.outboxMapper = outboxMapper;
+        this.kbChunkMapper = kbChunkMapper;
         this.cleanup = cleanup;
     }
 
@@ -108,46 +102,48 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
         String safeName = requireAllowedFilename(filename);
         KbFileStore.StagedFile staged = fileStore.stage(tenantId, in);
         try {
-            KbDocumentEntity existing = find(tenantId, staged.sha256());
-            if (existing != null) {
-                // 已存在同内容的行 ⇒ 幂等返回它。临时文件正常丢掉；**唯一例外**是原件在盘上不见了
-                //（运维误删），这时把它补上 —— 落一份正确的内容比留一个"有行没文件"的破洞便宜得多。
-                if (Files.exists(fileStore.targetFor(tenantId, staged.sha256()))) {
-                    fileStore.discard(staged);
-                } else {
-                    fileStore.promote(staged);
-                }
-                audit(tenantId, actor, existing, true);
-                // 控制器裁决（2026-10-03）：**幂等路径也要发**。原先这里不发，理由是"那一行可能已过了 PENDING，
-                // 重新驱动解析没有意义（运维重发由 DLQ/计数器的出口负责）" —— 那句话**是错的**：
-                // DLQ 只管**消费端**失败，计数器只**观测**发布失败，两者都不会把消息重新推下去。
-                // 于是"发布丢了 ⇒ 该行永远 PENDING"成了**没有任何补救手段**的死状态。
-                // 让重复上传也驱动一次解析，等于给运维一个现成的重试手势。
-                // 代价（如实登记）：对一份**已经 READY** 的文档再传一次会多做一次解析 —— 有界（用户动作驱动），
-                // 且 Task 4/5 的写入按设计是幂等的（重放收敛到同一状态）。
-                // D5 的口径随之更正为「对**数据**无副作用（不新增行/文件），但会**重新触发解析**」。
-                publisher.publishParseAfterCommit(existing.getId());
-                return new UploadResult(existing, true);
+            boolean duplicate = find(tenantId, staged.sha256()) != null;
+            if (!duplicate) {
+                kbDocumentMapper.insertIfAbsent(tenantId, safeName, staged.sizeBytes(), staged.sha256(), KbStatus.PENDING);
             }
-
-            kbDocumentMapper.insertIfAbsent(tenantId, safeName, staged.sizeBytes(), staged.sha256(), KbStatus.PENDING);
-            fileStore.promote(staged);
-            KbDocumentEntity row = find(tenantId, staged.sha256());
+            KbDocumentEntity row = kbDocumentMapper.lockByContent(tenantId, staged.sha256());
             if (row == null) {
-                // 插入成功却读不回来 ⇒ 装配/映射错误，宁可响亮失败也不返回半真结果。
                 throw new IllegalStateException(
-                        "kb_document 插入后读不回：tenantId=" + tenantId + " sha256=" + staged.sha256());
+                        "无法读回上传文档：tenantId=" + tenantId + " sha256=" + staged.sha256());
             }
-            audit(tenantId, actor, row, false);
-            // Task 3：**建行之后**注册 after-commit 发布 —— 事务回滚时钩子不执行，因此"消息发了但行没提交"
-            // 不可能发生。（重复上传那条路径同样会发：两条路径的语义都是"请解析这份文档"。）
-            publisher.publishParseAfterCommit(row.getId());
-            return new UploadResult(row, false);
+            if (Files.exists(fileStore.targetFor(tenantId, staged.sha256()))) {
+                fileStore.discard(staged);
+            } else {
+                fileStore.promote(staged);
+            }
+            if (KbStatus.FAILED.equals(row.getStatus())) {
+                restartIngestion(row);
+            }
+            audit(tenantId, actor, row, duplicate);
+            if (KbStatus.PENDING.equals(row.getStatus()) || KbStatus.PARSING.equals(row.getStatus())) {
+                outboxMapper.enqueue(row.getId(), row.getIngestGeneration(), KbTopology.PARSE_ROUTING_KEY,
+                        KbMessageCodec.parse(row.getId()));
+            }
+            return new UploadResult(row, duplicate);
         } catch (RuntimeException e) {
             // promote 成功后临时文件已不存在，deleteIfExists 是幂等的 —— 这里只处理"还没改名就失败"的情形。
             fileStore.discard(staged);
             throw e;
         }
+    }
+
+    private void restartIngestion(KbDocumentEntity row) {
+        long generation = Math.incrementExact(row.getIngestGeneration());
+        kbDocumentMapper.update(null, new LambdaUpdateWrapper<KbDocumentEntity>()
+                .eq(KbDocumentEntity::getId, row.getId())
+                .set(KbDocumentEntity::getIngestGeneration, generation)
+                .set(KbDocumentEntity::getStatus, KbStatus.PENDING)
+                .set(KbDocumentEntity::getChunkCount, 0)
+                .set(KbDocumentEntity::getErrorMsg, null));
+        row.setIngestGeneration(generation);
+        row.setStatus(KbStatus.PENDING);
+        row.setChunkCount(0);
+        row.setErrorMsg(null);
     }
 
     /**
@@ -194,23 +190,13 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
 
     // ---------------------------------------------------------------- 失败终态（M5 Task 6，D7/D8/D13）
 
-    /**
-     * 消息重试耗尽时先锁定并检查文档状态。缺失或已就绪的文档跳过清理，失败文档仍可重入清理。
-     * {@code KbMessageRecoverer} 随后拒绝消息并交给 DLQ。
-     *
-     * <p>{@code @Transactional}：让"删 {@code kb_chunk}（清理的第二步）+ 置 FAILED + 审计"落在<b>一个</b>事务里。
-     * Chroma 删除和回查期间仍持有文档行锁，同一文档的状态更新等待终态处置完成。
-     *
-     * @param docId {@code kb_document.id}
-     * @param stage 失败阶段（{@code "parse"} / {@code "embed"}），进 {@code error_msg} 便于定位是哪一段
-     * @param cause 重试耗尽时的最后一个异常（据此派生失败原因）
-     */
+    /** 只有当前代次仍待处理的工作可以进入终态清理。恢复器随后独立拒绝消息进入 DLQ。 */
     @Override
     @Transactional
-    public void onTerminalFailure(long docId, String stage, Throwable cause) {
-        String status = kbDocumentMapper.lockStatus(docId);
-        if (status == null || KbStatus.READY.equals(status)) {
-            log.info("跳过文档终态清理 docId={} status={}", docId, status);
+    public void onTerminalFailure(long docId, long generation, String stage, KbEmbedBatch batch, Throwable cause) {
+        KbDocumentEntity doc = kbDocumentMapper.lockDocument(docId);
+        if (doc == null || doc.getIngestGeneration() != generation || !hasOutstandingWork(doc, stage, batch)) {
+            log.info("跳过终态清理 docId={} generation={} stage={}", docId, generation, stage);
             return;
         }
 
@@ -223,6 +209,21 @@ public class KbDocumentService implements KbMessageRecoverer.TerminalFailureHand
         } else {
             log.info("文档 {} 无需再置 FAILED，清理{}", docId, result.clean() ? "干净" : "未完成");
         }
+    }
+
+    private boolean hasOutstandingWork(KbDocumentEntity doc, String stage, KbEmbedBatch batch) {
+        String status = doc.getStatus();
+        if ("parse".equals(stage)) {
+            return KbStatus.PENDING.equals(status) || KbStatus.PARSING.equals(status);
+        }
+        if (!"embed".equals(stage) || batch == null || batch.docId() != doc.getId()
+                || !(KbStatus.EMBEDDING.equals(status) || KbStatus.FAILED.equals(status))) {
+            return false;
+        }
+        return kbChunkMapper.exists(new LambdaQueryWrapper<KbChunkEntity>()
+                .eq(KbChunkEntity::getDocId, doc.getId())
+                .between(KbChunkEntity::getSeq, batch.seqFrom(), batch.seqTo())
+                .isNull(KbChunkEntity::getEmbeddedAt));
     }
 
     /**

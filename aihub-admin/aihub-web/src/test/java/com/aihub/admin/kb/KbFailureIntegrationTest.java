@@ -7,23 +7,30 @@ import com.aihub.dao.entity.AuditLogEntity;
 import com.aihub.dao.entity.KbChunkEntity;
 import com.aihub.dao.entity.KbDocumentEntity;
 import com.aihub.dao.mapper.AuditLogMapper;
-import com.aihub.mq.kb.KbParseSink;
+import com.aihub.dao.mapper.KbOutboxMapper;
+import com.aihub.mq.kb.KbEmbedBatch;
+import com.aihub.mq.kb.KbMessageCodec;
+import com.aihub.mq.kb.KbMessageRecoverer;
 import com.aihub.mq.kb.KbTopology;
 import com.aihub.service.audit.AuditService;
 import com.aihub.service.kb.KbDocumentCleanup;
-import com.aihub.service.kb.KbDocumentPublisher;
 import com.aihub.service.kb.KbDocumentService;
 import com.aihub.service.kb.KbFileStore;
 import com.aihub.service.kb.KbVectorStoreClient;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.core.AmqpAdmin;
+import org.springframework.amqp.AmqpRejectAndDontRequeueException;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.QueueInformation;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.ByteArrayInputStream;
 import java.time.Duration;
@@ -33,6 +40,7 @@ import java.util.Map;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * M5 Task 6 的<b>线上契约</b>：失败路径与死信 —— M5 的官方验收（<b>全成或全清 / 中断上传不留脏数据</b>）。
@@ -84,13 +92,16 @@ class KbFailureIntegrationTest extends KbIntegrationTestBase {
     private KbFileStore fileStore;
 
     @Autowired
-    private KbParseSink parseSink;
+    private KbMessageRecoverer recoverer;
 
     @Autowired
     private AuditService auditService;
 
     @Autowired
-    private KbDocumentPublisher publisher;
+    private KbOutboxMapper outboxMapper;
+
+    @Autowired
+    private TransactionTemplate transactionTemplate;
 
     /** 与生产同一个键；测试<b>只读</b>它（用来手工构造一个"会失败"的向量库客户端）。 */
     @Value("${aihub.kb.chroma.base-url:}")
@@ -161,7 +172,8 @@ class KbFailureIntegrationTest extends KbIntegrationTestBase {
         assertThat(vectors).isPositive();
         assertThat(chunks).isPositive();
 
-        kbDocumentService.onTerminalFailure(id, "embed", new IllegalStateException("late"));
+        kbDocumentService.onTerminalFailure(id, 1, "embed", new KbEmbedBatch(id, 0, 9),
+                new IllegalStateException("late"));
 
         assertThat(statusOf(id)).isEqualTo(KbStatus.READY);
         assertThat(vectorStore.countByDocId(id)).isEqualTo(vectors);
@@ -200,6 +212,9 @@ class KbFailureIntegrationTest extends KbIntegrationTestBase {
         kbDocumentMapper.updateById(backToEmbedding);   // 局部实体 ⇒ 只更新 status（NOT_NULL 策略）
         assertThat(statusOf(id2)).as("前置：必须回到非终态，否则守卫会（正确地）拒绝置 FAILED")
                 .isEqualTo("EMBEDDING");
+        kbChunkMapper.update(null, new LambdaUpdateWrapper<KbChunkEntity>()
+                .eq(KbChunkEntity::getDocId, id2).eq(KbChunkEntity::getSeq, 0)
+                .set(KbChunkEntity::getEmbeddedAt, null));
 
         KbVectorStoreClient faultyVectorStore = new KbVectorStoreClient(chromaBaseUrl, chromaCollection, 30) {
             @Override
@@ -210,9 +225,10 @@ class KbFailureIntegrationTest extends KbIntegrationTestBase {
         KbDocumentCleanup faultyCleanup = new KbDocumentCleanup(faultyVectorStore, kbChunkMapper);
         // 手工装配：用**会失败**的清理替身驱动终态处置，其余依赖用真 bean（真 DB / 真审计）。
         KbDocumentService serviceWithFaultyCleanup =
-                new KbDocumentService(kbDocumentMapper, fileStore, auditService, publisher, faultyCleanup);
-        serviceWithFaultyCleanup.onTerminalFailure(id2, "embed",
-                new IllegalStateException("上游异常：" + "😀".repeat(300)));
+                new KbDocumentService(kbDocumentMapper, fileStore, auditService, outboxMapper, kbChunkMapper, faultyCleanup);
+        KbEmbedBatch batch = new KbEmbedBatch(id2, 0, 9);
+        transactionTemplate.executeWithoutResult(status -> serviceWithFaultyCleanup.onTerminalFailure(id2, 1,
+                "embed", batch, new IllegalStateException("上游异常：" + "😀".repeat(300))));
 
         assertThat(statusOf(id2)).as("失败终态照常置位").isEqualTo("FAILED");
         assertThat(chunkRowsFor(id2)).as("清理未完成时**坐标必须保留**（可重入）").isEqualTo(CHUNKS);
@@ -224,7 +240,7 @@ class KbFailureIntegrationTest extends KbIntegrationTestBase {
         assertThat(reason.length()).isLessThanOrEqualTo(512);
         assertThat(auditRowsFor(id2, "KB_DOCUMENT_FAILED")).as("失败必须留审计").isEqualTo(1);
 
-        kbDocumentService.onTerminalFailure(id2, "embed", new IllegalStateException("重放死信"));
+        kbDocumentService.onTerminalFailure(id2, 1, "embed", batch, new IllegalStateException("重放死信"));
 
         assertThat(statusOf(id2)).isEqualTo(KbStatus.FAILED);
         assertThat(vectorStore.countByDocId(id2)).isZero();
@@ -266,7 +282,8 @@ class KbFailureIntegrationTest extends KbIntegrationTestBase {
         }
         vectorStore.upsert(legacyVectors);
 
-        parseSink.parse(id);
+        assertThat(uploadId(TENANT, "legacy.txt", text.getBytes(UTF_8))).isEqualTo(id);
+        assertThat(kbDocumentMapper.selectById(id).getIngestGeneration()).isEqualTo(1);
 
         awaitUntil(Duration.ofSeconds(20), () -> embeddedCountFor(id) == 1, id);
         assertThat(kbChunkMapper.selectList(new LambdaQueryWrapper<KbChunkEntity>()
@@ -276,6 +293,31 @@ class KbFailureIntegrationTest extends KbIntegrationTestBase {
                 });
         awaitUntil(Duration.ofSeconds(20), () -> KbStatus.READY.equals(statusOf(id)), id);
         assertThat(vectorStore.idsForDoc(id)).containsExactly(id + ":0");
+    }
+
+    @Test
+    void previousGenerationDeadLetterCannotCleanPendingChunksOfTheNewGeneration() throws Exception {
+        FakeEmbeddingUpstream.respondWithDeterministicVectors(8);
+        long id = uploadId(TENANT, "late-generation.md", markdownOf(17_000, "换代"));
+        awaitUntil(Duration.ofSeconds(90), () -> KbStatus.READY.equals(statusOf(id)), id);
+        kbDocumentMapper.update(null, new LambdaUpdateWrapper<KbDocumentEntity>()
+                .eq(KbDocumentEntity::getId, id).set(KbDocumentEntity::getIngestGeneration, 2)
+                .set(KbDocumentEntity::getStatus, KbStatus.EMBEDDING));
+        kbChunkMapper.update(null, new LambdaUpdateWrapper<KbChunkEntity>()
+                .eq(KbChunkEntity::getDocId, id).eq(KbChunkEntity::getSeq, 0)
+                .set(KbChunkEntity::getEmbeddedAt, null));
+        var properties = new MessageProperties();
+        properties.setConsumerQueue(KbTopology.EMBED_QUEUE);
+        properties.setHeader(KbTopology.GENERATION_HEADER, 1L);
+        var message = new Message(KbMessageCodec.embed(id, 0, 9).getBytes(UTF_8), properties);
+
+        assertThatThrownBy(() -> recoverer.recover(message, new IllegalStateException("上一代失败")))
+                .isInstanceOf(AmqpRejectAndDontRequeueException.class);
+
+        assertThat(statusOf(id)).isEqualTo(KbStatus.EMBEDDING);
+        assertThat(chunkRowsFor(id)).isEqualTo(CHUNKS);
+        assertThat(vectorStore.countByDocId(id)).isEqualTo(CHUNKS);
+        assertThat(auditRowsFor(id, "KB_DOCUMENT_FAILED")).isZero();
     }
 
     // ---------------------------------------------------------------- 助手

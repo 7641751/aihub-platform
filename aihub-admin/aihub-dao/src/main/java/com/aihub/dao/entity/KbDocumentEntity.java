@@ -33,6 +33,7 @@ public class KbDocumentEntity {
     private Long sizeBytes;
     private String sha256;
     private String status;
+    private Long ingestGeneration;
     private Integer chunkCount;
     private String errorMsg;
     private LocalDateTime createdAt;
@@ -84,6 +85,14 @@ public class KbDocumentEntity {
 
     public void setStatus(String status) {
         this.status = status;
+    }
+
+    public Long getIngestGeneration() {
+        return ingestGeneration;
+    }
+
+    public void setIngestGeneration(Long ingestGeneration) {
+        this.ingestGeneration = ingestGeneration;
     }
 
     public Integer getChunkCount() {

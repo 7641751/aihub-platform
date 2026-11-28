@@ -201,6 +201,8 @@ class KbParseIntegrationTest extends AbstractIntegrationTest {
                 KbMessageCodec.parse(docId),
                 (MessagePostProcessor) message -> {
                     message.getMessageProperties().setContentType(KbTopology.MESSAGE_CONTENT_TYPE);
+                    message.getMessageProperties().setHeader(KbTopology.GENERATION_HEADER,
+                            kbDocumentMapper.selectById(docId).getIngestGeneration());
                     return message;
                 });
     }

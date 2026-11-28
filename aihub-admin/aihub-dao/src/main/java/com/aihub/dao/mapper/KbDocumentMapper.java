@@ -9,9 +9,12 @@ import org.apache.ibatis.annotations.Select;
 /** 由 {@code MybatisMapperConfig} 的 {@code @MapperScan("com.aihub.dao.mapper")} 扫描。 */
 public interface KbDocumentMapper extends BaseMapper<KbDocumentEntity> {
 
-    /** 在终态处置事务中锁定文档，避免就绪迁移与清理决策交错。 */
-    @Select("SELECT status FROM kb_document WHERE id = #{id} FOR UPDATE")
-    String lockStatus(@Param("id") long docId);
+    /** 解析、嵌入写回、失败清理和上传重试使用同一文档行锁。 */
+    @Select("SELECT * FROM kb_document WHERE id = #{id} FOR UPDATE")
+    KbDocumentEntity lockDocument(@Param("id") long docId);
+
+    @Select("SELECT * FROM kb_document WHERE tenant_id = #{tenantId} AND sha256 = #{sha256} FOR UPDATE")
+    KbDocumentEntity lockByContent(@Param("tenantId") long tenantId, @Param("sha256") String sha256);
 
     /**
      * 幂等「插或忽略」：命中 {@code uk_kb_document_tenant_sha} 时什么都不改，也不抛唯一键异常。
@@ -27,8 +30,8 @@ public interface KbDocumentMapper extends BaseMapper<KbDocumentEntity> {
      * @return 受影响行数；<b>调用方不得依赖它</b>做判据（{@code ON DUPLICATE KEY UPDATE} 在
      *         「命中并更新成同值」与「真插入」下返回值语义随驱动 {@code useAffectedRows} 变化）。
      */
-    @Insert("INSERT INTO kb_document (tenant_id, filename, size_bytes, sha256, status, chunk_count) "
-            + "VALUES (#{tenantId}, #{filename}, #{sizeBytes}, #{sha256}, #{status}, 0) "
+    @Insert("INSERT INTO kb_document (tenant_id, filename, size_bytes, sha256, status, chunk_count, ingest_generation) "
+            + "VALUES (#{tenantId}, #{filename}, #{sizeBytes}, #{sha256}, #{status}, 0, 1) "
             + "ON DUPLICATE KEY UPDATE id = id")
     int insertIfAbsent(@Param("tenantId") long tenantId, @Param("filename") String filename,
                        @Param("sizeBytes") long sizeBytes, @Param("sha256") String sha256,

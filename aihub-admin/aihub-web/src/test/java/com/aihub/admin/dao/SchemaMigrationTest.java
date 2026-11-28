@@ -29,7 +29,7 @@ class SchemaMigrationTest extends AbstractIntegrationTest {
     private ConfigVersionMapper configVersionMapper;
 
     @Test
-    void flywayAppliesExactlyThreeMigrations() {
+    void flywayAppliesExactlyFourMigrations() {
         // M4 决策 1：M4 有意引入第二条迁移（审计表 / request_log 索引 / config_version）。
         // M5 决策 1：M5 有意引入第三条迁移（kb_chunk 逐段进度表）。
         // 护栏要保的是「**没人能悄悄加迁移**」—— 每次新增迁移都必须**显式**改这里，
@@ -38,14 +38,14 @@ class SchemaMigrationTest extends AbstractIntegrationTest {
         List<Map<String, Object>> applied = jdbcTemplate.queryForList(
                 "SELECT version, description FROM flyway_schema_history WHERE success = 1 ORDER BY installed_rank");
 
-        assertThat(applied).hasSize(3);
-        assertThat(applied).extracting(r -> String.valueOf(r.get("version"))).containsExactly("1", "2", "3");
+        assertThat(applied).hasSize(4);
+        assertThat(applied).extracting(r -> String.valueOf(r.get("version"))).containsExactly("1", "2", "3", "4");
         assertThat(applied).extracting(r -> String.valueOf(r.get("description")))
-                .containsExactly("init schema", "m4 console", "kb pipeline");
+                .containsExactly("init schema", "m4 console", "kb pipeline", "kb outbox");
     }
 
     @Test
-    void allThirteenTablesExist() {
+    void allFourteenTablesExist() {
         // 表数量由本用例**显式钉住**：新增表必须同时改这份清单，别指望它自动跟随。
         List<String> tables = jdbcTemplate.queryForList(
                 "select table_name from information_schema.tables "
@@ -58,12 +58,12 @@ class SchemaMigrationTest extends AbstractIntegrationTest {
                 // V2 新增（M4 决策 1）：审计表与水位表。
                 "audit_log", "config_version",
                 // V3 新增（M5 决策 1 / 决策 4）：文档入库流水线的逐段进度表。
-                "kb_chunk");
+                "kb_chunk", "kb_outbox");
     }
 
     @Test
     void kbChunkHasTheCoordinatesWeCleanUpBy() {
-        // 定向断言：只看 kb_chunk 的列与两个键，**不数全库**（表清单由 allThirteenTablesExist 钉住）。
+        // 定向断言：只看 kb_chunk 的列与键，表清单由 allFourteenTablesExist 钉住。
         List<Map<String, Object>> cols = jdbcTemplate.queryForList(
                 "select column_name from information_schema.columns where table_name = 'kb_chunk'");
         assertThat(cols).extracting(r -> String.valueOf(r.get("column_name")))

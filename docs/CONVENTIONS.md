@@ -311,16 +311,18 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 ## 6.8 KB 流水线与跨语言向量契约（2026-10-05，M5）
 
 **流水线（全异步；状态全在 MySQL，向量库只是**可重建的派生数据**，原件才是唯一真相源）**：
-`POST /api/kb/documents` 上传原件 → `kb_document(PENDING)` → **提交后**发 `aihub.kb.parse` → 解析切分写 `kb_chunk`
-→ 发 `aihub.kb.embed`（分批）→ 调 embeddings 上游 → 写 **Chroma** → 逐段打 `embedded_at` → **全部打满 ⇒ `READY`**。
-任一阶段重试耗尽（3 次指数退避）⇒ 自定义 `MessageRecoverer`：**① 清 Chroma → ② 删 `kb_chunk` → ③ 置 `FAILED` + 审计**，
-然后**拒绝**该消息（`AmqpRejectAndDontRequeueException`）⇒ 进 `aihub.kb.dlq`。
-⚠️ 恢复器**必须抛**：正常返回等于容器 **ack** 掉这条消息（既不置 FAILED、也不进 DLQ）。
+上传事务写入文档、审计和解析发件箱任务。解析事务写入分段、`EMBEDDING` 状态和嵌入发件箱任务。
+派发器每轮最多扫描 16 条到期任务，提交 30 秒租约后发送持久消息，收到 ACK 且无退回才按租约令牌删除任务。
+发布失败后按 2、4、8、16、32、60 秒退避，之后每次等待 60 秒。到期租约可由其他实例接手。
+
+嵌入只向上游提交尚未嵌入的分段。写回前锁定文档，复核代次与待写分段，持锁完成 Chroma 写入、标记 `embedded_at` 和 `READY` 判定。
+消费重试耗尽后，恢复器只为当前代次仍待处理的工作清理 Chroma，再删除 `kb_chunk`，迁移 `FAILED` 并写一次审计。恢复器通过 `AmqpRejectAndDontRequeueException` 将消息送入 `aihub.kb.dlq`。
 
 **MQ 命名**（与计量链路 `aihub.metering.*` **逐字同构**，事实源 `KbTopology`）：
 `aihub.kb.exchange` / `aihub.kb.parse` / `aihub.kb.embed` / `aihub.kb.dlx` / `aihub.kb.dlq`；
 线格式是**文本分隔符**（`parse:{docId}`、`embed:{docId}:{seqFrom}:{seqTo}`）、**无 JSON**，内容类型 `text/plain;charset=UTF-8`（发布端显式设置）。
 两个业务队列**都**挂 `x-dead-letter-exchange`。
+`x-aihub-kb-generation` 是非负整数。历史消息缺少该头时按代次 `0` 处理。新文档从代次 `1` 开始，重传 `FAILED` 文档时在行锁内增加代次并重置到 `PENDING`。
 
 **⚠️ 跨语言向量契约**（检索侧是**另一个仓库的 Python**；改它就是**破坏性变更**）：
 
@@ -336,8 +338,7 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 
 **端点**：`POST /api/kb/documents`（multipart：`file` + `tenantId` 文本 part）、`GET /api/kb/documents`（分页）—— 控制面 `/api/**`，鉴权见 §10。
 **幂等**：`uk_kb_chunk_doc_seq(doc_id, seq)` + Chroma `upsert` ⇒ 解析与嵌入都是**至少一次**，重放收敛；
-**重复上传**不新增行/文件（D5），但**会重新触发一次解析** —— 这是"发布丢了 ⇒ 行停在 `PENDING`"的**现成补救手段**
-（`kb.parse` 的发布失败只计数 + WARN，DLQ 只覆盖**消费端**失败）。
+重复上传沿用文档行和原件。发件箱以 `(doc_id, generation, payload)` 去重，保留已领取或正在退避的任务。消费者按代次和阶段丢弃不再适用的消息。
 **配置项**：`aihub.kb.storage.root`、`aihub.kb.chunk.size-chars`/`overlap-chars`、`aihub.kb.embed.batch-size`、
 `aihub.kb.embedding.base-url`/`model`/`timeout-seconds`/`api-key`（**base-url 不许带尾部 `/v1`**：客户端自己拼 `/v1/embeddings`；
 `api-key` 非空才加 `Authorization: Bearer …`，空值 = 一个头都不加）、`aihub.kb.chroma.base-url`/`collection`/`timeout-seconds`
@@ -346,6 +347,50 @@ admin `8081`；gateway `8080`；RabbitMQ `5672`（管理台 `15672`）。数据�
 分段大小与重叠长度均按 Unicode 码点计数。每段最多包含 `size-chars` 个码点，相邻两段恰好重叠 `overlap-chars` 个码点。有可提取文本时，去掉后续段的重叠前缀后拼接，可还原原文。
 
 重试仍有遗留分段的 `FAILED` 文档时，先确认 Chroma 已清除对应向量，再删除旧分段并按当前窗口切分。
+
+### 恢复代次 0 的历史文档
+
+升级时先停止仍忽略代次头的旧版 Admin 消费者。应用 V4 并启动新版 Admin 实例后，按实际文档 ID 分批执行以下 SQL。`@embed_batch` 取部署的正整数 `aihub.kb.embed.batch-size`。可重复补建发件箱任务，派发器会处理提交后的记录。
+
+```sql
+SET @first_id = 1;
+SET @last_id = 1000;
+SET @embed_batch = 10;
+
+START TRANSACTION;
+INSERT INTO kb_outbox (doc_id, generation, routing_key, payload)
+SELECT id, 0, 'aihub.kb.parse', CONCAT('parse:', id)
+FROM kb_document
+WHERE id BETWEEN @first_id AND @last_id AND ingest_generation = 0
+  AND status IN ('PENDING', 'PARSING')
+ON DUPLICATE KEY UPDATE id = kb_outbox.id;
+
+INSERT INTO kb_outbox (doc_id, generation, routing_key, payload)
+SELECT d.id, 0, 'aihub.kb.embed', CONCAT('embed:', d.id, ':',
+       (MIN(c.seq) DIV @embed_batch) * @embed_batch, ':',
+       LEAST(((MIN(c.seq) DIV @embed_batch) + 1) * @embed_batch - 1, d.chunk_count - 1))
+FROM kb_document d JOIN kb_chunk c ON c.doc_id = d.id
+WHERE d.id BETWEEN @first_id AND @last_id AND d.ingest_generation = 0 AND d.status = 'EMBEDDING'
+  AND c.embedded_at IS NULL AND c.seq < d.chunk_count
+GROUP BY d.id, d.chunk_count, (c.seq DIV @embed_batch)
+ON DUPLICATE KEY UPDATE id = kb_outbox.id;
+
+INSERT INTO kb_outbox (doc_id, generation, routing_key, payload)
+SELECT d.id, 0, 'aihub.kb.embed', CONCAT('embed:', d.id, ':0:0')
+FROM kb_document d
+WHERE d.id BETWEEN @first_id AND @last_id AND d.ingest_generation = 0 AND d.status = 'EMBEDDING'
+  AND d.chunk_count > 0
+  AND d.chunk_count = (SELECT COUNT(*) FROM kb_chunk c WHERE c.doc_id = d.id AND c.embedded_at IS NOT NULL)
+  AND NOT EXISTS (SELECT 1 FROM kb_chunk c WHERE c.doc_id = d.id AND c.embedded_at IS NULL)
+ON DUPLICATE KEY UPDATE id = kb_outbox.id;
+COMMIT;
+
+SELECT COUNT(*) AS pending_tasks,
+       TIMESTAMPDIFF(SECOND, MIN(created_at), UTC_TIMESTAMP(3)) AS oldest_task_seconds
+FROM kb_outbox;
+```
+
+观察待派发任务数和最早任务年龄，按文档核对 `READY`、已标记分段数与 Chroma 向量数。分段数与 `chunk_count` 不一致的文档需单独检查。
 
 ## 7. 数据库约定
 

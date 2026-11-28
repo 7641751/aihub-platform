@@ -5,8 +5,15 @@ import com.aihub.dao.entity.KbChunkEntity;
 import com.aihub.dao.entity.KbDocumentEntity;
 import com.aihub.dao.mapper.KbChunkMapper;
 import com.aihub.dao.mapper.KbDocumentMapper;
+import com.aihub.dao.mapper.KbOutboxMapper;
+import com.aihub.mq.kb.KbParseSink;
+import com.aihub.mq.kb.KbTopology;
+import com.aihub.service.audit.AuditService;
 import com.aihub.service.console.ConsoleClaims;
 import com.aihub.service.console.ConsoleTokenService;
+import com.aihub.service.kb.KbDocumentService;
+import com.aihub.service.kb.KbFileStore;
+import com.aihub.service.kb.KbVectorStoreClient;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -14,6 +21,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.amqp.core.AmqpAdmin;
+import org.springframework.amqp.core.BindingBuilder;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.TopicExchange;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.core.io.ByteArrayResource;
@@ -23,32 +36,26 @@ import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
+import org.testcontainers.DockerClientFactory;
 
 import java.time.Duration;
+import java.io.ByteArrayInputStream;
 import java.time.Instant;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
+import static org.awaitility.Awaitility.await;
 
-/**
- * M5 Task 3 的<b>线上契约</b>：上传事务<b>提交后</b>，一条 {@code parse:{docId}} 真的被投出去并被解析。
- *
- * <p><b>真容器 + 真 HTTP + 真令牌 + 真 broker</b>，复用<b>已有</b>的 Spring 上下文（继承
- * {@link AbstractIntegrationTest}）。{@code @TestPropertySource} 那把字面量与 Task 2 的
- * {@code KbUploadIntegrationTest} / {@code ConsoleLoginIntegrationTest} <b>逐字相同</b>、且本类
- * <b>不加</b> {@code @Import} ⇒ 共用同一个上下文（判据：全量套件 {@code Tomcat started on port} 仍是 7）。
- *
- * <p><b>⚠️ 判据自 Task 4 起改为数据库状态（计划 Task 3 javadoc 已登记）</b>：Task 4 的
- * {@code KbParseConsumer} 会在<b>每个</b> Spring 上下文里订阅 {@code kb.parse}，于是"从队列收消息"的断言
- * 会被消费者抢走（实测：这两条原断言在 Task 4 后稳定红 —— {@code Expecting value to be true but was false}
- * 于 {@code awaitParseMessageFor}）。⇒ 改成等<b>数据库状态</b>：{@code kb_document.status} 走到
- * {@code READY} 就等于"消息已发出<b>且</b>被消费<b>且</b>已嵌入"，比"盯着队列"既稳又不与消费者抢。
- */
+/** 发件箱租约、事务回滚和两次队列交接的隔离集成测试。 */
 @TestPropertySource(properties = {
         "aihub.console.secret=console-it-secret-0123456789abcdefghijklmn"
 })
@@ -71,6 +78,33 @@ class KbPublishIntegrationTest extends AbstractIntegrationTest {
     @Autowired
     private ConsoleTokenService consoleTokenService;
 
+    @Autowired
+    private KbOutboxMapper outbox;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private AmqpAdmin amqpAdmin;
+
+    @Autowired
+    private RabbitTemplate rabbitTemplate;
+
+    @Autowired
+    private KbDocumentService documents;
+
+    @Autowired
+    private KbParseSink parseSink;
+
+    @Autowired
+    private KbFileStore fileStore;
+
+    @Autowired
+    private KbVectorStoreClient vectors;
+
+    @Autowired
+    private TransactionTemplate transactions;
+
     @BeforeEach
     @AfterEach
     void cleanFixtures() {
@@ -78,6 +112,10 @@ class KbPublishIntegrationTest extends AbstractIntegrationTest {
                         .eq(KbDocumentEntity::getTenantId, TENANT))
                 .stream().map(KbDocumentEntity::getId).toList();
         if (!docIds.isEmpty()) {
+            for (Long id : docIds) {
+                jdbcTemplate.update("DELETE FROM kb_outbox WHERE doc_id = ?", id);
+                vectors.deleteByDocId(id);
+            }
             kbChunkMapper.delete(new LambdaQueryWrapper<KbChunkEntity>().in(KbChunkEntity::getDocId, docIds));
         }
         kbDocumentMapper.delete(new LambdaQueryWrapper<KbDocumentEntity>()
@@ -100,12 +138,7 @@ class KbPublishIntegrationTest extends AbstractIntegrationTest {
         assertThat(rowsFor(TENANT)).as("上传必须只建一行（定向查）").isEqualTo(1);
     }
 
-    /**
-     * 控制器裁决（2026-10-03）：<b>重复上传也会重新触发解析</b> —— 这是"发布丢了 ⇒ 行停在 PENDING"的
-     * <b>唯一现成补救手段</b>（DLQ 只管<b>消费端</b>失败、计数器只<b>观测</b>，两者都不会把消息重新推下去）。
-     *
-     * <p>代价如实登记：对一份<b>已经 READY</b> 的文档再传一次，会多做一次解析（有界，且 Task 4/5 的写入按设计幂等）。
-     */
+    /** 重传待解析文档可补建解析任务，与文档仍共享同一 ID。 */
     @Test
     void reUploadingTheSameBytesPublishesAgainSoAStuckRowCanBeRetried() throws Exception {
         byte[] content = "# retry-me\nsame bytes\n".getBytes(UTF_8);
@@ -125,7 +158,184 @@ class KbPublishIntegrationTest extends AbstractIntegrationTest {
         assertThat(rowsFor(TENANT)).as("重复上传仍不许新增行").isEqualTo(1);
     }
 
-    // ---------------------------------------------------------------- 助手
+    @Test
+    void expiredLeaseIsRecoveredAndAnUnroutableMessageIsRetriedAfterBindingReturns() {
+        long docId = Long.MAX_VALUE;
+        String routingKey = "kb.outbox.integration." + UUID.randomUUID();
+        String payload = "parse:" + docId;
+        Queue destination = new Queue(routingKey, false);
+        jdbcTemplate.update("""
+                INSERT INTO kb_outbox (doc_id, generation, routing_key, payload, available_at, lease_token)
+                VALUES (?, 4, ?, ?, TIMESTAMPADD(SECOND, 30, UTC_TIMESTAMP(3)), 'abandoned')
+                """, docId, routingKey, payload);
+        try {
+            Long id = jdbcTemplate.queryForObject("SELECT id FROM kb_outbox WHERE doc_id = ?", Long.class, docId);
+            assertThat(outbox.claim(id, "competing")).isZero();
+            assertThat(outbox.complete(id, "competing")).isZero();
+            jdbcTemplate.update("UPDATE kb_outbox SET available_at = UTC_TIMESTAMP(3) WHERE id = ?", id);
+
+            await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+                    assertThat(jdbcTemplate.queryForObject("""
+                                    SELECT COUNT(*) FROM kb_outbox WHERE id = ? AND failures >= 1 AND lease_token IS NULL
+                                    """, Integer.class, id)).isEqualTo(1));
+            assertThat(outbox.complete(id, "abandoned")).isZero();
+
+            amqpAdmin.declareQueue(destination);
+            amqpAdmin.declareBinding(BindingBuilder.bind(destination)
+                    .to(new TopicExchange(KbTopology.EXCHANGE)).with(routingKey));
+            await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
+                    assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM kb_outbox WHERE id = ?",
+                            Integer.class, id)).isZero());
+
+            Message delivered = rabbitTemplate.receive(destination.getName(), 5_000);
+            assertThat(delivered).isNotNull();
+            assertThat(delivered.getBody()).asString(UTF_8).isEqualTo(payload);
+            assertThat(delivered.getMessageProperties().getHeaders()).containsEntry("x-aihub-kb-generation", 4L);
+        } finally {
+            jdbcTemplate.update("DELETE FROM kb_outbox WHERE doc_id = ?", docId);
+            amqpAdmin.deleteQueue(destination.getName());
+        }
+    }
+
+    @Test
+    void onlyTheCurrentLeaseOwnerCanCompleteOrRetryATask() {
+        transactions.executeWithoutResult(transaction -> {
+            long docId = Long.MAX_VALUE - 1;
+            outbox.enqueue(docId, 0, KbTopology.PARSE_ROUTING_KEY, "parse:" + docId);
+            Long id = jdbcTemplate.queryForObject("SELECT id FROM kb_outbox WHERE doc_id = ?", Long.class, docId);
+            assertThat(outbox.claim(id, "first")).isEqualTo(1);
+            assertThat(outbox.claim(id, "second")).isZero();
+            jdbcTemplate.update("UPDATE kb_outbox SET available_at = UTC_TIMESTAMP(3) WHERE id = ?", id);
+            assertThat(outbox.claim(id, "second")).isEqualTo(1);
+            assertThat(outbox.complete(id, "first")).isZero();
+            assertThat(outbox.retry(id, "first")).isZero();
+            assertThat(outbox.complete(id, "second")).isEqualTo(1);
+            transaction.setRollbackOnly();
+        });
+    }
+
+    @Test
+    void uploadRollbackRemovesDocumentAuditAndParseTask() {
+        var docId = new AtomicLong();
+        transactions.executeWithoutResult(transaction -> {
+            var upload = documents.upload(TENANT, "rollback.md",
+                    new ByteArrayInputStream(("upload rollback " + UUID.randomUUID()).getBytes(UTF_8)),
+                    new AuditService.Actor("USER", "1"));
+            docId.set(upload.row().getId());
+            assertThat(upload.row().getIngestGeneration()).isEqualTo(1);
+            assertThat(pendingTasks(docId.get(), KbTopology.PARSE_ROUTING_KEY)).isEqualTo(1);
+            assertThat(uploadAudits(docId.get())).isEqualTo(1);
+            transaction.setRollbackOnly();
+        });
+
+        assertThat(kbDocumentMapper.selectById(docId.get())).isNull();
+        assertThat(uploadAudits(docId.get())).isZero();
+        assertThat(pendingTasks(docId.get(), KbTopology.PARSE_ROUTING_KEY)).isZero();
+    }
+
+    @Test
+    void parseRollbackRemovesChunksAndEmbedTasks() throws Exception {
+        var staged = fileStore.stage(TENANT, new ByteArrayInputStream(largeDocument()));
+        fileStore.promote(staged);
+        var document = new KbDocumentEntity();
+        document.setTenantId(TENANT);
+        document.setFilename("parse-rollback.md");
+        document.setSizeBytes(staged.sizeBytes());
+        document.setSha256(staged.sha256());
+        document.setStatus("PENDING");
+        document.setChunkCount(0);
+        kbDocumentMapper.insert(document);
+        long id = document.getId();
+
+        transactions.executeWithoutResult(transaction -> {
+            parseSink.parse(id, 0);
+            assertThat(kbDocumentMapper.selectById(id).getStatus()).isEqualTo("EMBEDDING");
+            assertThat(countChunks(id, false)).isEqualTo(25);
+            assertThat(pendingTasks(id, KbTopology.EMBED_ROUTING_KEY)).isEqualTo(3);
+            transaction.setRollbackOnly();
+        });
+
+        assertThat(kbDocumentMapper.selectById(id).getStatus()).isEqualTo("PENDING");
+        assertThat(countChunks(id, false)).isZero();
+        assertThat(pendingTasks(id, KbTopology.EMBED_ROUTING_KEY)).isZero();
+    }
+
+    @Test
+    void uploadDuringBrokerPauseRecoversToTwentyFiveVectors() throws Exception {
+        var docker = DockerClientFactory.instance().client();
+        String broker = RABBITMQ.getContainerId();
+        long id;
+        docker.pauseContainerCmd(broker).exec();
+        try {
+            id = uploadId("paused-broker.md", largeDocument());
+            assertThat(kbDocumentMapper.selectById(id).getStatus()).isEqualTo("PENDING");
+            assertThat(pendingTasks(id, KbTopology.PARSE_ROUTING_KEY)).isEqualTo(1);
+            await().atMost(Duration.ofSeconds(20)).untilAsserted(() ->
+                    assertThat(jdbcTemplate.queryForObject(
+                            "SELECT failures FROM kb_outbox WHERE doc_id = ? AND routing_key = ?",
+                            Integer.class, id, KbTopology.PARSE_ROUTING_KEY)).isPositive());
+        } finally {
+            docker.unpauseContainerCmd(broker).exec();
+        }
+
+        assertReadyAndDrained(id);
+    }
+
+    @Test
+    void returningTheEmbedBindingRecoversTheDocumentFromTheOutbox() throws Exception {
+        var binding = BindingBuilder.bind(new Queue(KbTopology.EMBED_QUEUE))
+                .to(new TopicExchange(KbTopology.EXCHANGE)).with(KbTopology.EMBED_ROUTING_KEY);
+        long id;
+        amqpAdmin.removeBinding(binding);
+        try {
+            id = uploadId("unbound-embed.md", largeDocument());
+            awaitStatus(id, "EMBEDDING", Duration.ofSeconds(30));
+            await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+                assertThat(jdbcTemplate.queryForObject("""
+                        SELECT COUNT(*) FROM kb_outbox WHERE doc_id = ? AND routing_key = ? AND failures > 0
+                        """, Long.class, id, KbTopology.EMBED_ROUTING_KEY)).isPositive();
+            });
+            assertThat(pendingTasks(id, KbTopology.EMBED_ROUTING_KEY)).isEqualTo(3);
+            assertThat(jdbcTemplate.queryForObject("""
+                    SELECT TIMESTAMPDIFF(MICROSECOND, MIN(created_at), UTC_TIMESTAMP(3))
+                    FROM kb_outbox WHERE doc_id = ?
+                    """, Long.class, id)).isPositive();
+        } finally {
+            amqpAdmin.declareBinding(binding);
+        }
+
+        assertReadyAndDrained(id);
+    }
+
+    private void assertReadyAndDrained(long id) throws InterruptedException {
+        awaitStatus(id, "READY", Duration.ofSeconds(90));
+        assertThat(countChunks(id, true)).isEqualTo(25);
+        assertThat(vectors.countByDocId(id)).isEqualTo(25);
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM kb_outbox WHERE doc_id = ?",
+                        Long.class, id)).isZero());
+    }
+
+    private long countChunks(long id, boolean embeddedOnly) {
+        return kbChunkMapper.selectCount(new LambdaQueryWrapper<KbChunkEntity>()
+                .eq(KbChunkEntity::getDocId, id).isNotNull(embeddedOnly, KbChunkEntity::getEmbeddedAt));
+    }
+
+    private long pendingTasks(long id, String routingKey) {
+        return jdbcTemplate.queryForObject("SELECT COUNT(*) FROM kb_outbox WHERE doc_id = ? AND routing_key = ?",
+                Long.class, id, routingKey);
+    }
+
+    private long uploadAudits(long id) {
+        return jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM audit_log WHERE action = 'KB_DOCUMENT_UPLOAD'
+                AND target_type = 'KB_DOCUMENT' AND target_id = ?
+                """, Long.class, String.valueOf(id));
+    }
+
+    private static byte[] largeDocument() {
+        return (UUID.randomUUID() + "x".repeat(17_000 - 36)).getBytes(UTF_8);
+    }
 
     private ResponseEntity<String> postMultipart(String path, Long tenantId, String filename, byte[] content) {
         MultiValueMap<String, Object> parts = new LinkedMultiValueMap<>();

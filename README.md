@@ -54,10 +54,12 @@ M0–M6 七个里程碑全部完成并打 tag，控制面配置 → 数据面**�
 
 ### 1.3 知识库（写入侧）
 
-`POST /api/kb/documents`（multipart）→ 算 sha256 + **原子落盘** → `kb_document(PENDING)` → 提交后发 MQ →
-**解析**（`md`/`txt`/`pdf`，PDF 抽文本层）→ **切分**（默认窗口 800、重叠 100，按 Unicode 码点计数）→ 写 `kb_chunk` →
+`POST /api/kb/documents`（multipart）→ 算 sha256 + **原子落盘** → 同事务提交 `kb_document(PENDING)`、上传审计与解析任务 →
+**解析**（`md`/`txt`/`pdf`，PDF 抽文本层）→ **切分**（默认窗口 800、重叠 100，按 Unicode 码点计数）→ 同事务写 `kb_chunk` 和嵌入任务 →
 分批**嵌入**（OpenAI 兼容 `/v1/embeddings`）→ 写 **Chroma** → 全部打满 `embedded_at` ⇒ **`READY`**。
-任一阶段重试耗尽 ⇒ **清 Chroma → 删 `kb_chunk` → `FAILED` + 审计**，消息进 `aihub.kb.dlq`（**全成或全清**）。
+发件箱在 RabbitMQ 确认并完成路由后删除任务，发布失败时自动退避。当前代次仍待处理的任务在消费重试耗尽后进入失败清理，消息进入 `aihub.kb.dlq`。
+
+迁移前已卡住的代次 `0` 文档可按 ID 范围恢复。`PENDING` / `PARSING` 补解析任务，`EMBEDDING` 补尚未完成的嵌入批次，或补一条完成状态检查任务。恢复 SQL 和积压查询见 [项目约定 §6.8](docs/CONVENTIONS.md#恢复代次-0-的历史文档)。
 
 ⚠️ **检索侧不在本仓库**（属另一个 Python 项目）：它直接查 Chroma，契约见 `docs/CONVENTIONS.md` **§6.8**。
 
@@ -118,10 +120,10 @@ M0–M6 七个里程碑全部完成并打 tag，控制面配置 → 数据面**�
 POST /api/kb/documents (multipart: file + tenantId)
    └ KbFileStore.stage()  边读边算 sha256，落同目录临时文件
    └ kb_document(PENDING) + promote() 原子改名 ⇒ {root}/{tenantId}/{sha256}
-   └ after-commit 发 parse:{docId}                     ← 回滚时钩子不执行 ⇒ "消息发了行没提交"不可能
-KbParseService（一个事务）：PENDING|PARSING|FAILED → PARSING ⇒ 抽文本 ⇒ 切分 ⇒ upsert kb_chunk
-   └ chunk_count=N + EMBEDDING ⇒ after-commit 发 ceil(N/batchSize) 条 embed:{docId}:{from}:{to}
-KbEmbedService：调 /v1/embeddings ⇒ upsert 进 Chroma（id="{docId}:{seq}"）⇒ 打 embedded_at
+   └ 同事务写上传审计和 parse:{docId} 发件箱任务
+KbParseService（一个事务）：PENDING|PARSING → PARSING ⇒ 抽文本 ⇒ 切分 ⇒ upsert kb_chunk
+   └ chunk_count=N + EMBEDDING ⇒ 同事务写 ceil(N/batchSize) 条 embed:{docId}:{from}:{to} 发件箱任务
+KbEmbedService：事务外调 /v1/embeddings ⇒ 文档行锁内复核代次和分段 ⇒ 写 Chroma 并标记 embedded_at
    └ 全段打满（从行数算出）⇒ 条件迁移 EMBEDDING → READY
 失败：重试 3 次指数退避耗尽 ⇒ KbDocumentCleanup（① 删 Chroma ② 删 kb_chunk）⇒ FAILED + 审计 ⇒ 消息进 aihub.kb.dlq
 ```
@@ -242,7 +244,7 @@ curl.exe -s -X POST "http://localhost:8000/api/v1/collections/$cid/query" `
 - **跨语言向量契约**（改它就是**破坏性变更**）：collection `kb_chunks`；记录 id **`"{docId}:{seq}"`**（可反推）；
   metadata **必填** `doc_id`(long) / `tenant_id`(long) / `seq`(int)；**文本不进 Chroma**；删除 = `where={"doc_id":N}`。
 - **文件类型**：`md` / `txt` / `pdf`（PDF 抽**文本层**；扫描版 ⇒ `FAILED("无可提取文本")`，**不做 OCR**）；上传上限 **20 MB**。
-- **重传同一份内容 = 现成的重试手势**（`duplicate:true` 不新增行/文件，但会重新触发解析，`FAILED` 行也能被重新驱动）。
+- 重传同一份 `FAILED` 文档时沿用文档 ID 和原件，增加代次并重新入队。
 - ⚠️ **JDK 客户端**打 Chroma 必须钉 `HTTP_1_1`（明文 http 默认先发 h2c 前奏 ⇒ uvicorn 报 422；Python 无此问题）。
 
 ### 4.5 计量与 `request_log`

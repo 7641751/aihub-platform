@@ -15,7 +15,7 @@ import java.nio.charset.StandardCharsets;
  * （值取自 {@code spring.rabbitmq.listener.simple.retry.*}）；重试<b>全部耗尽</b>之后才轮到
  * {@link MessageRecoverer#recover(Message, Throwable)}。因此"进 DLQ"（容器把消息
  * requeue=false 拒绝 ⇒ 经业务队列的 {@code x-dead-letter-exchange} 进 {@code aihub.kb.dlq}）
- * 与"置 {@code FAILED} + 清理 + 审计"<b>必然同时发生</b> —— 这正是 D7 要求的"必须同一处"。
+ * 之前，本恢复器会尝试处置当前代次且仍有未完成工作的文档。
  *
  * <p><b>⚠️ 恢复器必须"抛出"才进得了 DLQ</b>（本任务最关键的一条，被 javap 实测钉死）：
  * Spring AMQP 的语义是 —— {@code recover(...)} <b>正常返回 ⇒ 容器 ack 这条消息</b>（消息就此消失）；
@@ -43,13 +43,15 @@ public class KbMessageRecoverer implements MessageRecoverer {
      * {@link KbParseSink} / {@link KbEmbedSink} 同样的理由：mq 的依赖面看不到 dao/service。
      *
      * @param docId {@code kb_document.id}（从消息载荷解出）
+     * @param generation 消息所属的入库代次
      * @param stage 失败发生在哪个阶段（{@code "parse"} / {@code "embed"}），用于让 {@code error_msg}
      *              能看出是哪一段失败的
+     * @param batch 嵌入批次，解析失败时为 {@code null}
      * @param cause 重试耗尽时的<b>最后一个</b>异常（恢复器按它派生失败原因）
      */
     public interface TerminalFailureHandler {
 
-        void onTerminalFailure(long docId, String stage, Throwable cause);
+        void onTerminalFailure(long docId, long generation, String stage, KbEmbedBatch batch, Throwable cause);
     }
 
     private static final Logger log = LoggerFactory.getLogger(KbMessageRecoverer.class);
@@ -66,18 +68,17 @@ public class KbMessageRecoverer implements MessageRecoverer {
         String queue = message.getMessageProperties() == null ? null : message.getMessageProperties().getConsumerQueue();
         String stage = stageOf(queue);
 
-        Long docId = decodeDocId(queue, payload);
-        if (docId != null) {
+        FailureTarget target = decodeTarget(message, queue, payload);
+        if (target != null) {
             try {
-                handler.onTerminalFailure(docId, stage, cause);
+                handler.onTerminalFailure(target.docId(), target.generation(), stage, target.batch(), cause);
             } catch (RuntimeException e) {
                 // DB 部分允许失败（记日志），但**绝不**因此吞掉下面那条"拒绝"：消息仍必须进 DLQ 等人排查。
-                log.error("死信终态处置失败（仍拒绝并进 DLQ）：docId={} stage={} ⇒ {}: {}",
-                        docId, stage, e.getClass().getSimpleName(), e.getMessage());
+                log.error("死信终态处置失败（仍拒绝并进 DLQ）：docId={} generation={} stage={} ⇒ {}: {}",
+                        target.docId(), target.generation(), stage, e.getClass().getSimpleName(), e.getMessage());
             }
         } else {
-            // 载荷连 docId 都解不出（真正的坏消息）：无处可置 FAILED/清理，但消息照样必须进 DLQ。
-            log.error("死信载荷解不出 docId，跳过置 FAILED/清理（仍拒绝并进 DLQ）：queue={} payload={}",
+            log.error("死信载荷或代次无效，跳过置 FAILED/清理（仍拒绝并进 DLQ）：queue={} payload={}",
                     queue, payload.length() > 128 ? payload.substring(0, 128) + "…" : payload);
         }
 
@@ -97,18 +98,21 @@ public class KbMessageRecoverer implements MessageRecoverer {
         return queue == null ? "unknown" : queue;
     }
 
-    /**
-     * 从载荷里解出 {@code docId}。用 {@code consumerQueue} 决定解码器（两种载荷前缀不同）；
-     * 解不出返回 {@code null}（调用方仍会拒绝进 DLQ，只是没有可标记的 doc）。
-     */
-    private static Long decodeDocId(String queue, String payload) {
+    private static FailureTarget decodeTarget(Message message, String queue, String payload) {
         try {
+            long generation = KbMessageCodec.decodeGeneration(message.getMessageProperties());
             if (KbTopology.EMBED_QUEUE.equals(queue)) {
-                return KbMessageCodec.decodeEmbed(payload).docId();
+                KbEmbedBatch batch = KbMessageCodec.decodeEmbed(payload);
+                return new FailureTarget(batch.docId(), generation, batch);
             }
-            return KbMessageCodec.decodeParse(payload);
-        } catch (RuntimeException e) {
+            if (KbTopology.PARSE_QUEUE.equals(queue)) {
+                return new FailureTarget(KbMessageCodec.decodeParse(payload), generation, null);
+            }
+        } catch (IllegalArgumentException e) {
             return null;
         }
+        return null;
     }
+
+    private record FailureTarget(long docId, long generation, KbEmbedBatch batch) {}
 }

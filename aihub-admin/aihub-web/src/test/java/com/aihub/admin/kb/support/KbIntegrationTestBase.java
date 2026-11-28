@@ -111,18 +111,20 @@ public abstract class KbIntegrationTestBase extends AbstractIntegrationTest {
 
     /** 直接投一条 {@code parse:{docId}}（绕开上传，聚焦本阶段的判据）。 */
     protected void publishParse(long docId) {
-        send(KbTopology.PARSE_ROUTING_KEY, com.aihub.mq.kb.KbMessageCodec.parse(docId));
+        send(docId, KbTopology.PARSE_ROUTING_KEY, com.aihub.mq.kb.KbMessageCodec.parse(docId));
     }
 
     /** 直接投一条 {@code embed:{docId}:{from}:{to}}（重放用例用它）。 */
     protected void publishEmbed(long docId, int seqFrom, int seqTo) {
-        send(KbTopology.EMBED_ROUTING_KEY, com.aihub.mq.kb.KbMessageCodec.embed(docId, seqFrom, seqTo));
+        send(docId, KbTopology.EMBED_ROUTING_KEY, com.aihub.mq.kb.KbMessageCodec.embed(docId, seqFrom, seqTo));
     }
 
-    private void send(String routingKey, String payload) {
+    private void send(long docId, String routingKey, String payload) {
+        long generation = kbDocumentMapper.selectById(docId).getIngestGeneration();
         rabbitTemplate.convertAndSend(KbTopology.EXCHANGE, routingKey, payload,
                 (MessagePostProcessor) message -> {
                     message.getMessageProperties().setContentType(KbTopology.MESSAGE_CONTENT_TYPE);
+                    message.getMessageProperties().setHeader(KbTopology.GENERATION_HEADER, generation);
                     return message;
                 });
     }
